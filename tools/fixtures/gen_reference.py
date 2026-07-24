@@ -41,16 +41,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda", choices=["cpu", "cuda"],
                     help="cuda = the parity REFERENCE (run on NVIDIA); cpu = driver dry-run")
+    ap.add_argument("--only", default="", metavar="NAMES",
+                    help="comma-separated fixture names to (re)generate; default = all. "
+                         "Use this to add new configs without re-touching the committed "
+                         "reference fixtures, e.g. --only tiny_reg_d2,tiny_reg_d6,"
+                         "tiny_reg_mcw10,tiny_reg_gamma1")
     args = ap.parse_args()
 
+    only = {s for s in args.only.split(",") if s}
+    configs = [c for c in CONFIGS if not only or c[0] in only]
+    if only:
+        missing = only - {c[0] for c in CONFIGS}
+        if missing:
+            raise SystemExit(f"--only names not in CONFIGS: {sorted(missing)}")
+
     import extract_trees
-    for name, extra in CONFIGS:
+    for name, extra in configs:
         out = os.path.join(HERE, name if args.device == "cuda" else name + "_cpu")
         cmd = [sys.executable, GEN, "--out", out, "--device", args.device] + extra
         print(f">> {name}  ({args.device})")
         subprocess.run(cmd, check=True)
         extract_trees.dump_trees(out)   # trees/ arrays for cajeta-side comparison
-    print(f"\nDone. {len(CONFIGS)} fixtures under {HERE} (device={args.device}).")
+    print(f"\nDone. {len(configs)} fixtures under {HERE} (device={args.device}).")
     if args.device == "cuda":
         print("These are the REFERENCE. Commit + push them, then ping me to pull.")
 
