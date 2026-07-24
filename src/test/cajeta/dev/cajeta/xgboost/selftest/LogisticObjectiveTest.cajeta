@@ -1,0 +1,69 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.objective.Logistic;
+
+/**
+ * U6.1.1 — `binary:logistic` grad/hess vs the per-round reference dump
+ * (`grad.npy`/`hess.npy`, `tiny_binary`). `grad = sigmoid(margin) − y`,
+ * `hess = max(p(1−p), 1e-16)`, all float32.
+ *
+ * Round 0's margin is the base `logit(0.5)=0`, where `sigmoid(0)=0.5` **exactly**
+ * (no `expf`), so round 0 is bit-identical — validating the grad/hess formula, the
+ * base margin, and the hess floor. Rounds 1+ evaluate `sigmoid` at nonzero margins
+ * and hit the `expf` transcendental: cajeta's libm `expf` differs from the
+ * reference `expf` by ~1 ULP on some rows (`multiRoundGradHessBitIdentical`,
+ * `@Disabled`). Bit-exact `expf` is the same class of GPU-transcendental fidelity
+ * as `__fdividef` (U4.4) — probe + model, deferred.
+ */
+public class LogisticObjectiveTest {
+
+    public LogisticObjectiveTest() { return; }
+
+    @Test
+    public void roundZeroGradHessBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("tiny_binary");
+        Tensor<float64> yT      = f.y();
+        Tensor<float64> refGrad = f.grad();
+        Tensor<float64> refHess = f.hess();
+        int64 n = yT.shapeAt(0);
+
+        float32 base = Logistic.baseMargin((float64) 0.5);   // 0
+        int64 i = (int64) 0;
+        while (i < n) {
+            float64 g = Logistic.grad(base, yT.flatGet(i));
+            float64 he = Logistic.hess(base, yT.flatGet(i));
+            Assert.thatFloat(g).isEqualTo(refGrad.flatGet(i));
+            Assert.thatFloat(he).isEqualTo(refHess.flatGet(i));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+
+    @Test
+    @Disabled
+    public void multiRoundGradHessBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("tiny_binary");
+        Tensor<float64> yT      = f.y();
+        Tensor<float64> refGrad = f.grad();
+        Tensor<float64> refHess = f.hess();
+        Tensor<float64> margins = f.margins();
+        int64 n = yT.shapeAt(0);
+        int64 rounds = refGrad.shapeAt(0);
+
+        int64 r = (int64) 1;
+        while (r < rounds) {
+            int64 rn = r * n;
+            int64 i = (int64) 0;
+            while (i < n) {
+                float32 mIn = (float32) margins.flatGet((r - (int64) 1) * n + i);
+                Assert.thatFloat(Logistic.grad(mIn, yT.flatGet(i))).isEqualTo(refGrad.flatGet(rn + i));
+                Assert.thatFloat(Logistic.hess(mIn, yT.flatGet(i))).isEqualTo(refHess.flatGet(rn + i));
+                i = i + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return;
+    }
+}

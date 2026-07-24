@@ -1,0 +1,58 @@
+package dev.cajeta.xgboost.objective;
+
+/**
+ * `binary:logistic` objective (spec §3.2). All arithmetic is float32 to match
+ * XGBoost's `GradientPair` / `common::Sigmoid` (`bst_float`, `1/(1+expf(-x))`):
+ *
+ *   p    = sigmoid(margin) = 1 / (1 + expf(−margin))
+ *   grad = p − label
+ *   hess = max(p·(1−p), eps),   eps = 1e-16f  (XGBoost's kRtEps for logistic hess)
+ *
+ * The link is the logistic sigmoid, so the base margin is `logit(base_score)` and
+ * the final prediction is `sigmoid(accumulated margin)` (a probability).
+ *
+ * Fidelity note: `expf` is a transcendental; the reference trees were built with
+ * XGBoost's device `expf`. This uses the cajeta `Math.exp` intrinsic (libm on CPU).
+ * If a per-round grad diverges from the dump on a knife-edge, that is the same
+ * class of GPU-transcendental fidelity as `__fdividef` (probe + model per U4.4).
+ */
+public final class Logistic {
+
+    static float32 eps() { return (float32) 0.0000000000000001; }   // 1e-16f
+
+    /** `1 / (1 + expf(−m))`, float32. */
+    public static float32 sigmoid(float32 m) {
+        float32 e = Math.exp(- m);
+        return (float32) 1.0 / ((float32) 1.0 + e);
+    }
+
+    /** First-order gradient for one row: `sigmoid(margin) − label`, as float64. */
+    public static float64 grad(float32 margin, float64 label) {
+        float32 p = Logistic.sigmoid(margin);
+        return (float64) (p - (float32) label);
+    }
+
+    /** Second-order gradient: `max(p·(1−p), eps)`, as float64. */
+    public static float64 hess(float32 margin, float64 label) {
+        float32 p = Logistic.sigmoid(margin);
+        float32 hp = p * ((float32) 1.0 - p);
+        float32 h = hp < Logistic.eps() ? Logistic.eps() : hp;
+        return (float64) h;
+    }
+
+    /** Base margin from `base_score` (probability → logit link). */
+    public static float32 baseMargin(float64 baseScore) {
+        return (float32) Math.log(baseScore / ((float64) 1.0 - baseScore));
+    }
+
+    /** Fill per-row grad/hess for all `n` rows from the current float32 margins. */
+    public static void gradHess(float32[] margin, float64[] label, int64 n,
+                                float64[] grad, float64[] hess) {
+        int64 i = (int64) 0;
+        while (i < n) {
+            grad[i] = Logistic.grad(margin[i], label[i]);
+            hess[i] = Logistic.hess(margin[i], label[i]);
+            i = i + (int64) 1;
+        }
+    }
+}
