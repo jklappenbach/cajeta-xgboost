@@ -1,0 +1,105 @@
+# CI + release for the cajeta-xgboost library (.cja).
+#
+# A pure-Cajeta library (like cajeta-codec): CI installs a published cajeta
+# toolchain, builds the xgboost .cja + the cajeta-unit dependency, runs the
+# suite, and — on a v* tag — publishes the built .cja as a GitHub Release asset
+# and to the signed Olla registry (olla.cajeta.dev).
+#
+# Triggers (workflow is push-to-main; no PR flow):
+#   - push to main         → build + test (no publish)
+#   - push a `v*` tag       → build + test + publish (Release + Olla)
+#   - workflow_dispatch     → dry-run (build+test) or production (also publishes)
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Release mode'
+        required: true
+        type: choice
+        default: 'dry-run'
+        options: [dry-run, production]
+
+permissions:
+  contents: write   # softprops/action-gh-release creates the Release on a tag
+
+env:
+  # A published cajeta toolchain that ships cajeta.nucleo.* (frame/column) — the
+  # library depends on it from the tree-builder units onward. Bump as needed.
+  CAJETA_VERSION: v0.10.0
+
+jobs:
+  build-test:
+    name: build + test (x86_64-linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout cajeta-xgboost
+        uses: actions/checkout@v4
+
+      - name: Checkout cajeta-unit (test framework dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-unit
+          path: cajeta-unit-dep
+
+      - name: Install cajeta toolchain (${{ env.CAJETA_VERSION }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$CAJETA_VERSION" --repo jklappenbach/cajeta \
+            --pattern 'cajeta_*_amd64.deb' --dir /tmp
+          sudo apt-get update
+          sudo apt-get install -y /tmp/cajeta_*_amd64.deb
+          cajeta --version || true
+
+      - name: Run the test suite
+        env:
+          UNIT_REPO: ${{ github.workspace }}/cajeta-unit-dep
+        run: ./run-tests.sh
+
+      - name: Build the release .cja
+        id: build
+        run: |
+          set -euo pipefail
+          VERSION="$(cat VERSION)"
+          out="$(mktemp -d)"
+          cajeta --emit=cja -o "$out/dev.cajeta.xgboost-${VERSION}.cja" \
+            dev.cajeta.xgboost.XGBoost.run src/main/cajeta "$out"
+          mkdir -p dist
+          cp "$out/dev.cajeta.xgboost-${VERSION}.cja" dist/
+          echo "artifact=dist/dev.cajeta.xgboost-${VERSION}.cja" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .cja as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cajeta-xgboost-${{ steps.build.outputs.version }}
+          path: ${{ steps.build.outputs.artifact }}
+
+      # Publish a GitHub Release only on a v* tag push, or a production dispatch.
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'production')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.build.outputs.version) }}
+          name: cajeta-xgboost ${{ steps.build.outputs.version }}
+          generate_release_notes: true
+          files: ${{ steps.build.outputs.artifact }}
+
+      # Signed publish to the Olla registry (olla.cajeta.dev). Requires the
+      # OLLA_* repo/org secrets; see cajeta/docs/olla-ci-publish.md.
+      - name: Publish to Olla
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'production')
+        uses: jklappenbach/cajeta/.github/actions/olla-publish@main
+        with:
+          cja-path: ${{ steps.build.outputs.artifact }}
+          version: ${{ steps.build.outputs.version }}
+          token: ${{ secrets.OLLA_TOKEN }}
+          signing-key-pem: ${{ secrets.OLLA_SIGNING_KEY_PEM }}
+          signing-key-id: ${{ secrets.OLLA_SIGNING_KEY_ID }}
