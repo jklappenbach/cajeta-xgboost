@@ -1,0 +1,66 @@
+package dev.cajeta.xgboost.fastmath;
+
+/**
+ * Bit-exact reproduction of device CUDA's `__fdividef(a, b)` — the fast
+ * approximate division XGBoost's GPU split evaluator uses to score split gains
+ * (`src/tree/split_evaluator.h:126`, `Divide` → `__fdividef`). Accurate division
+ * matches the reference on all but knife-edge near-tied splits (e.g.
+ * `tiny_reg_mcw10` nodes 5/12); those need this exact model.
+ *
+ * On device `__fdividef(a, b) == a * rcp.approx.f32(b)` (the SFU reciprocal
+ * `MUFU.RCP`), verified by `tools/fdividef/probe_rcp.cu`. `MUFU.RCP` has no
+ * closed form — it is a silicon lookup table (±2 ULP vs IEEE, deterministic).
+ * But reciprocal factors exactly by the exponent:
+ *
+ *     rcp(b) = rcp(2^E · m) = ldexp(rcp(m), −E),   m ∈ [1, 2)
+ *
+ * (a power-of-two scaling, exact in float32 — also verified by the probe), so the
+ * whole instruction is captured by a 2^23-entry table over the mantissa m, then
+ * an exponent adjust and one float32 multiply. {@link #rcpMantissa} is that table
+ * — the single point that swaps from the placeholder (accurate reciprocal, for
+ * plumbing tests) to the probed hardware table.
+ */
+public final class FastMath {
+
+    /**
+     * `rcp.approx.f32(m)` for `m = bitsToF32(0x3F800000 | idx)`, i.e. the float32
+     * in `[1, 2)` whose 23-bit mantissa is `idx`. Result is in `(0.5, 1]`.
+     *
+     * PLACEHOLDER: the correctly-rounded reciprocal. This is NOT the SFU value —
+     * it makes the exponent/multiply plumbing testable (via scaling invariance)
+     * before the hardware table exists. Swap the body for `table[idx]` once
+     * `tools/fdividef/rcp_mantissa.npy` is probed on the reference GPU.
+     */
+    public static float32 rcpMantissa(int32 idx) {
+        int32 mbits = ((int32) 0x3F800000) | (idx & (int32) 0x7FFFFF);
+        float32 m = Cajeta.bitsToF32(mbits);
+        return (float32) ((float64) 1.0 / (float64) m);
+    }
+
+    /**
+     * `__fdividef(a, b)` for `b` a positive normal float32 (the split-gain
+     * denominator `H + λ` — always > 0). Falls back to accurate division outside
+     * that domain (never hit on the gain path; kept for safety).
+     */
+    public static float32 fdividef(float32 a, float32 b) {
+        int32 bb = Cajeta.f32ToBits(b);
+        int32 expBiased = (bb >> (int32) 23) & (int32) 0xFF;
+        // Only positive normal b is in-domain (sign bit 0, exp in [1,254]).
+        if (bb < (int32) 0 || expBiased == (int32) 0 || expBiased == (int32) 0xFF) {
+            return (float32) ((float64) a / (float64) b);
+        }
+        int32 e = expBiased - (int32) 127;                 // unbiased exponent of b
+        int32 manIdx = bb & (int32) 0x7FFFFF;              // mantissa index into the table
+
+        float32 rcpM = FastMath.rcpMantissa(manIdx);       // rcp(m), m ∈ [1,2) → (0.5,1]
+        int32 rmb = Cajeta.f32ToBits(rcpM);
+        int32 rmExp = (rmb >> (int32) 23) & (int32) 0xFF;
+        int32 newExp = rmExp - e;                          // ldexp(rcpM, −e): exact exp adjust
+        if (newExp < (int32) 1 || newExp > (int32) 254) {
+            return (float32) ((float64) a / (float64) b);  // out of normal range
+        }
+        int32 rcpBbits = (rmb & (int32) 0x807FFFFF) | (newExp << (int32) 23);
+        float32 rcpB = Cajeta.bitsToF32(rcpBbits);
+        return a * rcpB;                                    // single float32 multiply
+    }
+}

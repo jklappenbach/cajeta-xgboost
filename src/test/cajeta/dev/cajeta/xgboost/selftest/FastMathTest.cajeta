@@ -1,0 +1,47 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.xgboost.fastmath.FastMath;
+
+/**
+ * Plumbing tests for {@link FastMath#fdividef} — the exponent-adjust + multiply
+ * that turns the mantissa reciprocal table into a full `__fdividef`. These hold
+ * **bit-exactly regardless of the table's values** (they exercise the factoring
+ * `rcp(2^E·m) = ldexp(rcp(m), −E)`), so they lock the plumbing down before the
+ * probed hardware table replaces the placeholder reciprocal.
+ */
+public class FastMathTest {
+
+    public FastMathTest() { return; }
+
+    static void invariant(float32 a, float32 b) {
+        // fdividef(a, b·2^k)·2^k == fdividef(a, b), exactly — same mantissa index,
+        // exponent shifted by k, and a power-of-two scale is exact in float32.
+        Assert.thatFloat((float64) (FastMath.fdividef(a, b * (float32) 8.0) * (float32) 8.0))
+              .isEqualTo((float64) FastMath.fdividef(a, b));
+        Assert.thatFloat((float64) (FastMath.fdividef(a, b * (float32) 0.125) * (float32) 0.125))
+              .isEqualTo((float64) FastMath.fdividef(a, b));
+        Assert.thatFloat((float64) (FastMath.fdividef(a, b * (float32) 64.0) * (float32) 64.0))
+              .isEqualTo((float64) FastMath.fdividef(a, b));
+    }
+
+    @Test
+    public void exponentFactoringIsExact() {
+        FastMathTest.invariant((float32) 3.0, (float32) 7.0);
+        FastMathTest.invariant((float32) 5.0, (float32) 1.5);
+        FastMathTest.invariant((float32) 1.0, (float32) 1.0);
+        FastMathTest.invariant((float32) 123.5, (float32) 2.75);
+        FastMathTest.invariant((float32) 0.25, (float32) 40.0);
+    }
+
+    @Test
+    public void reciprocalOfPowerOfTwoDenominatorIsExact() {
+        // rcp(1)=1 (placeholder and hardware agree on m=1), so a/2^k is exact.
+        Assert.thatFloat((float64) FastMath.fdividef((float32) 7.0, (float32) 1.0))
+              .isEqualTo((float64) 7.0);
+        Assert.thatFloat((float64) FastMath.fdividef((float32) 7.0, (float32) 2.0))
+              .isEqualTo((float64) 3.5);
+        Assert.thatFloat((float64) FastMath.fdividef((float32) 3.0, (float32) 16.0))
+              .isEqualTo((float64) 0.1875);
+    }
+}
