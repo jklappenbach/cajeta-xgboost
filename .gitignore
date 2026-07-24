@@ -11,3 +11,4 @@ tmp/
 *.tmp
 
 # Golden fixtures are committed under tools/fixtures/ — do NOT ignore them.
+__pycache__/

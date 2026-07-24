@@ -29,12 +29,15 @@ public class FixtureLoaderTest {
         Assert.thatFloat(h.flatGet(0)).isEqualTo((float64) 1.0);
         Assert.thatFloat(h.flatGet(199)).isEqualTo((float64) 1.0);
 
-        // reg round-0 grad == base_score(0.5) − y, per instance (bit-exact decode).
+        // reg round-0 grad ≈ base_score(0.5) − y, per instance. Grad is stored in
+        // float32 (XGBoost's GradientPair precision), so it agrees with the
+        // float64 relation only to ~float32 epsilon — the exact float32 value is
+        // what makes the tree bit-identical (see OneTreeTest).
         Tensor<float64> y = f.y();                 // [200]
         Assert.thatFloat(g.flatGet(0)).isCloseTo((float64) 0.5 - y.flatGet(0),
-                                                 (float64) 0.0000000001);
+                                                 (float64) 0.000001);
         Assert.thatFloat(g.flatGet(7)).isCloseTo((float64) 0.5 - y.flatGet(7),
-                                                 (float64) 0.0000000001);
+                                                 (float64) 0.000001);
 
         Tensor<int32> bins = f.bins();             // [200, 5]
         Assert.that(bins.shapeAt(0)).isEqualTo((int64) 200);

@@ -54,6 +54,21 @@ public final class SplitFinder {
         return (float32) (((float64) 0.0 - SplitFinder.thresholdL1(gd, alpha)) / (hd + lambda));
     }
 
+    /**
+     * `tree::CalcGain` (`param.h:258`, max_delta_step=0): the node's own gain
+     * `ThresholdL1(G,α)²/(H+λ)`, computed in float64 then narrowed to float32.
+     * The parent gain is subtracted from a split's child-gain sum to form the
+     * final `loss_chg`. Guard: `H < minChildWeight || H ≤ 0 → 0`.
+     */
+    public static float32 calcGain(GradientQuantiser q, int64 gq, int64 hq,
+                                   float64 lambda, float64 alpha, float64 minChildWeight) {
+        float64 gd = q.floatGrad(gq);
+        float64 hd = q.floatHess(hq);
+        if (hd < minChildWeight || hd <= (float64) 0.0) { return (float32) 0.0; }
+        float64 t = SplitFinder.thresholdL1(gd, alpha);
+        return (float32) ((t * t) / (hd + lambda));
+    }
+
     /** `CalcSplitGain` (unconstrained): sum of the two children's gains. */
     static float32 splitGain(GradientQuantiser q,
                              int64 lG, int64 lH, int64 rG, int64 rH,
@@ -146,6 +161,7 @@ public final class SplitFinder {
                     best.rightH = rH;
                     // threshold = cut value of the last bin on the left (global bin featP-1).
                     int64 splitGidx = featP - (int64) 1;
+                    best.splitGidx = splitGidx;
                     if (splitGidx >= b0) {
                         best.fvalue = (float32) cutValues.flatGet(splitGidx);
                     } else {

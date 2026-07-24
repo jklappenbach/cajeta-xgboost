@@ -32,10 +32,21 @@ public final class Histogram {
         this.totalH = totalH;
     }
 
-    /** Build the histogram for the root over all `n` rows. */
+    /** Build the histogram for the root over all `n` rows (ascending 0..n-1). */
     public static #Histogram buildAll(Tensor<int32> bins, Tensor<int64> cutPtrs,
                                       GradientQuantiser q,
                                       float64[] grad, float64[] hess, int64 n) {
+        int64[] rows = heap int64[n];
+        int64 i = (int64) 0;
+        while (i < n) { rows[i] = i; i = i + (int64) 1; }
+        return Histogram.buildRows(bins, cutPtrs, q, grad, hess, rows, n);
+    }
+
+    /** Build the histogram over an explicit row subset `rows[0..nrows)`. */
+    public static #Histogram buildRows(Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                       GradientQuantiser q,
+                                       float64[] grad, float64[] hess,
+                                       int64[] rows, int64 nrows) {
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
         int64 nbins = cutPtrs.flatGet(nf);
         int64[] gg = heap int64[nbins];
@@ -43,8 +54,9 @@ public final class Histogram {
         int64 totG = (int64) 0;
         int64 totH = (int64) 0;
 
-        int64 r = (int64) 0;
-        while (r < n) {
+        int64 k = (int64) 0;
+        while (k < nrows) {
+            int64 r = rows[k];
             int64 qg = q.fixedGrad(grad[r]);
             int64 qh = q.fixedHess(hess[r]);
             totG = totG + qg;
@@ -58,6 +70,42 @@ public final class Histogram {
                     hh[gb] = hh[gb] + qh;
                 }
                 f = f + (int64) 1;
+            }
+            k = k + (int64) 1;
+        }
+        return heap Histogram(gg, hh, nbins, nf, totG, totH);
+    }
+
+    /** Build the histogram over the rows currently assigned to node `nid`
+     *  (i.e. `position[r] == nid`), scanning all `n` rows. */
+    public static #Histogram buildPos(Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                      GradientQuantiser q,
+                                      float64[] grad, float64[] hess,
+                                      int64[] position, int64 nid, int64 n) {
+        int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
+        int64 nbins = cutPtrs.flatGet(nf);
+        int64[] gg = heap int64[nbins];
+        int64[] hh = heap int64[nbins];
+        int64 totG = (int64) 0;
+        int64 totH = (int64) 0;
+
+        int64 r = (int64) 0;
+        while (r < n) {
+            if (position[r] == nid) {
+                int64 qg = q.fixedGrad(grad[r]);
+                int64 qh = q.fixedHess(hess[r]);
+                totG = totG + qg;
+                totH = totH + qh;
+                int64 f = (int64) 0;
+                while (f < nf) {
+                    int32 b = bins.flatGet(r * nf + f);
+                    if (b >= (int32) 0) {
+                        int64 gb = cutPtrs.flatGet(f) + (int64) b;
+                        gg[gb] = gg[gb] + qg;
+                        hh[gb] = hh[gb] + qh;
+                    }
+                    f = f + (int64) 1;
+                }
             }
             r = r + (int64) 1;
         }

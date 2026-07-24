@@ -48,26 +48,34 @@ def build_dataset(rows, features, seed, missing_frac, n_class):
 
 def compute_grad_hess(objective, in_margins, y, n_class):
     """Per-round (grad, hess) reconstructed from the objective + the margin going
-    INTO each round. NOTE: XGBoost carries grad/hess as float32 GradientPair;
-    this reconstruction is float64 and its last-bit agreement with XGBoost's
-    internal pairs is nailed (or captured via a custom objective) in U5. eps
-    values follow XGBoost."""
+    INTO each round. Computed in **float32** to match XGBoost's `GradientPair`
+    (bst_float) arithmetic bit-for-bit: for a single-row leaf a float64-then-cast
+    gradient diverges by 1 ULP from XGBoost's `(f32)margin - (f32)label`, which
+    shifts the leaf weight (verified against the tiny_reg reference tree). The
+    float32 result is stored as float64 (exactly representable); the cajeta
+    quantiser casts back to float32. (Transcendentals in the logistic/softmax
+    paths still depend on the libm `expf` used — nailed for those objectives in
+    U6/U7.) eps values follow XGBoost."""
+    m = in_margins.astype(np.float32)
+    yf = y.astype(np.float32)
+    one = np.float32(1.0)
     if objective == "reg:squarederror":
-        grad = in_margins - y                      # [rounds, n]
-        hess = np.ones_like(in_margins)
+        grad = m - yf                                          # [rounds, n], float32
+        hess = np.ones_like(m, dtype=np.float32)
     elif objective == "binary:logistic":
-        p = 1.0 / (1.0 + np.exp(-in_margins))
-        grad = p - y
-        hess = np.maximum(p * (1.0 - p), 1e-16)
+        p = (one / (one + np.exp(-m))).astype(np.float32)
+        grad = p - yf
+        hess = np.maximum(p * (one - p), np.float32(1e-16))
     elif objective in ("multi:softprob", "multi:softmax"):
-        m = in_margins - in_margins.max(axis=2, keepdims=True)   # [rounds, n, K]
-        e = np.exp(m); p = e / e.sum(axis=2, keepdims=True)
+        mm = m - m.max(axis=2, keepdims=True)                  # [rounds, n, K]
+        e = np.exp(mm).astype(np.float32)
+        p = (e / e.sum(axis=2, keepdims=True)).astype(np.float32)
         onehot = np.zeros_like(p)
         idx = y.astype(np.int64)
         for r in range(p.shape[0]):
             onehot[r, np.arange(p.shape[1]), idx] = 1.0
-        grad = p - onehot
-        hess = np.maximum(2.0 * p * (1.0 - p), 1e-16)
+        grad = p - onehot.astype(np.float32)
+        hess = np.maximum(np.float32(2.0) * p * (one - p), np.float32(1e-16))
     else:
         raise SystemExit(f"grad/hess not implemented for objective {objective}")
     return grad.astype(np.float64), hess.astype(np.float64)

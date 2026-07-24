@@ -12,6 +12,7 @@ package dev.cajeta.xgboost.tree;
 public final class Split {
     public boolean valid;
     public int64 findex;
+    public int64 splitGidx;   // global bin index of the split boundary (last left bin)
     public float32 fvalue;
     public boolean defaultLeft;
     public float32 gain;
@@ -23,6 +24,7 @@ public final class Split {
     public Split() {
         this.valid = false;
         this.findex = (int64) -1;
+        this.splitGidx = (int64) -1;
         this.fvalue = (float32) 0.0;
         this.defaultLeft = true;
         this.gain = (float32) 0.0;

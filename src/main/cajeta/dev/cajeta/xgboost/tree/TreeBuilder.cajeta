@@ -1,0 +1,132 @@
+package dev.cajeta.xgboost.tree;
+
+import cajeta.math.Tensor;
+
+/**
+ * Grows one regression tree over binned data, reproducing XGBoost's GPU `hist`
+ * builder bit-for-bit (spec §4). Nodes are numbered in expansion order and
+ * processed from a FIFO queue: since children are enqueued in split order, FIFO
+ * processing of sequentially-numbered nodes is exactly depthwise, ascending-nid
+ * expansion — matching the reference model's node numbering (`driver.h`
+ * `DepthWise`, `updater_gpu_hist.cu` `ApplySplit`).
+ *
+ * Row membership is tracked with a `position[]` array (`position[r]` = the node
+ * row `r` currently reaches); a node's histogram is built over the rows with
+ * `position[r] == nid`, and a split repartitions those rows to the two children.
+ *
+ * A node splits iff its best split (from {@link SplitFinder}, already gated by
+ * `min_child_weight`) has `loss_chg = childGain − parentGain > kRtEps`, both
+ * children's quantised hessian ≠ 0, `loss_chg ≥ min_split_loss (γ)`, and
+ * `depth < max_depth` (`expand_entry.cuh` `IsValid`). Otherwise it is a leaf.
+ * Present rows go left iff `bin ≤ splitGidx`; missing rows follow the default.
+ *
+ * The grown tree is written into the caller's parallel out-param arrays (each
+ * sized `capacity(maxDepth)`), indexed by node id: `si` split feature, `sc`
+ * threshold / leaf value, `dl` default-left, `lc`/`rc` children (−1 for leaves),
+ * `bw` `CalcWeight` per node, `leaf` leaf flag. Returns the node count.
+ * (Out-params rather than a returned struct: a multi-array object returned
+ * across a call boundary currently miscompiles — its first two array fields
+ * alias. See the U3 plan note.)
+ */
+public final class TreeBuilder {
+
+    static float32 kRtEps() { return (float32) 0.000001; }   // 1e-6f (include/xgboost/base.h)
+
+    /** Backing-array size needed for a tree of the given `maxDepth`. */
+    public static int64 capacity(int64 maxDepth) { return ((int64) 1) << (maxDepth + (int64) 1); }
+
+    public static int64 grow(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                             float64[] grad, float64[] hess, int64 n,
+                             int64 maxDepth, int64 maxLeaves,
+                             float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
+                             float64 eta,
+                             int64[] si, float32[] sc, boolean[] dl,
+                             int64[] lc, int64[] rc, float32[] bw, boolean[] leaf) {
+        GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
+        int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
+
+        int64 cap = TreeBuilder.capacity(maxDepth);
+        int64[] depthOf = heap int64[cap];
+        int64[] queue = heap int64[cap];
+        int64 i = (int64) 0;
+        while (i < cap) { lc[i] = (int64) -1; rc[i] = (int64) -1; si[i] = (int64) -1;
+                          leaf[i] = true; depthOf[i] = (int64) 0; i = i + (int64) 1; }
+
+        // position[r] = the current node id row r reaches (root = 0).
+        int64[] position = heap int64[n];
+        i = (int64) 0;
+        while (i < n) { position[i] = (int64) 0; i = i + (int64) 1; }
+
+        int64 nodeCount = (int64) 1;
+        int64 numLeaves = (int64) 1;
+        int64 head = (int64) 0;
+        int64 tail = (int64) 0;
+        queue[tail] = (int64) 0; tail = tail + (int64) 1;
+
+        while (head < tail) {
+            int64 nid = queue[head]; head = head + (int64) 1;
+            int64 depth = depthOf[nid];
+
+            Histogram hist = Histogram.buildPos(bins, cutPtrs, q, grad, hess, position, nid, n);
+            // Raw node weight (XGBoost's base_weight — no shrinkage).
+            float32 rawW = SplitFinder.leafWeight(q, hist.totalG, hist.totalH, lambda, alpha, minChildWeight);
+
+            Split s = SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
+
+            boolean canSplit = false;
+            if (s.valid) {
+                float32 parentGain = SplitFinder.calcGain(q, hist.totalG, hist.totalH,
+                                                          lambda, alpha, minChildWeight);
+                float32 lossChg = s.gain - parentGain;
+                boolean hessOk = s.leftH != (int64) 0 && s.rightH != (int64) 0;
+                boolean leavesOk = maxLeaves <= (int64) 0 || numLeaves < maxLeaves;
+                canSplit = lossChg > TreeBuilder.kRtEps()
+                        && hessOk
+                        && lossChg >= (float32) gamma
+                        && depth < maxDepth
+                        && leavesOk;
+            }
+
+            if (canSplit) {
+                numLeaves = numLeaves + (int64) 1;
+                int64 li = nodeCount; nodeCount = nodeCount + (int64) 1;
+                int64 ri = nodeCount; nodeCount = nodeCount + (int64) 1;
+
+                leaf[nid] = false;
+                bw[nid] = rawW;              // internal node stores the raw base_weight
+                si[nid] = s.findex;
+                sc[nid] = s.fvalue;
+                dl[nid] = s.defaultLeft;
+                lc[nid] = li;
+                rc[nid] = ri;
+                depthOf[li] = depth + (int64) 1;
+                depthOf[ri] = depth + (int64) 1;
+
+                // Repartition this node's rows: present → left iff bin ≤ splitGidx.
+                int64 b0 = cutPtrs.flatGet(s.findex);
+                int64 localSplit = s.splitGidx - b0;
+                int64 r = (int64) 0;
+                while (r < n) {
+                    if (position[r] == nid) {
+                        int32 b = bins.flatGet(r * nf + s.findex);
+                        boolean goLeft;
+                        if (b < (int32) 0) { goLeft = s.defaultLeft; }
+                        else { goLeft = (int64) b <= localSplit; }
+                        position[r] = goLeft ? li : ri;
+                    }
+                    r = r + (int64) 1;
+                }
+
+                queue[tail] = li; tail = tail + (int64) 1;
+                queue[tail] = ri; tail = tail + (int64) 1;
+            } else {
+                leaf[nid] = true;
+                // Leaf value = raw weight × learning_rate (shrinkage), float32
+                // (updater_gpu_hist.cu:690 `left_weight * param.learning_rate`).
+                bw[nid] = (float32) (rawW * (float32) eta);
+                sc[nid] = bw[nid];
+            }
+        }
+        return nodeCount;
+    }
+}

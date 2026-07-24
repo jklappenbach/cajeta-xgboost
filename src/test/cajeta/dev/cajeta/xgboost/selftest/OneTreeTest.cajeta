@@ -1,0 +1,73 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+
+/**
+ * U3.3.1 — the make-or-break acceptance. Grow tree 0 over the binned `tiny_reg`
+ * data and assert **every node** is bit-identical to the NVIDIA reference
+ * (xgboost 3.1.2, gpu_hist, max_depth=4, λ=1, γ=0, min_child_weight=1): node
+ * count, the full `left/right_children` topology (leaf placement — including the
+ * depth-3 leaf at node 12 that stops early), and for every node the split
+ * feature, float32 threshold, default direction, and `base_weight`. If this is
+ * green, the bit-exact thesis holds for a whole tree on CPU.
+ */
+public class OneTreeTest {
+
+    public OneTreeTest() { return; }
+
+    @Test
+    public void oneTreeBitIdenticalToNvidiaReference() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        float64[] g = f.gradRound(0);
+        float64[] h = f.hessRound(0);
+        int64 n = (int64) g.count();
+
+        int64 maxDepth = (int64) 4;
+        int64 cap = TreeBuilder.capacity(maxDepth);
+        int64[] si = heap int64[cap];
+        float32[] sc = heap float32[cap];
+        boolean[] dl = heap boolean[cap];
+        int64[] lc = heap int64[cap];
+        int64[] rc = heap int64[cap];
+        float32[] bw = heap float32[cap];
+        boolean[] leaf = heap boolean[cap];
+
+        int64 nodeCount = TreeBuilder.grow(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+                                           maxDepth, (int64) 0,
+                                           (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                           (float64) 0.3,     // learning_rate (eta)
+                                           si, sc, dl, lc, rc, bw, leaf);
+
+        Tensor<int32>   rLC = f.treeLeftChildren(0);
+        Tensor<int32>   rRC = f.treeRightChildren(0);
+        Tensor<int32>   rSI = f.treeSplitIndices(0);
+        Tensor<float32> rSC = f.treeSplitConditions(0);
+        Tensor<int32>   rDL = f.treeDefaultLeft(0);
+        Tensor<float32> rBW = f.treeBaseWeights(0);
+
+        int64 refCount = rBW.shapeAt(0);
+        Assert.that(nodeCount).isEqualTo(refCount);
+
+        int64 nid = (int64) 0;
+        while (nid < refCount) {
+            // Topology: children (and thus leaf placement) match exactly.
+            Assert.that(lc[nid]).isEqualTo((int64) rLC.flatGet(nid));
+            Assert.that(rc[nid]).isEqualTo((int64) rRC.flatGet(nid));
+
+            boolean refLeaf = rLC.flatGet(nid) == (int32) -1;
+            if (!refLeaf) {
+                Assert.that(si[nid]).isEqualTo((int64) rSI.flatGet(nid));
+                Assert.thatFloat((float64) sc[nid]).isEqualTo((float64) rSC.flatGet(nid));
+                boolean refLeft = rDL.flatGet(nid) == (int32) 1;
+                Assert.isTrue(dl[nid] == refLeft);
+            }
+
+            // base_weight bit-exact for every node (leaf or internal).
+            Assert.thatFloat((float64) bw[nid]).isEqualTo((float64) rBW.flatGet(nid));
+            nid = nid + (int64) 1;
+        }
+        return;
+    }
+}
