@@ -1,0 +1,39 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.NodeStats;
+
+/**
+ * U3 (first bit-exact milestone) — the root node's stats + leaf weight, against
+ * the CUDA reference (`tiny_reg`, xgboost 3.1.2). cajeta accumulates round-0
+ * grad/hess in float64 and computes `w = -G/(H+lambda)`; cast to float32 it must
+ * equal XGBoost's stored `base_weights[0]` bit-for-bit — the numeric contract
+ * (§6.1/§6.2, §4.6) proven on the real NVIDIA reference before scaling to the
+ * full tree.
+ */
+public class RootStatsTest {
+
+    public RootStatsTest() { return; }
+
+    @Test
+    public void rootWeightBitMatchesNvidiaReference() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        float64[] g = f.gradRound(0);
+        float64[] h = f.hessRound(0);
+        int64 n = (int64) g.count();
+
+        NodeStats root = NodeStats.over(g, h, n);
+
+        // Root hessian sum == 200 (reg hess=1 over all rows) — matches sum_hessian[0].
+        Assert.thatFloat(root.h).isEqualTo((float64) 200.0);
+        Tensor<float64> sh = f.treeSumHessian(0);
+        Assert.thatFloat(root.h).isEqualTo(sh.flatGet(0));
+
+        // Root leaf weight bit-exact to XGBoost's base_weights[0] (float32).
+        float32 w = root.weight((float64) 1.0);          // reg_lambda = 1
+        Tensor<float32> bw = f.treeBaseWeights(0);
+        Assert.thatFloat((float64) w).isEqualTo((float64) bw.flatGet(0));
+        return;
+    }
+}

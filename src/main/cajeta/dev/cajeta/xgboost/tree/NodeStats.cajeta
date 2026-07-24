@@ -1,0 +1,38 @@
+package dev.cajeta.xgboost.tree;
+
+/**
+ * Per-node gradient statistics and XGBoost's split-gain / leaf-weight formulas
+ * (spec §4.3, §4.6). Sums accumulate in float64 (§6.1 — XGBoost's
+ * `GradientPairPrecise`); the leaf weight is cast to float32 to match XGBoost's
+ * stored node weight bit-for-bit (the model stores weights as float32, so the
+ * cast absorbs any float64 reduction-order difference — see §6.2).
+ */
+public final class NodeStats {
+    public float64 g;    // sum gradient
+    public float64 h;    // sum hessian
+
+    public NodeStats(float64 g, float64 h) { this.g = g; this.h = h; }
+
+    /** Accumulate (G, H) over instances [0, n) — sequential float64. */
+    public static #NodeStats over(float64[] grad, float64[] hess, int64 n) {
+        float64 g = (float64) 0.0;
+        float64 h = (float64) 0.0;
+        int64 i = (int64) 0;
+        while (i < n) {
+            g = g + grad[i];
+            h = h + hess[i];
+            i = i + 1;
+        }
+        return heap NodeStats(g, h);
+    }
+
+    /** Optimal leaf weight `w = -G/(H+lambda)`, at float32 (XGBoost's stored type). */
+    public float32 weight(float64 lambda) {
+        return (float32) (((float64) 0.0 - this.g) / (this.h + lambda));
+    }
+
+    /** The gain contribution `G^2/(H+lambda)` of this node (split scoring). */
+    public float64 gainTerm(float64 lambda) {
+        return (this.g * this.g) / (this.h + lambda);
+    }
+}

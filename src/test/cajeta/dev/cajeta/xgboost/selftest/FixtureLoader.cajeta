@@ -38,4 +38,30 @@ public final class FixtureLoader {
     public #Tensor<int32>   bins()      { return Npy.loadI32(this.path("bins.npy")); }
     public #Tensor<int64>   cutPtrs()   { return Npy.loadI64(this.path("cut_ptrs.npy")); }
     public #Tensor<float64> cutValues() { return Npy.loadF64(this.path("cut_values.npy")); }
+
+    /** Round `r`'s per-instance gradient as a dense float64[] (grad is [rounds, n]). */
+    public #float64[] gradRound(int32 r) { return this.round(this.grad(), r); }
+    public #float64[] hessRound(int32 r) { return this.round(this.hess(), r); }
+
+    #float64[] round(Tensor<float64> t, int32 r) {
+        int64 n = t.shapeAt(1);
+        int64 base = (int64) r * n;
+        float64[] out = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { out[i] = t.flatGet(base + i); i = i + 1; }
+        return #out;
+    }
+
+    // --- reference tree arrays (extract_trees.py -> trees/t<idx>_<field>.npy) ---
+    #String treePath(int32 idx, String field) {
+        String s = stack Int64((int64) idx).toString();
+        return this.path("trees/t" + s + "_" + field + ".npy");
+    }
+    public #Tensor<float32> treeBaseWeights(int32 i)     { return Npy.loadF32(this.treePath(i, "base_weights")); }
+    public #Tensor<float32> treeSplitConditions(int32 i) { return Npy.loadF32(this.treePath(i, "split_conditions")); }
+    public #Tensor<int32>   treeSplitIndices(int32 i)    { return Npy.loadI32(this.treePath(i, "split_indices")); }
+    public #Tensor<int32>   treeDefaultLeft(int32 i)     { return Npy.loadI32(this.treePath(i, "default_left")); }
+    public #Tensor<int32>   treeLeftChildren(int32 i)    { return Npy.loadI32(this.treePath(i, "left_children")); }
+    public #Tensor<int32>   treeRightChildren(int32 i)   { return Npy.loadI32(this.treePath(i, "right_children")); }
+    public #Tensor<float64> treeSumHessian(int32 i)      { return Npy.loadF64(this.treePath(i, "sum_hessian")); }
 }
