@@ -1,0 +1,116 @@
+package dev.cajeta.xgboost.tree;
+
+/**
+ * XGBoost's GPU `hist` gradient quantiser — the mechanism that makes histogram
+ * sums **deterministic** (spec §6.2). It is NOT a float sum: each gpair is
+ * mapped to an int64 fixed-point pair, the bins accumulate as **integers**
+ * (associative ⇒ order-independent ⇒ reproducible), then the summed bin is
+ * dequantized back to float64.
+ *
+ * Source: `xgboost-ref/src/tree/gpu_hist/quantiser.cuh` +
+ * `histogram.cu:70` (`GradientQuantiser` ctor) and
+ * `src/common/deterministic.cuh` (`CreateRoundingFactor`, Demmel & Nguyen
+ * Algorithm 5). See [[cajeta-xgboost-reference]].
+ *
+ * Scale derivation (per grad and per hess independently):
+ *   posSum = Σ Pclip(v),  negSum = Σ Nclip(v)          // Clip, float32 gpairs
+ *   rounding = CreateRoundingFactor(max(posSum,negSum), n)   // an exact 2^exp
+ *   to_float = rounding / 2^62                          // keep 1 bit for sign
+ *   to_fixed = 1 / to_float
+ * `rounding`, `to_float`, `to_fixed` are all exact powers of two, so they are
+ * bit-identical to XGBoost as long as the integer exponent matches — the
+ * float32-vs-float64 accumulation of the clip sums only matters if it crosses a
+ * power-of-two boundary.
+ */
+public final class GradientQuantiser {
+    public float64 toFixedGrad;
+    public float64 toFixedHess;
+    public float64 toFloatGrad;
+    public float64 toFloatHess;
+
+    GradientQuantiser(float64 tfg, float64 tfh, float64 tflg, float64 tflh) {
+        this.toFixedGrad = tfg;
+        this.toFixedHess = tfh;
+        this.toFloatGrad = tflg;
+        this.toFloatHess = tflh;
+    }
+
+    /** `2^e` built directly from IEEE-754 bits (exact for e in the normal range). */
+    static float64 pow2(int32 e) {
+        int64 bits = ((int64) (e + (int32) 1023)) << (int64) 52;
+        return Cajeta.bitsToF64(bits);
+    }
+
+    /**
+     * `frexp` exponent: the `exp` with `v = m * 2^exp`, `m` in [0.5, 1). For a
+     * normalized `v > 0` that is `unbiasedExp + 1 = ((bits>>52)&0x7FF) - 1022`.
+     * This matches `std::frexp` exactly (and, unlike `ceil(log2 v)`, is right
+     * when `v` is itself a power of two).
+     */
+    static int32 frexpExp(float64 v) {
+        int64 bits = Cajeta.f64ToBits(v);
+        int64 e = (bits >> (int64) 52) & (int64) 2047;
+        return (int32) (e - (int64) 1022);
+    }
+
+    /**
+     * `common::CreateRoundingFactor<double>(maxAbs, n)` = `2^frexpExp(delta)`,
+     * `delta = maxAbs / (1 - 2*n*eps)`, `eps` = f64 machine epsilon (2^-52).
+     */
+    static float64 roundingFactor(float64 maxAbs, int64 n) {
+        float64 eps = GradientQuantiser.pow2((int32) -52);
+        float64 denom = (float64) 1.0 - (float64) 2.0 * (float64) n * eps;
+        float64 delta = maxAbs / denom;
+        return GradientQuantiser.pow2(GradientQuantiser.frexpExp(delta));
+    }
+
+    /**
+     * Build the quantiser from the round's per-instance (grad, hess). Values are
+     * cast to float32 first — XGBoost stores gradients as `GradientPair` (f32),
+     * and `Clip` operates on those f32 values.
+     */
+    public static #GradientQuantiser build(float64[] grad, float64[] hess, int64 n) {
+        float64 posG = (float64) 0.0;
+        float64 negG = (float64) 0.0;
+        float64 posH = (float64) 0.0;
+        float64 negH = (float64) 0.0;
+        int64 i = (int64) 0;
+        while (i < n) {
+            float32 g = (float32) grad[i];
+            float32 h = (float32) hess[i];
+            if (g > (float32) 0.0) { posG = posG + (float64) g; }
+            else if (g < (float32) 0.0) { negG = negG + (float64) (- g); }
+            if (h > (float32) 0.0) { posH = posH + (float64) h; }
+            else if (h < (float32) 0.0) { negH = negH + (float64) (- h); }
+            i = i + (int64) 1;
+        }
+
+        float64 maxG = Math.max(posG, negG);
+        float64 maxH = Math.max(posH, negH);
+        float64 rndG = GradientQuantiser.roundingFactor(maxG, n);
+        float64 rndH = GradientQuantiser.roundingFactor(maxH, n);
+
+        float64 p62 = GradientQuantiser.pow2((int32) 62);
+        float64 tflG = rndG / p62;
+        float64 tflH = rndH / p62;
+        float64 tfxG = (float64) 1.0 / tflG;
+        float64 tfxH = (float64) 1.0 / tflH;
+        return heap GradientQuantiser(tfxG, tfxH, tflG, tflH);
+    }
+
+    /** Quantize one gradient to int64 fixed point (truncation toward zero). */
+    public int64 fixedGrad(float64 g) {
+        return (int64) ((float64) ((float32) g) * this.toFixedGrad);
+    }
+
+    /** Quantize one hessian to int64 fixed point (truncation toward zero). */
+    public int64 fixedHess(float64 h) {
+        return (int64) ((float64) ((float32) h) * this.toFixedHess);
+    }
+
+    /** Dequantize a summed int64 gradient bin back to float64. */
+    public float64 floatGrad(int64 q) { return (float64) q * this.toFloatGrad; }
+
+    /** Dequantize a summed int64 hessian bin back to float64. */
+    public float64 floatHess(int64 q) { return (float64) q * this.toFloatHess; }
+}

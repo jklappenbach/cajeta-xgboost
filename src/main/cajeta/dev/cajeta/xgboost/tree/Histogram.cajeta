@@ -1,0 +1,84 @@
+package dev.cajeta.xgboost.tree;
+
+import cajeta.math.Tensor;
+
+/**
+ * A node's gradient histogram — int64 fixed-point sums per (feature, bin), laid
+ * out in the global-bin space `cut_ptrs[f] + localBin` (spec §6.2). Built with a
+ * {@link GradientQuantiser}: each instance's gpair is quantized once and added
+ * (as **integers**) to its bin in every feature, so the result is independent of
+ * row order — the determinism guarantee.
+ *
+ * Missing values (`bin == -1`) are not stored; a feature's missing contribution
+ * is recovered as `nodeTotal - Σ(feature's bins)` when scoring the default
+ * direction (source: `xgboost-ref/src/tree/gpu_hist/evaluate_splits.cu`).
+ *
+ * `bins` is `[n, nFeatures]` row-major int32; `cutPtrs` is `[nFeatures+1]` int64.
+ */
+public final class Histogram {
+    public int64[] g;         // summed quantized gradient per global bin
+    public int64[] h;         // summed quantized hessian per global bin
+    public int64 nbins;       // total global bins = cutPtrs[nFeatures]
+    public int64 nf;          // number of features
+    public int64 totalG;      // node total quantized gradient (over all rows)
+    public int64 totalH;      // node total quantized hessian
+
+    Histogram(int64[] g, int64[] h, int64 nbins, int64 nf, int64 totalG, int64 totalH) {
+        this.g = g;
+        this.h = h;
+        this.nbins = nbins;
+        this.nf = nf;
+        this.totalG = totalG;
+        this.totalH = totalH;
+    }
+
+    /** Build the histogram for the root over all `n` rows. */
+    public static #Histogram buildAll(Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                      GradientQuantiser q,
+                                      float64[] grad, float64[] hess, int64 n) {
+        int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
+        int64 nbins = cutPtrs.flatGet(nf);
+        int64[] gg = heap int64[nbins];
+        int64[] hh = heap int64[nbins];
+        int64 totG = (int64) 0;
+        int64 totH = (int64) 0;
+
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 qg = q.fixedGrad(grad[r]);
+            int64 qh = q.fixedHess(hess[r]);
+            totG = totG + qg;
+            totH = totH + qh;
+            int64 f = (int64) 0;
+            while (f < nf) {
+                int32 b = bins.flatGet(r * nf + f);
+                if (b >= (int32) 0) {
+                    int64 gb = cutPtrs.flatGet(f) + (int64) b;
+                    gg[gb] = gg[gb] + qg;
+                    hh[gb] = hh[gb] + qh;
+                }
+                f = f + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return heap Histogram(gg, hh, nbins, nf, totG, totH);
+    }
+
+    /** Sum of a single feature's bins (non-missing rows) as a quantized gradient. */
+    public int64 featureSumG(Tensor<int64> cutPtrs, int64 f) {
+        int64 b = cutPtrs.flatGet(f);
+        int64 end = cutPtrs.flatGet(f + (int64) 1);
+        int64 s = (int64) 0;
+        while (b < end) { s = s + this.g[b]; b = b + (int64) 1; }
+        return s;
+    }
+
+    /** Sum of a single feature's bins (non-missing rows) as a quantized hessian. */
+    public int64 featureSumH(Tensor<int64> cutPtrs, int64 f) {
+        int64 b = cutPtrs.flatGet(f);
+        int64 end = cutPtrs.flatGet(f + (int64) 1);
+        int64 s = (int64) 0;
+        while (b < end) { s = s + this.h[b]; b = b + (int64) 1; }
+        return s;
+    }
+}

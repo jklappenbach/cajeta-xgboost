@@ -1,0 +1,68 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+
+/**
+ * U3.3.1 (histogram milestone) — the int64 fixed-point `GradientQuantiser` +
+ * histogram over the CUDA reference (`tiny_reg`, xgboost 3.1.2). This exercises
+ * the *actual* gpu_hist path: quantize each gpair, sum bins as integers,
+ * dequantize. Three properties:
+ *
+ *   1. Determinism — the int64 node total is identical regardless of row order
+ *      (integer associativity; spec §6.2).
+ *   2. Layout — every feature's bins sum to the same node total (each row hits
+ *      one bin per feature; no missing in tiny_reg).
+ *   3. Bit-exact weight — the dequantized total yields XGBoost's stored
+ *      `base_weights[0]` bit-for-bit. gpu_hist derives the leaf weight from this
+ *      same quantized total, so this is the faithful reproduction (the plain
+ *      float64 sum in RootStatsTest matched only via the float32 weight cast).
+ */
+public class HistogramTest {
+
+    public HistogramTest() { return; }
+
+    @Test
+    public void quantisedHistogramMatchesNvidiaReference() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        float64[] g = f.gradRound(0);
+        float64[] h = f.hessRound(0);
+        int64 n = (int64) g.count();
+
+        Tensor<int32> bins = f.bins();
+        Tensor<int64> cutPtrs = f.cutPtrs();
+
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        Histogram hist = Histogram.buildAll(bins, cutPtrs, q, g, h, n);
+
+        // (1) Determinism: sum quantized gpairs in reverse order → identical int64.
+        int64 revG = (int64) 0;
+        int64 revH = (int64) 0;
+        int64 i = n - (int64) 1;
+        while (i >= (int64) 0) {
+            revG = revG + q.fixedGrad(g[i]);
+            revH = revH + q.fixedHess(h[i]);
+            i = i - (int64) 1;
+        }
+        Assert.that(revG).isEqualTo(hist.totalG);
+        Assert.that(revH).isEqualTo(hist.totalH);
+
+        // (2) Layout: each feature's bins recover the node total exactly.
+        int64 ft = (int64) 0;
+        while (ft < hist.nf) {
+            Assert.that(hist.featureSumG(cutPtrs, ft)).isEqualTo(hist.totalG);
+            Assert.that(hist.featureSumH(cutPtrs, ft)).isEqualTo(hist.totalH);
+            ft = ft + (int64) 1;
+        }
+
+        // (3) Bit-exact leaf weight from the dequantized total (reg_lambda = 1).
+        float64 gSum = q.floatGrad(hist.totalG);
+        float64 hSum = q.floatHess(hist.totalH);
+        float32 w = (float32) (((float64) 0.0 - gSum) / (hSum + (float64) 1.0));
+        Tensor<float32> bw = f.treeBaseWeights(0);
+        Assert.thatFloat((float64) w).isEqualTo((float64) bw.flatGet(0));
+        return;
+    }
+}
