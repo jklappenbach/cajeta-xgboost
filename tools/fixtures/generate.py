@@ -73,22 +73,6 @@ def compute_grad_hess(objective, in_margins, y, n_class):
     return grad.astype(np.float64), hess.astype(np.float64)
 
 
-def base_margin_of(booster, objective, n, n_class):
-    """The round-0 input margin: the objective link applied to the (possibly
-    fitted) base_score, constant across instances. `predict(iteration_range=(0,0))`
-    does NOT give this — end=0 means 'all trees' — so derive it from the config."""
-    import math, json as _json
-    raw = _json.loads(booster.save_config())["learner"]["learner_model_param"]["base_score"]
-    bs = float(str(raw).strip("[]"))
-    if objective == "reg:squarederror":
-        return np.full(n, bs)
-    if objective == "binary:logistic":
-        return np.full(n, math.log(bs / (1.0 - bs)))
-    if objective in ("multi:softprob", "multi:softmax"):
-        return np.zeros((n, n_class))
-    raise SystemExit(f"base margin not implemented for objective {objective}")
-
-
 def bin_indices(X, cut_ptrs, cut_vals):
     """Per-instance bin index per feature, derived from XGBoost's cut edges.
     The cuts are the ground truth; this assignment rule (and NaN→missing) is
@@ -162,9 +146,12 @@ def main():
     booster = xgb.train(params, dtrain, num_boost_round=args.num_round)
 
     rounds = args.num_round
-    # Cumulative margin after each round, and the margin GOING INTO each round
-    # (round 0's input is the base margin — derived from base_score, not predict).
-    base_margin = base_margin_of(booster, args.objective, X.shape[0], n_class)
+    # The margin GOING INTO each round. Round 0's input is the base margin — got
+    # EMPIRICALLY from a zero-round booster (objective-agnostic; correct for
+    # multiclass per-class base_score too). `predict(iteration_range=(0,0))` is
+    # NOT the base — end=0 means "all trees".
+    base_booster = xgb.train(params, dtrain, num_boost_round=0)
+    base_margin = base_booster.predict(dtrain, output_margin=True).astype(np.float64)
     cum = [booster.predict(dtrain, iteration_range=(0, r + 1), output_margin=True)
            for r in range(rounds)]
     margins = np.stack(cum).astype(np.float64)
