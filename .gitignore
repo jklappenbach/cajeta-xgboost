@@ -21,3 +21,4 @@ tools/fdividef/probe_rcp
 # expf probe output (build input, never committed)
 tools/expf/expf_sweep.npy
 tools/expf/probe_expf
+tools/expf/ex2_table.npy
