@@ -1,0 +1,37 @@
+package dev.cajeta.xgboost.tree;
+
+/**
+ * A grown regression tree in XGBoost's node layout: parallel arrays indexed by
+ * node id (root = 0). Children are allocated in depthwise, ascending-nid order
+ * so the numbering matches the reference model's `left_children`/`right_children`
+ * (spec §4, §5). Leaves have `leftChildren[nid] == rightChildren[nid] == -1`.
+ * `baseWeights[nid]` is `CalcWeight` of the node's gradient sum (leaf values carry
+ * the ×learning_rate shrinkage).
+ *
+ * The array fields are **owned** — the constructor takes ownership of each
+ * backing array (`#=`), and callers move them in (`heap Tree(n, #si, …)`). A
+ * plain (borrowed) array argument would leave the Tree pointing at storage the
+ * caller still owns and frees at scope exit.
+ */
+public final class Tree {
+    public int64 nodeCount;
+    public int64[] splitIndices;      // split feature (internal nodes)
+    public float32[] splitConditions; // threshold (internal) / leaf value (leaf)
+    public boolean[] defaultLeft;     // missing → left
+    public int64[] leftChildren;      // -1 for leaves
+    public int64[] rightChildren;     // -1 for leaves
+    public float32[] baseWeights;     // CalcWeight of each node's sum
+    public boolean[] isLeaf;
+
+    Tree(int64 nodeCount, int64[] si, float32[] sc, boolean[] dl,
+         int64[] lc, int64[] rc, float32[] bw, boolean[] leaf) {
+        this.nodeCount = nodeCount;
+        this.splitIndices #= si;
+        this.splitConditions #= sc;
+        this.defaultLeft #= dl;
+        this.leftChildren #= lc;
+        this.rightChildren #= rc;
+        this.baseWeights #= bw;
+        this.isLeaf #= leaf;
+    }
+}

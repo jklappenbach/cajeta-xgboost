@@ -35,6 +35,31 @@ public final class TreeBuilder {
     /** Backing-array size needed for a tree of the given `maxDepth`. */
     public static int64 capacity(int64 maxDepth) { return ((int64) 1) << (maxDepth + (int64) 1); }
 
+    /**
+     * Grow one tree and return it as a {@link Tree}. Builds into local arrays via
+     * {@link #grow} (the out-param builder), then **moves** each backing array
+     * into the Tree (`#si` …) so the returned object owns its storage — a plain
+     * (borrowed) argument would dangle once this frame's arrays are reclaimed.
+     */
+    public static #Tree growTree(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                                 float64[] grad, float64[] hess, int64 n,
+                                 int64 maxDepth, int64 maxLeaves,
+                                 float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
+                                 float64 eta) {
+        int64 cap = TreeBuilder.capacity(maxDepth);
+        int64[] si = heap int64[cap];
+        float32[] sc = heap float32[cap];
+        boolean[] dl = heap boolean[cap];
+        int64[] lc = heap int64[cap];
+        int64[] rc = heap int64[cap];
+        float32[] bw = heap float32[cap];
+        boolean[] leaf = heap boolean[cap];
+        int64 nodeCount = TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n,
+                                           maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
+                                           eta, si, sc, dl, lc, rc, bw, leaf);
+        return heap Tree(nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf);
+    }
+
     public static int64 grow(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
                              float64[] grad, float64[] hess, int64 n,
                              int64 maxDepth, int64 maxLeaves,

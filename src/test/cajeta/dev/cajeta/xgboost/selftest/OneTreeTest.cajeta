@@ -2,6 +2,7 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.Tree;
 import dev.cajeta.xgboost.tree.TreeBuilder;
 
 /**
@@ -24,21 +25,10 @@ public class OneTreeTest {
         float64[] h = f.hessRound(0);
         int64 n = (int64) g.count();
 
-        int64 maxDepth = (int64) 4;
-        int64 cap = TreeBuilder.capacity(maxDepth);
-        int64[] si = heap int64[cap];
-        float32[] sc = heap float32[cap];
-        boolean[] dl = heap boolean[cap];
-        int64[] lc = heap int64[cap];
-        int64[] rc = heap int64[cap];
-        float32[] bw = heap float32[cap];
-        boolean[] leaf = heap boolean[cap];
-
-        int64 nodeCount = TreeBuilder.grow(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
-                                           maxDepth, (int64) 0,
-                                           (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
-                                           (float64) 0.3,     // learning_rate (eta)
-                                           si, sc, dl, lc, rc, bw, leaf);
+        Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+                                      (int64) 4, (int64) 0,     // max_depth, max_leaves
+                                      (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                      (float64) 0.3);           // learning_rate (eta)
 
         Tensor<int32>   rLC = f.treeLeftChildren(0);
         Tensor<int32>   rRC = f.treeRightChildren(0);
@@ -48,24 +38,24 @@ public class OneTreeTest {
         Tensor<float32> rBW = f.treeBaseWeights(0);
 
         int64 refCount = rBW.shapeAt(0);
-        Assert.that(nodeCount).isEqualTo(refCount);
+        Assert.that(t.nodeCount).isEqualTo(refCount);
 
         int64 nid = (int64) 0;
         while (nid < refCount) {
             // Topology: children (and thus leaf placement) match exactly.
-            Assert.that(lc[nid]).isEqualTo((int64) rLC.flatGet(nid));
-            Assert.that(rc[nid]).isEqualTo((int64) rRC.flatGet(nid));
+            Assert.that(t.leftChildren[nid]).isEqualTo((int64) rLC.flatGet(nid));
+            Assert.that(t.rightChildren[nid]).isEqualTo((int64) rRC.flatGet(nid));
 
             boolean refLeaf = rLC.flatGet(nid) == (int32) -1;
             if (!refLeaf) {
-                Assert.that(si[nid]).isEqualTo((int64) rSI.flatGet(nid));
-                Assert.thatFloat((float64) sc[nid]).isEqualTo((float64) rSC.flatGet(nid));
+                Assert.that(t.splitIndices[nid]).isEqualTo((int64) rSI.flatGet(nid));
+                Assert.thatFloat((float64) t.splitConditions[nid]).isEqualTo((float64) rSC.flatGet(nid));
                 boolean refLeft = rDL.flatGet(nid) == (int32) 1;
-                Assert.isTrue(dl[nid] == refLeft);
+                Assert.isTrue(t.defaultLeft[nid] == refLeft);
             }
 
             // base_weight bit-exact for every node (leaf or internal).
-            Assert.thatFloat((float64) bw[nid]).isEqualTo((float64) rBW.flatGet(nid));
+            Assert.thatFloat((float64) t.baseWeights[nid]).isEqualTo((float64) rBW.flatGet(nid));
             nid = nid + (int64) 1;
         }
         return;
