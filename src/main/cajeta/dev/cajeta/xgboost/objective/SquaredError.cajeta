@@ -1,0 +1,50 @@
+package dev.cajeta.xgboost.objective;
+
+/**
+ * `reg:squarederror` objective (spec §3.1). Gradient and hessian are computed in
+ * **float32** to match XGBoost's `GradientPair` (`bst_float`) arithmetic
+ * bit-for-bit: for a single-row leaf a float64-then-cast gradient diverges by
+ * 1 ULP from XGBoost's `(f32)margin − (f32)label`, which shifts the leaf weight
+ * (verified against the reference trees in U3). The float32 result is returned as
+ * float64 (exactly representable) since {@link dev.cajeta.xgboost.tree.GradientQuantiser}
+ * consumes float64 and casts back to float32.
+ *
+ *   grad = margin − label   (least-squares residual, no ½ factor — XGBoost's
+ *                            `SquaredErrorLoss::FirstOrderGradient`)
+ *   hess = 1
+ *
+ * The link is the identity, so the base margin is `base_score` unchanged and the
+ * final prediction is the accumulated margin (`PredTransform` = identity).
+ */
+public final class SquaredError {
+
+    /** First-order gradient for one row: `(f32)margin − (f32)label`, as float64. */
+    public static float64 grad(float32 margin, float64 label) {
+        float32 g = margin - (float32) label;
+        return (float64) g;
+    }
+
+    /** Second-order gradient (hessian) for one row: constant 1. */
+    public static float64 hess(float32 margin, float64 label) {
+        return (float64) 1.0;
+    }
+
+    /** Base margin from `base_score` (identity link). */
+    public static float32 baseMargin(float64 baseScore) {
+        return (float32) baseScore;
+    }
+
+    /**
+     * Fill per-row `grad`/`hess` for all `n` rows from the current float32
+     * margins and labels (the round's input to the tree builder).
+     */
+    public static void gradHess(float32[] margin, float64[] label, int64 n,
+                                float64[] grad, float64[] hess) {
+        int64 i = (int64) 0;
+        while (i < n) {
+            grad[i] = SquaredError.grad(margin[i], label[i]);
+            hess[i] = (float64) 1.0;
+            i = i + (int64) 1;
+        }
+    }
+}

@@ -1,0 +1,51 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.objective.SquaredError;
+
+/**
+ * U5.1.1 — the `reg:squarederror` gradient/hessian bit-identical to the per-round
+ * reference dump (`grad.npy`/`hess.npy`, `tiny_reg`). Gradients are evaluated at
+ * the margin going INTO each round: the base margin (`base_score` = 0.5, identity
+ * link) for round 0, and the cumulative margin after round r−1 (`margins.npy`) for
+ * later rounds. `grad = (f32)margin − (f32)label`, `hess = 1`, in float32 — the
+ * `GradientPair` arithmetic that a float64-then-cast would diverge from by 1 ULP.
+ */
+public class ObjectiveTest {
+
+    public ObjectiveTest() { return; }
+
+    @Test
+    public void gradHessBitIdenticalToReferenceDump() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        Tensor<float64> yT      = f.y();
+        Tensor<float64> refGrad = f.grad();      // [rounds, n]
+        Tensor<float64> refHess = f.hess();
+        Tensor<float64> margins = f.margins();   // [rounds, n]
+        int64 n = yT.shapeAt(0);
+        int64 rounds = refGrad.shapeAt(0);
+
+        float32 base = SquaredError.baseMargin((float64) 0.5);
+
+        int64 r = (int64) 0;
+        while (r < rounds) {
+            int64 rn = r * n;
+            int64 i = (int64) 0;
+            while (i < n) {
+                // margin into round r: base for r==0, else the round r-1 cumulative.
+                float32 mIn;
+                if (r == (int64) 0) { mIn = base; }
+                else { mIn = (float32) margins.flatGet((r - (int64) 1) * n + i); }
+
+                float64 g = SquaredError.grad(mIn, yT.flatGet(i));
+                float64 he = SquaredError.hess(mIn, yT.flatGet(i));
+                Assert.thatFloat(g).isEqualTo(refGrad.flatGet(rn + i));
+                Assert.thatFloat(he).isEqualTo(refHess.flatGet(rn + i));
+                i = i + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return;
+    }
+}

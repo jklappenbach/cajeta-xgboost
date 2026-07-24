@@ -1,0 +1,104 @@
+package dev.cajeta.xgboost.booster;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.objective.SquaredError;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+
+/**
+ * The gradient-boosting loop for `reg:squarederror` (spec §3.1, §3.4, §3.5),
+ * reproducing XGBoost's per-round update bit-for-bit.
+ *
+ * Each row's margin starts at the base margin (`base_score` under the identity
+ * link). Per round: compute per-row (grad, hess) in float32 from the current
+ * margins ({@link SquaredError}), grow one tree over that gradient
+ * ({@link TreeBuilder#grow}), then add each row's leaf value to its margin — in
+ * **float32**, using the training-time leaf assignment (`leafOf`) the builder
+ * returns. That is exactly how XGBoost updates its prediction cache during
+ * training, so the accumulated margin (and hence the next round's gradient) stays
+ * bit-identical. Leaf values already carry the `learning_rate` shrinkage.
+ *
+ * For `reg:squarederror` the link is the identity, so the final prediction is the
+ * accumulated margin after the last round.
+ */
+public final class Booster {
+
+    /**
+     * Train a `rounds`-tree regression forest over the binned matrix.
+     *
+     * @param label      per-row targets (float64), length `n`.
+     * @param baseScore  initial score (identity link → base margin).
+     * @param marginHistory out-param, length `rounds*n`: the cumulative margin of
+     *                   every row after each round (`r*n + row`). The last round's
+     *                   slice is the final prediction. Pass a `rounds*n` array.
+     */
+    public static #Model train(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                               float64[] label, int64 n, int64 rounds,
+                               int64 maxDepth, int64 maxLeaves,
+                               float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
+                               float64 eta, float64 baseScore,
+                               float32[] marginHistory) {
+        int64 cap = TreeBuilder.capacity(maxDepth);
+
+        int64[] nodeCount = heap int64[rounds];
+        int64[]   fSI = heap int64[rounds * cap];
+        float32[] fSC = heap float32[rounds * cap];
+        boolean[] fDL = heap boolean[rounds * cap];
+        int64[]   fLC = heap int64[rounds * cap];
+        int64[]   fRC = heap int64[rounds * cap];
+        float32[] fBW = heap float32[rounds * cap];
+        boolean[] fLF = heap boolean[rounds * cap];
+
+        float32 base = SquaredError.baseMargin(baseScore);
+        float32[] margin = heap float32[n];
+        int64 i = (int64) 0;
+        while (i < n) { margin[i] = base; i = i + (int64) 1; }
+
+        float64[] grad = heap float64[n];
+        float64[] hess = heap float64[n];
+        int64[] leafOf = heap int64[n];
+
+        int64 r = (int64) 0;
+        while (r < rounds) {
+            // (1) Per-row gradient from the current margins (float32).
+            SquaredError.gradHess(margin, label, n, grad, hess);
+
+            // (2) Grow this round's tree into scratch arrays; capture leafOf.
+            int64[]   si = heap int64[cap];
+            float32[] sc = heap float32[cap];
+            boolean[] dl = heap boolean[cap];
+            int64[]   lc = heap int64[cap];
+            int64[]   rc = heap int64[cap];
+            float32[] bw = heap float32[cap];
+            boolean[] lf = heap boolean[cap];
+            int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n,
+                                        maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
+                                        eta, si, sc, dl, lc, rc, bw, lf, leafOf);
+            nodeCount[r] = nc;
+
+            // (3) Persist the tree into the forest slice r*cap.
+            int64 off = r * cap;
+            int64 k = (int64) 0;
+            while (k < cap) {
+                fSI[off + k] = si[k]; fSC[off + k] = sc[k]; fDL[off + k] = dl[k];
+                fLC[off + k] = lc[k]; fRC[off + k] = rc[k]; fBW[off + k] = bw[k];
+                fLF[off + k] = lf[k];
+                k = k + (int64) 1;
+            }
+
+            // (4) Accumulate each row's leaf value into its margin (float32), and
+            //     record the cumulative margin for this round.
+            int64 hoff = r * n;
+            i = (int64) 0;
+            while (i < n) {
+                float32 leafVal = bw[leafOf[i]];   // leafOf[i] is a leaf → shrunk value
+                margin[i] = margin[i] + leafVal;
+                marginHistory[hoff + i] = margin[i];
+                i = i + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+
+        return heap Model(rounds, cap, base, #nodeCount,
+                          #fSI, #fSC, #fDL, #fLC, #fRC, #fBW, #fLF);
+    }
+}

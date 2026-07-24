@@ -1,0 +1,46 @@
+package dev.cajeta.xgboost.booster;
+
+/**
+ * A trained regression forest: `rounds` trees stored as flat arrays, each tree
+ * padded to a fixed per-tree `cap` (= `TreeBuilder.capacity(maxDepth)`) so tree
+ * `r`'s node `k` lives at index `r*cap + k`. This mirrors XGBoost's model layout
+ * (a list of trees, each with parallel node arrays) without an owned-object array
+ * — one flat allocation per field, indexed by `(round, node)`.
+ *
+ * `baseMargin` is `base_score` under the objective's link (identity for
+ * `reg:squarederror`), the value every row's margin starts at. A leaf's value is
+ * carried in `baseWeights`/`splitConditions` (raw `CalcWeight × learning_rate`);
+ * internal nodes carry the raw `CalcWeight` in `baseWeights` and the split
+ * threshold in `splitConditions`. Leaves have `leftChildren == rightChildren == -1`.
+ *
+ * The array fields are **owned** (`#=`); callers move them in.
+ */
+public final class Model {
+    public int64 rounds;
+    public int64 cap;                 // per-tree stride (node ids 0..nodeCount[r])
+    public float32 baseMargin;        // base_score under the link
+    public int64[] nodeCount;         // [rounds] node count of each tree
+    public int64[] splitIndices;      // [rounds*cap] split feature (internal)
+    public float32[] splitConditions; // threshold (internal) / leaf value (leaf)
+    public boolean[] defaultLeft;     // missing → left
+    public int64[] leftChildren;      // -1 for leaves
+    public int64[] rightChildren;     // -1 for leaves
+    public float32[] baseWeights;     // raw CalcWeight (internal) / leaf value (leaf)
+    public boolean[] isLeaf;
+
+    Model(int64 rounds, int64 cap, float32 baseMargin, int64[] nodeCount,
+          int64[] si, float32[] sc, boolean[] dl,
+          int64[] lc, int64[] rc, float32[] bw, boolean[] leaf) {
+        this.rounds = rounds;
+        this.cap = cap;
+        this.baseMargin = baseMargin;
+        this.nodeCount #= nodeCount;
+        this.splitIndices #= si;
+        this.splitConditions #= sc;
+        this.defaultLeft #= dl;
+        this.leftChildren #= lc;
+        this.rightChildren #= rc;
+        this.baseWeights #= bw;
+        this.isLeaf #= leaf;
+    }
+}

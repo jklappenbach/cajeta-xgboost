@@ -58,19 +58,27 @@ public final class TreeBuilder {
         int64[] rc = heap int64[cap];
         float32[] bw = heap float32[cap];
         boolean[] leaf = heap boolean[cap];
+        int64[] leafOf = heap int64[n];   // scratch (row → leaf nid); discarded here
         int64 nodeCount = TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n,
                                            maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
-                                           eta, si, sc, dl, lc, rc, bw, leaf);
+                                           eta, si, sc, dl, lc, rc, bw, leaf, leafOf);
         return heap Tree(nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf);
     }
 
+    /**
+     * Out-param tree builder. Also fills `leafOf[r]` with the leaf node id row
+     * `r` lands in (the final `position[]`), so the boosting loop can accumulate
+     * each row's leaf value the way XGBoost updates its prediction cache during
+     * training — the exact quantity the next round's gradient is computed from.
+     */
     public static int64 grow(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
                              float64[] grad, float64[] hess, int64 n,
                              int64 maxDepth, int64 maxLeaves,
                              float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
                              float64 eta,
                              int64[] si, float32[] sc, boolean[] dl,
-                             int64[] lc, int64[] rc, float32[] bw, boolean[] leaf) {
+                             int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
+                             int64[] leafOf) {
         GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
         int64 nbins = cutPtrs.flatGet(nf);
@@ -187,6 +195,10 @@ public final class TreeBuilder {
                 sc[nid] = bw[nid];
             }
         }
+
+        // Final leaf assignment per row (every row ends at a leaf node).
+        int64 rr = (int64) 0;
+        while (rr < n) { leafOf[rr] = position[rr]; rr = rr + (int64) 1; }
         return nodeCount;
     }
 

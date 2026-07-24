@@ -1,0 +1,97 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+
+/**
+ * U5.1.2 / 5.1.3 / 5.3.1 — the full multi-round regression model bit-identical to
+ * the NVIDIA reference (`tiny_reg`, xgboost 3.1.2, 3 rounds), asserted per round:
+ *
+ *   - every tree bit-identical to the reference tree of that round (topology,
+ *     split feature, float32 threshold, default direction, base_weight);
+ *   - the cumulative output margin after each round bit-identical to `margins.npy`
+ *     (this pins the base_score init, the float32 margin accumulation, and the
+ *     learning_rate-shrunk leaf values — 5.1.2);
+ *   - the final prediction (= last-round margin, identity link) bit-identical to
+ *     `preds.npy`.
+ *
+ * Round 0 reproduces OneTreeTest; rounds 1–2 are the real multi-round check — they
+ * only match if the margin accumulation feeding each round's gradient is exact.
+ */
+public class BoostingLoopTest {
+
+    public BoostingLoopTest() { return; }
+
+    @Test
+    public void fullRegressionModelBitIdenticalPerRound() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        Tensor<float64> yT = f.y();
+        int64 n = yT.shapeAt(0);
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        int64 rounds = (int64) 3;
+        float32[] marginHistory = heap float32[rounds * n];
+        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                (int64) 4, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5,
+                                marginHistory);
+        Assert.that(m.rounds).isEqualTo(rounds);
+
+        Tensor<float64> refMargins = f.margins();   // [rounds, n]
+        Tensor<float64> refPreds   = f.preds();      // [n]
+        int64 cap = m.cap;
+
+        int64 r = (int64) 0;
+        while (r < rounds) {
+            // (a) tree r bit-identical to the reference tree of round r.
+            Tensor<int32>   rLC = f.treeLeftChildren((int32) r);
+            Tensor<int32>   rRC = f.treeRightChildren((int32) r);
+            Tensor<int32>   rSI = f.treeSplitIndices((int32) r);
+            Tensor<float32> rSC = f.treeSplitConditions((int32) r);
+            Tensor<int32>   rDL = f.treeDefaultLeft((int32) r);
+            Tensor<float32> rBW = f.treeBaseWeights((int32) r);
+
+            int64 refCount = rBW.shapeAt(0);
+            Assert.that(m.nodeCount[r]).isEqualTo(refCount);
+
+            int64 off = r * cap;
+            int64 nid = (int64) 0;
+            while (nid < refCount) {
+                Assert.that(m.leftChildren[off + nid]).isEqualTo((int64) rLC.flatGet(nid));
+                Assert.that(m.rightChildren[off + nid]).isEqualTo((int64) rRC.flatGet(nid));
+                boolean refLeaf = rLC.flatGet(nid) == (int32) -1;
+                if (!refLeaf) {
+                    Assert.that(m.splitIndices[off + nid]).isEqualTo((int64) rSI.flatGet(nid));
+                    Assert.thatFloat((float64) m.splitConditions[off + nid]).isEqualTo((float64) rSC.flatGet(nid));
+                    boolean refLeft = rDL.flatGet(nid) == (int32) 1;
+                    Assert.isTrue(m.defaultLeft[off + nid] == refLeft);
+                }
+                Assert.thatFloat((float64) m.baseWeights[off + nid]).isEqualTo((float64) rBW.flatGet(nid));
+                nid = nid + (int64) 1;
+            }
+
+            // (b) cumulative margin after round r bit-identical to margins.npy.
+            int64 hoff = r * n;
+            i = (int64) 0;
+            while (i < n) {
+                Assert.thatFloat((float64) marginHistory[hoff + i]).isEqualTo(refMargins.flatGet(hoff + i));
+                i = i + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+
+        // (c) final prediction (identity link) = last-round margin, bit-identical.
+        int64 last = (rounds - (int64) 1) * n;
+        i = (int64) 0;
+        while (i < n) {
+            Assert.thatFloat((float64) marginHistory[last + i]).isEqualTo(refPreds.flatGet(i));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+}
