@@ -46,6 +46,66 @@ def build_dataset(rows, features, seed, missing_frac, n_class):
     return X, y
 
 
+def compute_grad_hess(objective, in_margins, y, n_class):
+    """Per-round (grad, hess) reconstructed from the objective + the margin going
+    INTO each round. NOTE: XGBoost carries grad/hess as float32 GradientPair;
+    this reconstruction is float64 and its last-bit agreement with XGBoost's
+    internal pairs is nailed (or captured via a custom objective) in U5. eps
+    values follow XGBoost."""
+    if objective == "reg:squarederror":
+        grad = in_margins - y                      # [rounds, n]
+        hess = np.ones_like(in_margins)
+    elif objective == "binary:logistic":
+        p = 1.0 / (1.0 + np.exp(-in_margins))
+        grad = p - y
+        hess = np.maximum(p * (1.0 - p), 1e-16)
+    elif objective in ("multi:softprob", "multi:softmax"):
+        m = in_margins - in_margins.max(axis=2, keepdims=True)   # [rounds, n, K]
+        e = np.exp(m); p = e / e.sum(axis=2, keepdims=True)
+        onehot = np.zeros_like(p)
+        idx = y.astype(np.int64)
+        for r in range(p.shape[0]):
+            onehot[r, np.arange(p.shape[1]), idx] = 1.0
+        grad = p - onehot
+        hess = np.maximum(2.0 * p * (1.0 - p), 1e-16)
+    else:
+        raise SystemExit(f"grad/hess not implemented for objective {objective}")
+    return grad.astype(np.float64), hess.astype(np.float64)
+
+
+def base_margin_of(booster, objective, n, n_class):
+    """The round-0 input margin: the objective link applied to the (possibly
+    fitted) base_score, constant across instances. `predict(iteration_range=(0,0))`
+    does NOT give this — end=0 means 'all trees' — so derive it from the config."""
+    import math, json as _json
+    raw = _json.loads(booster.save_config())["learner"]["learner_model_param"]["base_score"]
+    bs = float(str(raw).strip("[]"))
+    if objective == "reg:squarederror":
+        return np.full(n, bs)
+    if objective == "binary:logistic":
+        return np.full(n, math.log(bs / (1.0 - bs)))
+    if objective in ("multi:softprob", "multi:softmax"):
+        return np.zeros((n, n_class))
+    raise SystemExit(f"base margin not implemented for objective {objective}")
+
+
+def bin_indices(X, cut_ptrs, cut_vals):
+    """Per-instance bin index per feature, derived from XGBoost's cut edges.
+    The cuts are the ground truth; this assignment rule (and NaN→missing) is
+    validated/corrected against XGBoost's GHistIndex in U9. Missing → -1."""
+    n, f = X.shape
+    out = np.full((n, f), -1, dtype=np.int32)
+    for j in range(f):
+        cuts = cut_vals[cut_ptrs[j]:cut_ptrs[j + 1]]
+        col = X[:, j]
+        present = ~np.isnan(col)
+        # bin = index of the first cut strictly greater than the value, minus the
+        # leading -inf sentinel (upper_bound convention).
+        b = np.searchsorted(cuts, col[present], side="right") - 1
+        out[present, j] = np.clip(b, 0, len(cuts) - 1).astype(np.int32)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -96,22 +156,39 @@ def main():
     if n_class > 2:
         params["num_class"] = n_class
 
-    dtrain = xgb.DMatrix(X, label=y, missing=np.nan)
+    # QuantileDMatrix is the hist/GPU-native matrix and exposes the cut points
+    # (the exact bin edges the reference used) — the binned-boundary ground truth.
+    dtrain = xgb.QuantileDMatrix(X, label=y, missing=np.nan, max_bin=args.max_bin)
     booster = xgb.train(params, dtrain, num_boost_round=args.num_round)
 
-    # Per-round margins (holdout == train here; parity is on the same rows).
     rounds = args.num_round
-    margins = np.stack([
-        booster.predict(dtrain, iteration_range=(0, r + 1), output_margin=True)
-        for r in range(rounds)
-    ]).astype(np.float64)
+    # Cumulative margin after each round, and the margin GOING INTO each round
+    # (round 0's input is the base margin — derived from base_score, not predict).
+    base_margin = base_margin_of(booster, args.objective, X.shape[0], n_class)
+    cum = [booster.predict(dtrain, iteration_range=(0, r + 1), output_margin=True)
+           for r in range(rounds)]
+    margins = np.stack(cum).astype(np.float64)
+    in_margins = np.stack([base_margin] + cum[:-1]).astype(np.float64)
+    grad, hess = compute_grad_hess(args.objective, in_margins, y, n_class)
     preds = booster.predict(dtrain).astype(np.float64)
+
+    # XGBoost's exact bin edges (CSR: per-feature slices of `values` via `ptrs`),
+    # plus per-instance bin indices computed from those cuts (rule validated in U9).
+    cut_ptrs, cut_vals = dtrain.get_quantile_cut()
+    cut_ptrs = np.asarray(cut_ptrs, dtype=np.int64)
+    cut_vals = np.asarray(cut_vals, dtype=np.float64)
+    bins = bin_indices(X, cut_ptrs, cut_vals)
 
     os.makedirs(args.out, exist_ok=True)
     np.save(os.path.join(args.out, "X.npy"), X)
     np.save(os.path.join(args.out, "y.npy"), y)
     np.save(os.path.join(args.out, "margins.npy"), margins)
     np.save(os.path.join(args.out, "preds.npy"), preds)
+    np.save(os.path.join(args.out, "grad.npy"), grad)
+    np.save(os.path.join(args.out, "hess.npy"), hess)
+    np.save(os.path.join(args.out, "cut_ptrs.npy"), cut_ptrs)
+    np.save(os.path.join(args.out, "cut_values.npy"), cut_vals)
+    np.save(os.path.join(args.out, "bins.npy"), bins)
     booster.save_model(os.path.join(args.out, "model.json"))
 
     manifest = {
@@ -125,7 +202,11 @@ def main():
             "missing_frac": args.missing_frac, "num_class": n_class,
         },
         "num_round": rounds,
-        "artifacts": ["X.npy", "y.npy", "margins.npy", "preds.npy", "model.json"],
+        "artifacts": ["X.npy", "y.npy", "margins.npy", "preds.npy", "grad.npy",
+                      "hess.npy", "cut_ptrs.npy", "cut_values.npy", "bins.npy",
+                      "model.json"],
+        "grad_hess_note": "reconstructed float64; float32-GradientPair parity in U5",
+        "bins_note": "derived from cut_values; GHistIndex-rule parity in U9",
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)

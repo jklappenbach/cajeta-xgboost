@@ -33,6 +33,13 @@
     "y.npy",
     "margins.npy",
     "preds.npy",
+    "grad.npy",
+    "hess.npy",
+    "cut_ptrs.npy",
+    "cut_values.npy",
+    "bins.npy",
     "model.json"
-  ]
+  ],
+  "grad_hess_note": "reconstructed float64; float32-GradientPair parity in U5",
+  "bins_note": "derived from cut_values; GHistIndex-rule parity in U9"
 }
