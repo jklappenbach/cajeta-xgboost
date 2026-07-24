@@ -1,0 +1,35 @@
+package dev.cajeta.xgboost.tree;
+
+/**
+ * A candidate node split — the result of {@link SplitFinder}. Mirrors XGBoost's
+ * `DeviceSplitCandidate` (`xgboost-ref/src/tree/updater_gpu_common.cuh`).
+ *
+ * `fvalue` is the stored numerical threshold (a cut value); `defaultLeft` is the
+ * missing-value direction (`dir == kLeftDir`). `leftG/leftH/rightG/rightH` are
+ * the child gradient sums in int64 fixed point. `valid` is false when no split
+ * passed the `min_child_weight` gate.
+ */
+public final class Split {
+    public boolean valid;
+    public int64 findex;
+    public float32 fvalue;
+    public boolean defaultLeft;
+    public float32 gain;
+    public int64 leftG;
+    public int64 leftH;
+    public int64 rightG;
+    public int64 rightH;
+
+    public Split() {
+        this.valid = false;
+        this.findex = (int64) -1;
+        this.fvalue = (float32) 0.0;
+        this.defaultLeft = true;
+        this.gain = (float32) 0.0;
+        this.leftG = (int64) 0;
+        this.leftH = (int64) 0;
+        this.rightG = (int64) 0;
+        this.rightH = (int64) 0;
+        return;
+    }
+}

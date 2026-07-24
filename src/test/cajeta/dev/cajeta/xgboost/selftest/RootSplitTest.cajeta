@@ -1,0 +1,64 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
+
+/**
+ * U3.1.2 / U3.1.3 — the root split against the CUDA reference tree (`tiny_reg`,
+ * xgboost 3.1.2). cajeta's histogram + split finder must select the *same*
+ * split XGBoost did: feature index, numerical threshold (float32 bit-exact),
+ * and missing default direction — plus both children's leaf weights bit-exact
+ * to the stored `base_weights` (proving the child gradient sums match).
+ *
+ * Params are XGBoost defaults: reg_lambda=1, reg_alpha=0, min_child_weight=1.
+ */
+public class RootSplitTest {
+
+    public RootSplitTest() { return; }
+
+    @Test
+    public void rootSplitMatchesNvidiaReference() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        float64[] g = f.gradRound(0);
+        float64[] h = f.hessRound(0);
+        int64 n = (int64) g.count();
+
+        Tensor<int32> bins = f.bins();
+        Tensor<int64> cutPtrs = f.cutPtrs();
+        Tensor<float64> cutValues = f.cutValues();
+
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        Histogram hist = Histogram.buildAll(bins, cutPtrs, q, g, h, n);
+
+        Split s = SplitFinder.findBest(hist, cutPtrs, cutValues, q,
+                                       (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Assert.isTrue(s.valid);
+
+        // Feature + threshold + default direction match the reference root node.
+        Tensor<int32>   si = f.treeSplitIndices(0);
+        Tensor<float32> sc = f.treeSplitConditions(0);
+        Tensor<int32>   dl = f.treeDefaultLeft(0);
+        Assert.that(s.findex).isEqualTo((int64) si.flatGet(0));
+        Assert.thatFloat((float64) s.fvalue).isEqualTo((float64) sc.flatGet(0));
+        boolean refLeft = dl.flatGet(0) == (int32) 1;
+        Assert.isTrue(s.defaultLeft == refLeft);
+
+        // Child leaf weights bit-exact to stored base_weights (child sums match).
+        Tensor<int32>   lc = f.treeLeftChildren(0);
+        Tensor<int32>   rc = f.treeRightChildren(0);
+        Tensor<float32> bw = f.treeBaseWeights(0);
+        int64 li = (int64) lc.flatGet(0);
+        int64 ri = (int64) rc.flatGet(0);
+        float32 wl = SplitFinder.leafWeight(q, s.leftG, s.leftH,
+                                            (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        float32 wr = SplitFinder.leafWeight(q, s.rightG, s.rightH,
+                                            (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Assert.thatFloat((float64) wl).isEqualTo((float64) bw.flatGet(li));
+        Assert.thatFloat((float64) wr).isEqualTo((float64) bw.flatGet(ri));
+        return;
+    }
+}

@@ -74,19 +74,24 @@ def compute_grad_hess(objective, in_margins, y, n_class):
 
 
 def bin_indices(X, cut_ptrs, cut_vals):
-    """Per-instance bin index per feature, derived from XGBoost's cut edges.
-    The cuts are the ground truth; this assignment rule (and NaN→missing) is
-    validated/corrected against XGBoost's GHistIndex in U9. Missing → -1."""
+    """Per-instance bin index per feature, matching XGBoost's HistogramCuts
+    `SearchBin` exactly (`src/common/hist_util.h:119`): the bin is
+    `upper_bound(cuts, value)` — the position of the first cut strictly greater
+    than the value — with the single clamp `idx == nbins -> nbins-1` (the
+    `idx -= !!(idx == end)` line). There is NO blanket `-1`. Comparisons are in
+    float32, as XGBoost stores both the feature values (DMatrix) and the cut
+    values as float. Missing (NaN) → -1."""
     n, f = X.shape
     out = np.full((n, f), -1, dtype=np.int32)
+    cv32 = np.asarray(cut_vals, dtype=np.float32)
+    X32 = np.asarray(X, dtype=np.float32)
     for j in range(f):
-        cuts = cut_vals[cut_ptrs[j]:cut_ptrs[j + 1]]
-        col = X[:, j]
+        cuts = cv32[cut_ptrs[j]:cut_ptrs[j + 1]]
+        col = X32[:, j]
         present = ~np.isnan(col)
-        # bin = index of the first cut strictly greater than the value, minus the
-        # leading -inf sentinel (upper_bound convention).
-        b = np.searchsorted(cuts, col[present], side="right") - 1
-        out[present, j] = np.clip(b, 0, len(cuts) - 1).astype(np.int32)
+        u = np.searchsorted(cuts, col[present], side="right")   # upper_bound
+        u = np.minimum(u, len(cuts) - 1)                        # idx -= (idx==end)
+        out[present, j] = u.astype(np.int32)
     return out
 
 

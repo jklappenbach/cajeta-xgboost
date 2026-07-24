@@ -1,0 +1,160 @@
+package dev.cajeta.xgboost.tree;
+
+import cajeta.math.Tensor;
+
+/**
+ * Best-split search over a node {@link Histogram}, reproducing XGBoost's GPU
+ * `hist` evaluator bit-for-bit in selection (spec §4.3–4.4). Source:
+ * `xgboost-ref/src/tree/gpu_hist/evaluate_splits.cu` (`Numerical`,
+ * `LossChangeMissing`), `src/tree/split_evaluator.h` (`CalcSplitGain`,
+ * `CalcGainGivenWeight`), `src/tree/updater_gpu_common.cuh`
+ * (`DeviceSplitCandidate::Update`).
+ *
+ * Algorithm, per feature:
+ *   exclusive-scan the feature's bins; at each boundary evaluate the gain with
+ *   the missing gpair sent left vs right (pick the larger). Take the max-gain
+ *   boundary (lowest bin on ties) — this stage ignores `min_child_weight`.
+ * Across features: keep the candidate with strictly greater gain (so ties go to
+ *   the lowest feature index) **and** both children's dequantized hessian
+ *   ≥ `min_child_weight`. A feature whose argmax boundary fails the weight gate
+ *   is dropped, not replaced by its second-best boundary — matching XGBoost.
+ *
+ * Gain uses float32 with the source's narrowing: `(f32)(ThresholdL1(G,α)²) /
+ * (f32)(H+λ)`, children only (the parent term is constant across candidates).
+ */
+public final class SplitFinder {
+
+    /** L1 soft-threshold: `g>α → g-α`, `g<-α → g+α`, else 0. */
+    static float64 thresholdL1(float64 g, float64 alpha) {
+        if (g > alpha) { return g - alpha; }
+        if (g < (float64) 0.0 - alpha) { return g + alpha; }
+        return (float64) 0.0;
+    }
+
+    /** `CalcGainGivenWeight` (α/λ path, no max_delta_step/constraint). */
+    static float32 gainGivenWeight(float64 gd, float64 hd, float64 lambda, float64 alpha) {
+        if (hd <= (float64) 0.0) { return (float32) 0.0; }
+        float64 t = SplitFinder.thresholdL1(gd, alpha);
+        float32 num = (float32) (t * t);
+        float32 den = (float32) (hd + lambda);
+        return num / den;
+    }
+
+    /**
+     * `tree::CalcWeight` on a dequantized (G, H): `-ThresholdL1(G,α)/(H+λ)`,
+     * computed in float64 then narrowed to float32 (XGBoost's stored weight
+     * type). Returns 0 when `H < minChildWeight` or `H ≤ 0` (max_delta_step=0).
+     * Source: `xgboost-ref/src/tree/param.h:245`.
+     */
+    public static float32 leafWeight(GradientQuantiser q, int64 gq, int64 hq,
+                                     float64 lambda, float64 alpha, float64 minChildWeight) {
+        float64 gd = q.floatGrad(gq);
+        float64 hd = q.floatHess(hq);
+        if (hd < minChildWeight || hd <= (float64) 0.0) { return (float32) 0.0; }
+        return (float32) (((float64) 0.0 - SplitFinder.thresholdL1(gd, alpha)) / (hd + lambda));
+    }
+
+    /** `CalcSplitGain` (unconstrained): sum of the two children's gains. */
+    static float32 splitGain(GradientQuantiser q,
+                             int64 lG, int64 lH, int64 rG, int64 rH,
+                             float64 lambda, float64 alpha) {
+        float32 gl = SplitFinder.gainGivenWeight(q.floatGrad(lG), q.floatHess(lH), lambda, alpha);
+        float32 gr = SplitFinder.gainGivenWeight(q.floatGrad(rG), q.floatHess(rH), lambda, alpha);
+        return gl + gr;
+    }
+
+    /**
+     * Find the best split for a node whose histogram is `hist`.
+     *
+     * @param cutValues global cut-value array (indexed by global bin).
+     */
+    public static #Split findBest(Histogram hist, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                                  GradientQuantiser q,
+                                  float64 lambda, float64 alpha, float64 minChildWeight) {
+        Split best = heap Split();
+        float32 bestGain = (float32) 0.0;      // cross-feature running max (strict >)
+        boolean haveBest = false;
+
+        int64 parentG = hist.totalG;
+        int64 parentH = hist.totalH;
+
+        int64 f = (int64) 0;
+        while (f < hist.nf) {
+            int64 b0 = cutPtrs.flatGet(f);
+            int64 b1 = cutPtrs.flatGet(f + (int64) 1);
+
+            // missing gpair for this feature = parent - Σ(feature's bins).
+            int64 fSumG = hist.featureSumG(cutPtrs, f);
+            int64 fSumH = hist.featureSumH(cutPtrs, f);
+            int64 missG = parentG - fSumG;
+            int64 missH = parentH - fSumH;
+
+            // Stage A — per-feature argmax over exclusive-scan boundaries.
+            boolean featHas = false;
+            float32 featGain = (float32) 0.0;
+            int64 featP = (int64) 0;
+            int64 featScanG = (int64) 0;
+            int64 featScanH = (int64) 0;
+            boolean featMissLeft = true;
+
+            int64 scanG = (int64) 0;           // exclusive prefix over the feature's bins
+            int64 scanH = (int64) 0;
+            int64 p = b0;
+            while (p < b1) {
+                // missing-left: left = scan + missing
+                int64 lLG = scanG + missG;
+                int64 lLH = scanH + missH;
+                float32 gainL = SplitFinder.splitGain(q, lLG, lLH,
+                                                      parentG - lLG, parentH - lLH, lambda, alpha);
+                // missing-right: left = scan
+                float32 gainR = SplitFinder.splitGain(q, scanG, scanH,
+                                                      parentG - scanG, parentH - scanH, lambda, alpha);
+                boolean missLeft = gainL > gainR;
+                float32 gain = missLeft ? gainL : gainR;
+
+                if (!featHas || gain > featGain) {
+                    featHas = true;
+                    featGain = gain;
+                    featP = p;
+                    featScanG = scanG;
+                    featScanH = scanH;
+                    featMissLeft = missLeft;
+                }
+
+                scanG = scanG + hist.g[p];
+                scanH = scanH + hist.h[p];
+                p = p + (int64) 1;
+            }
+
+            // Stage B — cross-feature Update: strict > and min_child_weight gate.
+            if (featHas) {
+                int64 lG = featMissLeft ? featScanG + missG : featScanG;
+                int64 lH = featMissLeft ? featScanH + missH : featScanH;
+                int64 rG = parentG - lG;
+                int64 rH = parentH - lH;
+                boolean okW = q.floatHess(lH) >= minChildWeight && q.floatHess(rH) >= minChildWeight;
+                if (okW && (!haveBest || featGain > bestGain)) {
+                    haveBest = true;
+                    bestGain = featGain;
+                    best.valid = true;
+                    best.findex = f;
+                    best.gain = featGain;
+                    best.defaultLeft = featMissLeft;
+                    best.leftG = lG;
+                    best.leftH = lH;
+                    best.rightG = rG;
+                    best.rightH = rH;
+                    // threshold = cut value of the last bin on the left (global bin featP-1).
+                    int64 splitGidx = featP - (int64) 1;
+                    if (splitGidx >= b0) {
+                        best.fvalue = (float32) cutValues.flatGet(splitGidx);
+                    } else {
+                        best.fvalue = (float32) 0.0;   // degenerate (empty left) — gated out anyway
+                    }
+                }
+            }
+            f = f + (int64) 1;
+        }
+        return #best;
+    }
+}
