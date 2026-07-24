@@ -41,6 +41,13 @@ __device__ __forceinline__ float M2(float a,float b){ float r=rcp_approx(b); flo
     q=fmaf(fmaf(-b,q,a),r,q); return fmaf(fmaf(-b,q,a),r,q); }
 __device__ __forceinline__ float M3(float a,float b){ return __fdiv_rn(a,b); }                 // correct rnd
 __device__ __forceinline__ float M4(float a,float b){ return a*__frcp_rn(b); }                 // rn recip
+__device__ __forceinline__ float M5(float a,float b){ float r=rcp_approx(b);                   // dbl-refine rcp
+    double rd=(double)r; rd=rd*(2.0-(double)b*rd); return (float)((double)a*rd); }
+__device__ __forceinline__ float MD(float a,float b){ float d;                                 // div.approx.f32
+    asm("div.approx.f32 %0, %1, %2;" : "=f"(d) : "f"(a), "f"(b)); return d; }
+// M0 with the reciprocal kept in double before the single multiply-round. If the
+// float32-rounded table loses guard bits, this stays float32 → identical to M0;
+// used only to confirm the double-rounding hypothesis with the extended rcp below.
 
 __global__ void fill_table(uint32_t* out, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -57,7 +64,7 @@ __global__ void fill_table(uint32_t* out, int n) {
 // mism[1..5]=M0..M4.
 __global__ void verify(const uint32_t* table, uint64_t* mism, int reps) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t s[6] = {0,0,0,0,0,0};
+    uint64_t s[8] = {0,0,0,0,0,0,0,0};
     uint32_t rng = 0x9E3779B9u * (uint32_t)(t + 1);
     for (int k = 0; k < reps; ++k) {
         rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
@@ -78,19 +85,32 @@ __global__ void verify(const uint32_t* table, uint64_t* mism, int reps) {
         if (bits(M2(a,b)) != fd) s[3]++;
         if (bits(M3(a,b)) != fd) s[4]++;
         if (bits(M4(a,b)) != fd) s[5]++;
+        if (bits(M5(a,b)) != fd) s[6]++;
+        if (bits(MD(a,b)) != fd) s[7]++;
     }
-    for (int j = 0; j < 6; ++j) atomicAdd((unsigned long long*)&mism[j], (unsigned long long)s[j]);
+    for (int j = 0; j < 8; ++j) atomicAdd((unsigned long long*)&mism[j], (unsigned long long)s[j]);
 }
 
-// Dump a handful of concrete (a,b) with every candidate's bits, for manual diff.
-__global__ void examples(uint32_t* out) {
-    int i = threadIdx.x; if (i >= 8) return;
-    uint32_t ab[8] = {0x40400000,0x40a00000,0x3fc00000,0x41800000,0x3f000000,0x42f60000,0x3e800000,0x40e00000};
-    uint32_t bb[8] = {0x40e00000,0x40100000,0x41600000,0x3fa00000,0x43160000,0x40000000,0x41c80000,0x3f400000};
-    float a,b; memcpy(&a,&ab[i],4); memcpy(&b,&bb[i],4);
-    uint32_t* o = out + i*8;
-    o[0]=ab[i]; o[1]=bb[i]; o[2]=bits(fdividef_dev(a,b));
-    o[3]=bits(M0(a,b)); o[4]=bits(M1(a,b)); o[5]=bits(M2(a,b)); o[6]=bits(M3(a,b)); o[7]=bits(M4(a,b));
+// Capture the first `maxn` cases where M0 (a*rcp32) disagrees with __fdividef, with
+// full detail so the exact correction can be reverse-engineered off-device.
+__global__ void capture(uint32_t* out, int* cnt, int maxn, int reps) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t rng = 0x1234567u * (uint32_t)(t + 1);
+    for (int k = 0; k < reps; ++k) {
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+        uint32_t bb = ((1u + (rng % 254u)) << 23) | ((rng >> 3) & 0x7FFFFFu); float b; memcpy(&b,&bb,4);
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+        uint32_t ab = ((1u + (rng % 254u)) << 23) | ((rng >> 3) & 0x7FFFFFu); float a; memcpy(&a,&ab,4);
+        float r = rcp_approx(b), fd = fdividef_dev(a, b), m0 = a * r;
+        if (bits(m0) != bits(fd)) {
+            int idx = atomicAdd(cnt, 1);
+            if (idx < maxn) {
+                uint32_t* o = out + idx * 6;
+                o[0]=ab; o[1]=bb; o[2]=bits(r); o[3]=bits(fd); o[4]=bits(m0);
+                o[5]=bits((float)((double)a/(double)b));   // correctly-rounded a/b
+            }
+        }
+    }
 }
 
 static void write_npy_i32(const char* path, const uint32_t* data, int64_t n) {
@@ -120,29 +140,32 @@ int main() {
     uint32_t* h = (uint32_t*)malloc((size_t)N * 4);
     cudaMemcpy(h, d_out, (size_t)N * 4, cudaMemcpyDeviceToHost);
 
-    uint64_t* d_m; cudaMalloc(&d_m, 48); cudaMemset(d_m, 0, 48);
+    uint64_t* d_m; cudaMalloc(&d_m, 64); cudaMemset(d_m, 0, 64);
     verify<<<256, 256>>>(d_out, d_m, 4096);
     cudaDeviceSynchronize();
-    uint64_t m[6]; cudaMemcpy(m, d_m, 48, cudaMemcpyDeviceToHost);
+    uint64_t m[8]; cudaMemcpy(m, d_m, 64, cudaMemcpyDeviceToHost);
     uint64_t total = (uint64_t)256 * 256 * 4096;
-    const char* names[6] = {"exponent-factoring",
-        "M0 a*rcp", "M1 rcp+1 Newton", "M2 rcp+2 Newton", "M3 __fdiv_rn (correct)", "M4 a*__frcp_rn"};
+    const char* names[8] = {"exponent-factoring",
+        "M0 a*rcp", "M1 rcp+1 Newton", "M2 rcp+2 Newton", "M3 __fdiv_rn (correct)",
+        "M4 a*__frcp_rn", "M5 rcp dbl-refine", "MD div.approx.f32"};
     printf("over %llu samples:\n", (unsigned long long)total);
-    for (int j = 0; j < 6; ++j)
+    for (int j = 0; j < 8; ++j)
         printf("  %-24s mismatches = %llu%s\n", names[j], (unsigned long long)m[j],
                (m[j]==0 ? "   <-- MATCH" : ""));
-    printf("=> factoring %s; __fdividef model = the M* line reading MATCH above.\n",
-           m[0]==0 ? "HOLDS (mantissa table sufficient)" : "FAILED (ping me)");
 
-    // concrete examples for manual diff
-    uint32_t* d_ex; cudaMalloc(&d_ex, 8*8*4); examples<<<1,8>>>(d_ex);
+    // Capture M0-vs-__fdividef disagreements for reverse-engineering the correction.
+    const int MAXC = 40;
+    uint32_t* d_cap; cudaMalloc(&d_cap, MAXC*6*4);
+    int* d_cnt; cudaMalloc(&d_cnt, 4); cudaMemset(d_cnt, 0, 4);
+    capture<<<256, 256>>>(d_cap, d_cnt, MAXC, 4096);
     cudaDeviceSynchronize();
-    uint32_t ex[64]; cudaMemcpy(ex, d_ex, 8*8*4, cudaMemcpyDeviceToHost);
-    printf("examples (hex bits): a b fdividef | M0 M1 M2 M3 M4\n");
-    for (int i = 0; i < 8; ++i) {
-        uint32_t* o = ex + i*8;
-        printf("  %08x %08x %08x | %08x %08x %08x %08x %08x\n",
-               o[0],o[1],o[2],o[3],o[4],o[5],o[6],o[7]);
+    uint32_t cap[MAXC*6]; int cnt; cudaMemcpy(cap, d_cap, MAXC*6*4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(&cnt, d_cnt, 4, cudaMemcpyDeviceToHost);
+    int shown = cnt < MAXC ? cnt : MAXC;
+    printf("M0!=fdividef cases (a b rcp32 fdividef M0 correct):\n");
+    for (int i = 0; i < shown; ++i) {
+        uint32_t* o = cap + i*6;
+        printf("  %08x %08x %08x %08x %08x %08x\n", o[0],o[1],o[2],o[3],o[4],o[5]);
     }
 
     cudaDeviceProp p; cudaGetDeviceProperties(&p, 0);
