@@ -7,10 +7,14 @@ package dev.cajeta.xgboost.fastmath;
  * matches the reference on all but knife-edge near-tied splits (e.g.
  * `tiny_reg_mcw10` nodes 5/12); those need this exact model.
  *
- * On device `__fdividef(a, b) == a * rcp.approx.f32(b)` (the SFU reciprocal
- * `MUFU.RCP`), verified by `tools/fdividef/probe_rcp.cu`. `MUFU.RCP` has no
- * closed form — it is a silicon lookup table (±2 ULP vs IEEE, deterministic).
- * But reciprocal factors exactly by the exponent:
+ * Probed on the reference GPU (RTX 4090, sm_89, `tools/fdividef/probe_rcp.cu`):
+ * `__fdividef` is exactly the `div.approx.f32` instruction, and for every
+ * normal-range `b` it equals `a * rcp.approx.f32(b)` bit-for-bit. (The two differ
+ * only when `|b|` is near `FLT_MAX`, where `__fdividef` flushes to 0 — outside the
+ * split-gain domain `b = H + λ`, so irrelevant here; {@link #fdividef} matches that
+ * flush anyway for completeness.) `MUFU.RCP` has no closed form — it is a silicon
+ * lookup table (±2 ULP vs IEEE, deterministic), NOT the correctly-rounded
+ * reciprocal. But reciprocal factors exactly by the exponent:
  *
  *     rcp(b) = rcp(2^E · m) = ldexp(rcp(m), −E),   m ∈ [1, 2)
  *

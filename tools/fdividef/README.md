@@ -37,11 +37,31 @@ GPU: <name>  sm_XX
 wrote rcp_mantissa.npy (8388608 entries, 33.6 MB)
 ```
 
-**Paste me the whole block.** I need: (1) `exponent-factoring` = 0 (mantissa table
-suffices), and (2) exactly which `M*` line reads `MATCH` (the `__fdividef` model).
-All M1/M2 use `MUFU.RCP` + FMA — both bit-reproducible on CPU — so whichever matches,
-I can port it exactly. If none match, the examples block lets me reverse-engineer the
-sequence by hand.
+## Result (RTX 4090, sm_89)
+
+- `exponent-factoring` = 0 → the 2^23 mantissa table fully captures `MUFU.RCP`.
+- `MD div.approx.f32` = 0 → **`__fdividef` is exactly `div.approx.f32`**.
+- `M0 a*rcp` disagrees only on huge `b` (exp 253–254, |b|≈2^127): `__fdividef`
+  flushes to 0 there. **For every normal-range `b` (all XGBoost feeds it),
+  `a * rcp.approx.f32(b)` == `__fdividef` bit-for-bit.**
+
+So the model is settled: `fdividef(a,b) = a * rcp.approx.f32(b)`, with a flush-to-0
+guard for near-`FLT_MAX` `b`. The one CPU-side ingredient is `rcp.approx.f32` — the
+SFU reciprocal (NOT the correctly-rounded reciprocal), which is the captured table.
+
+## Getting the table to me
+
+`rcp_mantissa.npy` is the ground truth. `scp` it to `proton` (it's `.gitignore`d, so
+it stays out of git):
+
+```bash
+scp rcp_mantissa.npy proton:/home/julian/code/cpp/cajeta-xgboost/tools/fdividef/
+```
+
+Then I: (1) validate it closes `mcw10` (node-5 feature-4 gain via `a*rcp` from the
+table), (2) wire `FastMath.fdividef` into `SplitFinder`, and (3) build the compact
+CPU-reproducible seed (reverse-engineered SFU interpolator) so CI regenerates the
+table without a GPU.
 
 ## The 33 MB table is a build input, never committed (regenerate-in-CI)
 
