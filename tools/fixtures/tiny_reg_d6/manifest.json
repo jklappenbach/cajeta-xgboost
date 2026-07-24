@@ -1,0 +1,45 @@
+{
+  "xgboost_version": "3.1.2",
+  "is_reference": true,
+  "note": "NVIDIA GPU reference",
+  "params": {
+    "objective": "reg:squarederror",
+    "tree_method": "hist",
+    "device": "cuda",
+    "seed": 0,
+    "max_depth": 6,
+    "max_bin": 256,
+    "eta": 0.3,
+    "reg_lambda": 1.0,
+    "gamma": 0.0,
+    "min_child_weight": 1.0,
+    "base_score": 0.5,
+    "subsample": 1.0,
+    "colsample_bytree": 1.0,
+    "colsample_bylevel": 1.0,
+    "colsample_bynode": 1.0,
+    "nthread": 1
+  },
+  "dataset": {
+    "rows": 200,
+    "features": 5,
+    "seed": 0,
+    "missing_frac": 0.0,
+    "num_class": 0
+  },
+  "num_round": 3,
+  "artifacts": [
+    "X.npy",
+    "y.npy",
+    "margins.npy",
+    "preds.npy",
+    "grad.npy",
+    "hess.npy",
+    "cut_ptrs.npy",
+    "cut_values.npy",
+    "bins.npy",
+    "model.json"
+  ],
+  "grad_hess_note": "reconstructed float64; float32-GradientPair parity in U5",
+  "bins_note": "derived from cut_values; GHistIndex-rule parity in U9"
+}
