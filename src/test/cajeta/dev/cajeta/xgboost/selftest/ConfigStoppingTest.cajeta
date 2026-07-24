@@ -1,0 +1,72 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.xgboost.tree.Tree;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+
+/**
+ * U4.1.2 (local portion) — the stopping rules are wired and effective. Full
+ * bit-exact-vs-reference parity across varied configs is gated on NVIDIA-generated
+ * reference fixtures for those configs (the reference is CUDA xgboost 3.1.2;
+ * `gen_reference.py` carries the config variants — see the plan note on 4.1.2).
+ * These assertions need no reference: they pin the *structural* effect of each
+ * stopping knob on the `tiny_reg` data, using the same builder path the parity
+ * tests use.
+ *
+ *   - `max_depth` caps growth: at max_depth=1 the root's children are leaves, and
+ *     node count is monotone non-decreasing in depth (a shallower tree is a
+ *     growth-prefix of a deeper one — `driver.h` DepthWise).
+ *   - `gamma` (min_split_loss): a huge γ makes every candidate's loss_chg < γ, so
+ *     no node splits — the tree is a single leaf (`expand_entry.cuh` IsValid).
+ *   - `min_child_weight`: a huge value fails the child-hessian gate everywhere,
+ *     so no split is valid — a single leaf (`evaluate_splits.cu`).
+ */
+public class ConfigStoppingTest {
+
+    public ConfigStoppingTest() { return; }
+
+    static #Tree grow(int64 maxDepth, float64 gamma, float64 minChildWeight) {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        float64[] g = f.gradRound(0);
+        float64[] h = f.hessRound(0);
+        int64 n = (int64) g.count();
+        return TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+                                    maxDepth, (int64) 0,
+                                    (float64) 1.0, (float64) 0.0, gamma, minChildWeight,
+                                    (float64) 0.3);
+    }
+
+    @Test
+    public void maxDepthCapsGrowth() {
+        Tree d1 = ConfigStoppingTest.grow((int64) 1, (float64) 0.0, (float64) 1.0);
+        // Root splits (RootSplitTest), and its depth-1 children hit the cap → leaves.
+        Assert.isTrue(d1.leftChildren[(int64) 0] != (int64) -1);
+        Assert.that(d1.nodeCount).isEqualTo((int64) 3);
+        Assert.that(d1.leftChildren[(int64) 1]).isEqualTo((int64) -1);
+        Assert.that(d1.rightChildren[(int64) 1]).isEqualTo((int64) -1);
+        Assert.that(d1.leftChildren[(int64) 2]).isEqualTo((int64) -1);
+        Assert.that(d1.rightChildren[(int64) 2]).isEqualTo((int64) -1);
+
+        // Node count is monotone non-decreasing in depth.
+        Tree d2 = ConfigStoppingTest.grow((int64) 2, (float64) 0.0, (float64) 1.0);
+        Tree d4 = ConfigStoppingTest.grow((int64) 4, (float64) 0.0, (float64) 1.0);
+        Assert.isTrue(d1.nodeCount <= d2.nodeCount);
+        Assert.isTrue(d2.nodeCount <= d4.nodeCount);
+    }
+
+    @Test
+    public void hugeGammaForcesSingleLeaf() {
+        Tree t = ConfigStoppingTest.grow((int64) 4, (float64) 1000000000.0, (float64) 1.0);
+        Assert.that(t.nodeCount).isEqualTo((int64) 1);
+        Assert.that(t.leftChildren[(int64) 0]).isEqualTo((int64) -1);
+        Assert.isTrue(t.isLeaf[(int64) 0]);
+    }
+
+    @Test
+    public void hugeMinChildWeightForcesSingleLeaf() {
+        Tree t = ConfigStoppingTest.grow((int64) 4, (float64) 0.0, (float64) 1000000000.0);
+        Assert.that(t.nodeCount).isEqualTo((int64) 1);
+        Assert.that(t.leftChildren[(int64) 0]).isEqualTo((int64) -1);
+        Assert.isTrue(t.isLeaf[(int64) 0]);
+    }
+}

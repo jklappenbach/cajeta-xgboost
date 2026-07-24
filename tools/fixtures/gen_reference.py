@@ -26,6 +26,14 @@ CONFIGS = [
     ("tiny_reg_missing", ["--objective", "reg:squarederror", "--rows", "500",  "--features", "8", "--missing-frac", "0.15"]),
     ("tiny_binary",      ["--objective", "binary:logistic",  "--rows", "500",  "--features", "8", "--num-class", "2"]),
     ("tiny_multi",       ["--objective", "multi:softprob",   "--rows", "600",  "--features", "8", "--num-class", "4"]),
+    # U4 config-variants of tiny_reg — same data, one regularization knob moved
+    # each, so a single tree can be asserted bit-identical across depth/λ/γ/mcw
+    # (plan 4.1.2 / 4.3.1). ConfigParityTest reads these; it stays @Disabled until
+    # they are regenerated on NVIDIA and committed.
+    ("tiny_reg_d2",      ["--objective", "reg:squarederror", "--rows", "200",  "--features", "5", "--max-depth", "2"]),
+    ("tiny_reg_d6",      ["--objective", "reg:squarederror", "--rows", "200",  "--features", "5", "--max-depth", "6"]),
+    ("tiny_reg_mcw10",   ["--objective", "reg:squarederror", "--rows", "200",  "--features", "5", "--min-child-weight", "10"]),
+    ("tiny_reg_gamma1",  ["--objective", "reg:squarederror", "--rows", "200",  "--features", "5", "--gamma", "1.0"]),
 ]
 
 

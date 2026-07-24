@@ -24,8 +24,8 @@ public final class Histogram {
     public int64 totalH;      // node total quantized hessian
 
     Histogram(int64[] g, int64[] h, int64 nbins, int64 nf, int64 totalG, int64 totalH) {
-        this.g = g;
-        this.h = h;
+        this.g #= g;              // own the bins — a plain borrow would dangle once
+        this.h #= h;              // the builder's arena-allocated arrays are reclaimed
         this.nbins = nbins;
         this.nf = nf;
         this.totalG = totalG;
@@ -73,7 +73,7 @@ public final class Histogram {
             }
             k = k + (int64) 1;
         }
-        return heap Histogram(gg, hh, nbins, nf, totG, totH);
+        return heap Histogram(#gg, #hh, nbins, nf, totG, totH);
     }
 
     /** Build the histogram over the rows currently assigned to node `nid`
@@ -109,7 +109,45 @@ public final class Histogram {
             }
             r = r + (int64) 1;
         }
-        return heap Histogram(gg, hh, nbins, nf, totG, totH);
+        return heap Histogram(#gg, #hh, nbins, nf, totG, totH);
+    }
+
+    /**
+     * Sibling subtraction: `parent − child`, per global bin and node totals.
+     * Because the sums are int64 fixed-point under one tree-wide quantiser, this
+     * is **exact** — the result is bit-identical to building the sibling's rows
+     * directly (every row lands in exactly one child and a row's per-feature bin
+     * never changes, so `parent[b] = left[b] + right[b]` holds for every bin).
+     * Source: `xgboost-ref/src/tree/gpu_hist/histogram.cu` (subtraction trick),
+     * spec §4.2.
+     */
+    public static #Histogram subtract(Histogram parent, Histogram child) {
+        int64 nb = parent.nbins;
+        int64[] gg = heap int64[nb];
+        int64[] hh = heap int64[nb];
+        int64 b = (int64) 0;
+        while (b < nb) {
+            gg[b] = parent.g[b] - child.g[b];
+            hh[b] = parent.h[b] - child.h[b];
+            b = b + (int64) 1;
+        }
+        return heap Histogram(#gg, #hh, nb, parent.nf,
+                              parent.totalG - child.totalG, parent.totalH - child.totalH);
+    }
+
+    /**
+     * Materialize a node's histogram by copying its slice `[base, base+nbins)`
+     * out of a flat per-node store (the builder's persistence layer, indexed by
+     * `nid*nbins + globalBin`). The copy is indexed by global bin, matching the
+     * layout {@link SplitFinder} expects.
+     */
+    public static #Histogram fromStore(int64[] sg, int64[] sh, int64 base, int64 nbins,
+                                       int64 nf, int64 totG, int64 totH) {
+        int64[] gg = heap int64[nbins];
+        int64[] hh = heap int64[nbins];
+        int64 b = (int64) 0;
+        while (b < nbins) { gg[b] = sg[base + b]; hh[b] = sh[base + b]; b = b + (int64) 1; }
+        return heap Histogram(#gg, #hh, nbins, nf, totG, totH);
     }
 
     /** Sum of a single feature's bins (non-missing rows) as a quantized gradient. */

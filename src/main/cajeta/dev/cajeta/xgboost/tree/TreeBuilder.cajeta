@@ -20,13 +20,17 @@ import cajeta.math.Tensor;
  * `depth < max_depth` (`expand_entry.cuh` `IsValid`). Otherwise it is a leaf.
  * Present rows go left iff `bin ≤ splitGidx`; missing rows follow the default.
  *
+ * Each node's histogram is kept in a flat per-node store (`histG`/`histH`,
+ * indexed by `nid*nbins + globalBin`). The root is built directly; on a split
+ * the child with **fewer rows** is built directly and its sibling is derived by
+ * subtraction (`parent − built`, exact in int64 fixed-point — spec §4.2,
+ * {@link Histogram#subtract}). This halves the histogram work per level and is
+ * bit-identical to building both children fresh.
+ *
  * The grown tree is written into the caller's parallel out-param arrays (each
  * sized `capacity(maxDepth)`), indexed by node id: `si` split feature, `sc`
  * threshold / leaf value, `dl` default-left, `lc`/`rc` children (−1 for leaves),
  * `bw` `CalcWeight` per node, `leaf` leaf flag. Returns the node count.
- * (Out-params rather than a returned struct: a multi-array object returned
- * across a call boundary currently miscompiles — its first two array fields
- * alias. See the U3 plan note.)
  */
 public final class TreeBuilder {
 
@@ -69,8 +73,15 @@ public final class TreeBuilder {
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf) {
         GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
+        int64 nbins = cutPtrs.flatGet(nf);
 
         int64 cap = TreeBuilder.capacity(maxDepth);
+        // Per-node histogram store (flat: nid*nbins + globalBin) + node totals.
+        int64[] histG = heap int64[cap * nbins];
+        int64[] histH = heap int64[cap * nbins];
+        int64[] totGof = heap int64[cap];
+        int64[] totHof = heap int64[cap];
+
         int64[] depthOf = heap int64[cap];
         int64[] queue = heap int64[cap];
         int64 i = (int64) 0;
@@ -82,6 +93,10 @@ public final class TreeBuilder {
         i = (int64) 0;
         while (i < n) { position[i] = (int64) 0; i = i + (int64) 1; }
 
+        // Root histogram (built directly over all rows).
+        TreeBuilder.buildInto(histG, histH, totGof, totHof, (int64) 0, (int64) 0,
+                              bins, cutPtrs, q, grad, hess, position, nf, n);
+
         int64 nodeCount = (int64) 1;
         int64 numLeaves = (int64) 1;
         int64 head = (int64) 0;
@@ -91,8 +106,10 @@ public final class TreeBuilder {
         while (head < tail) {
             int64 nid = queue[head]; head = head + (int64) 1;
             int64 depth = depthOf[nid];
+            int64 base = nid * nbins;
 
-            Histogram hist = Histogram.buildPos(bins, cutPtrs, q, grad, hess, position, nid, n);
+            // This node's histogram is already resident in the store.
+            Histogram hist = Histogram.fromStore(histG, histH, base, nbins, nf, totGof[nid], totHof[nid]);
             // Raw node weight (XGBoost's base_weight — no shrinkage).
             float32 rawW = SplitFinder.leafWeight(q, hist.totalG, hist.totalH, lambda, alpha, minChildWeight);
 
@@ -131,15 +148,33 @@ public final class TreeBuilder {
                 int64 b0 = cutPtrs.flatGet(s.findex);
                 int64 localSplit = s.splitGidx - b0;
                 int64 r = (int64) 0;
+                int64 cntL = (int64) 0;
+                int64 cntR = (int64) 0;
                 while (r < n) {
                     if (position[r] == nid) {
                         int32 b = bins.flatGet(r * nf + s.findex);
                         boolean goLeft;
                         if (b < (int32) 0) { goLeft = s.defaultLeft; }
                         else { goLeft = (int64) b <= localSplit; }
-                        position[r] = goLeft ? li : ri;
+                        if (goLeft) { position[r] = li; cntL = cntL + (int64) 1; }
+                        else        { position[r] = ri; cntR = cntR + (int64) 1; }
                     }
                     r = r + (int64) 1;
+                }
+
+                // Sibling subtraction: build the smaller child directly, derive
+                // the larger as parent − built (exact int64; §4.2). Both children's
+                // slices persist in the store for when they're dequeued.
+                if (cntL <= cntR) {
+                    TreeBuilder.buildInto(histG, histH, totGof, totHof, li * nbins, li,
+                                          bins, cutPtrs, q, grad, hess, position, nf, n);
+                    TreeBuilder.subtractInto(histG, histH, totGof, totHof,
+                                             base, li * nbins, ri * nbins, nid, li, ri, nbins);
+                } else {
+                    TreeBuilder.buildInto(histG, histH, totGof, totHof, ri * nbins, ri,
+                                          bins, cutPtrs, q, grad, hess, position, nf, n);
+                    TreeBuilder.subtractInto(histG, histH, totGof, totHof,
+                                             base, ri * nbins, li * nbins, nid, ri, li, nbins);
                 }
 
                 queue[tail] = li; tail = tail + (int64) 1;
@@ -153,5 +188,60 @@ public final class TreeBuilder {
             }
         }
         return nodeCount;
+    }
+
+    /**
+     * Accumulate node `nid`'s histogram into the store slice `[base, base+nbins)`
+     * by scanning all `n` rows and summing quantized gpairs for rows with
+     * `position[r] == nid`. The slice is assumed zero (each node id is written
+     * once). Missing values (`bin < 0`) contribute to the node total but to no
+     * bin — recovered as the default-direction gpair in {@link SplitFinder}.
+     */
+    static void buildInto(int64[] histG, int64[] histH, int64[] totGof, int64[] totHof,
+                          int64 base, int64 nid,
+                          Tensor<int32> bins, Tensor<int64> cutPtrs, GradientQuantiser q,
+                          float64[] grad, float64[] hess, int64[] position, int64 nf, int64 n) {
+        int64 tg = (int64) 0;
+        int64 th = (int64) 0;
+        int64 r = (int64) 0;
+        while (r < n) {
+            if (position[r] == nid) {
+                int64 qg = q.fixedGrad(grad[r]);
+                int64 qh = q.fixedHess(hess[r]);
+                tg = tg + qg;
+                th = th + qh;
+                int64 f = (int64) 0;
+                while (f < nf) {
+                    int32 b = bins.flatGet(r * nf + f);
+                    if (b >= (int32) 0) {
+                        int64 gb = base + cutPtrs.flatGet(f) + (int64) b;
+                        histG[gb] = histG[gb] + qg;
+                        histH[gb] = histH[gb] + qh;
+                    }
+                    f = f + (int64) 1;
+                }
+            }
+            r = r + (int64) 1;
+        }
+        totGof[nid] = tg;
+        totHof[nid] = th;
+    }
+
+    /**
+     * Derive `target = parent − built` in the store (per bin and node totals),
+     * exact in int64 fixed-point. `parentNid`/`builtNid`/`targetNid` index the
+     * per-node total arrays; the `*Base` args are `nid*nbins` slice offsets.
+     */
+    static void subtractInto(int64[] histG, int64[] histH, int64[] totGof, int64[] totHof,
+                             int64 parentBase, int64 builtBase, int64 targetBase,
+                             int64 parentNid, int64 builtNid, int64 targetNid, int64 nbins) {
+        int64 b = (int64) 0;
+        while (b < nbins) {
+            histG[targetBase + b] = histG[parentBase + b] - histG[builtBase + b];
+            histH[targetBase + b] = histH[parentBase + b] - histH[builtBase + b];
+            b = b + (int64) 1;
+        }
+        totGof[targetNid] = totGof[parentNid] - totGof[builtNid];
+        totHof[targetNid] = totHof[parentNid] - totHof[builtNid];
     }
 }

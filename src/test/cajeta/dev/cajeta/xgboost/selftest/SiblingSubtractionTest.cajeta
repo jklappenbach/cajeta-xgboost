@@ -1,0 +1,90 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
+
+/**
+ * U4.1.1 — the sibling-subtraction invariant. Because histograms are int64
+ * fixed-point under one tree-wide {@link GradientQuantiser}, deriving a child as
+ * `parent − sibling` is **exact**: bit-identical to building that child's rows
+ * directly. This is what lets the builder halve its per-level histogram work
+ * (spec §4.2, `xgboost-ref/src/tree/gpu_hist/histogram.cu`).
+ *
+ * Split the `tiny_reg` root by its best split, partition the rows to the two
+ * children, build both children directly, and assert (1) the per-bin add-up
+ * identity `parent = left + right`, and (2) `Histogram.subtract(parent, right)`
+ * reproduces the directly-built left child bit-for-bit (and symmetrically).
+ */
+public class SiblingSubtractionTest {
+
+    public SiblingSubtractionTest() { return; }
+
+    @Test
+    public void subtractedSiblingIsBitIdenticalToFreshBuild() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        float64[] g = f.gradRound(0);
+        float64[] h = f.hessRound(0);
+        int64 n = (int64) g.count();
+
+        Tensor<int32>   bins    = f.bins();
+        Tensor<int64>   cutPtrs = f.cutPtrs();
+        Tensor<float64> cutVals = f.cutValues();
+        int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
+
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        Histogram parent = Histogram.buildAll(bins, cutPtrs, q, g, h, n);
+
+        Split s = SplitFinder.findBest(parent, cutPtrs, cutVals, q,
+                                       (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Assert.isTrue(s.valid);
+
+        // Partition the root's rows to child 1 (left) / child 2 (right).
+        int64 b0 = cutPtrs.flatGet(s.findex);
+        int64 localSplit = s.splitGidx - b0;
+        int64[] position = heap int64[n];
+        int64 r = (int64) 0;
+        while (r < n) {
+            int32 b = bins.flatGet(r * nf + s.findex);
+            boolean goLeft;
+            if (b < (int32) 0) { goLeft = s.defaultLeft; }
+            else { goLeft = (int64) b <= localSplit; }
+            position[r] = goLeft ? (int64) 1 : (int64) 2;
+            r = r + (int64) 1;
+        }
+
+        Histogram left  = Histogram.buildPos(bins, cutPtrs, q, g, h, position, (int64) 1, n);
+        Histogram right = Histogram.buildPos(bins, cutPtrs, q, g, h, position, (int64) 2, n);
+
+        // (1) Per-bin add-up identity: parent = left + right, exactly.
+        int64 nb = parent.nbins;
+        int64 bi = (int64) 0;
+        while (bi < nb) {
+            Assert.that(parent.g[bi]).isEqualTo(left.g[bi] + right.g[bi]);
+            Assert.that(parent.h[bi]).isEqualTo(left.h[bi] + right.h[bi]);
+            bi = bi + (int64) 1;
+        }
+        Assert.that(parent.totalG).isEqualTo(left.totalG + right.totalG);
+        Assert.that(parent.totalH).isEqualTo(left.totalH + right.totalH);
+
+        // (2) subtract(parent, right) reproduces the fresh left bit-for-bit.
+        Histogram derivedLeft = Histogram.subtract(parent, right);
+        Assert.that(derivedLeft.totalG).isEqualTo(left.totalG);
+        Assert.that(derivedLeft.totalH).isEqualTo(left.totalH);
+        Histogram derivedRight = Histogram.subtract(parent, left);
+        Assert.that(derivedRight.totalG).isEqualTo(right.totalG);
+        Assert.that(derivedRight.totalH).isEqualTo(right.totalH);
+        bi = (int64) 0;
+        while (bi < nb) {
+            Assert.that(derivedLeft.g[bi]).isEqualTo(left.g[bi]);
+            Assert.that(derivedLeft.h[bi]).isEqualTo(left.h[bi]);
+            Assert.that(derivedRight.g[bi]).isEqualTo(right.g[bi]);
+            Assert.that(derivedRight.h[bi]).isEqualTo(right.h[bi]);
+            bi = bi + (int64) 1;
+        }
+        return;
+    }
+}
