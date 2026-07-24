@@ -36,4 +36,8 @@ echo ">> building + running the test binary"
 
 # Parity tests load golden fixtures from tools/fixtures via this env var.
 export XGBOOST_FIXTURES="$here/tools/fixtures"
+# Probed SFU reciprocal table for bit-exact __fdividef gain scoring (FastMath).
+# Absent (e.g. CI without the capture) → FastMath uses a correctly-rounded fallback.
+rcp="$here/tools/fdividef/rcp_mantissa.npy"
+[ -f "$rcp" ] && export RCP_TABLE="$rcp"
 "$out/xgboosttests"
