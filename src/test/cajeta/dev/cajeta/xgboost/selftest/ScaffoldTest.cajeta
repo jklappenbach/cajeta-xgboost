@@ -1,0 +1,20 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.xgboost.XGBoost;
+
+/**
+ * Unit 1 (1.1.1) — the scaffold smoke test: proves the library `.cja` links onto
+ * the test classpath (a call into `dev.cajeta.xgboost` resolves at runtime) and
+ * that cajeta-unit's reflective `@Test` discovery runs.
+ */
+public class ScaffoldTest {
+
+    public ScaffoldTest() { return; }
+
+    @Test
+    public void libraryLinksAndVersionMatches() {
+        Assert.equals("0.1.0", XGBoost.version());
+        return;
+    }
+}

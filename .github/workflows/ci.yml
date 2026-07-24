@@ -1,0 +1,55 @@
+# CI for the cajeta-xgboost library (.cja).
+#
+# Installs a published cajeta toolchain, builds the xgboost .cja + the cajeta-unit
+# dependency, and runs the parity + unit suite. Like cajeta-codec, this is a
+# pure-Cajeta library — no cross-build.
+#
+# Triggers: push to main / PR → build + test. (v* tag release publishing added
+# when the library cuts its first release.)
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # A published cajeta toolchain that ships cajeta.nucleo.* (frame/column) — the
+  # library depends on it from the tree-builder units onward. Bump as needed.
+  CAJETA_VERSION: v0.10.0
+
+jobs:
+  build-test:
+    name: build + test (x86_64-linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout cajeta-xgboost
+        uses: actions/checkout@v4
+
+      - name: Checkout cajeta-unit (test framework dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-unit
+          path: cajeta-unit-dep
+
+      - name: Install cajeta toolchain (${{ env.CAJETA_VERSION }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$CAJETA_VERSION" --repo jklappenbach/cajeta \
+            --pattern 'cajeta_*_amd64.deb' --dir /tmp
+          sudo apt-get update
+          sudo apt-get install -y /tmp/cajeta_*_amd64.deb
+          cajeta --version || true
+
+      - name: Run the test suite
+        env:
+          UNIT_REPO: ${{ github.workspace }}/cajeta-unit-dep
+        run: ./run-tests.sh
