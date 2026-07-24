@@ -17,3 +17,7 @@ __pycache__/
 # from the compact SFU seed; see tools/fdividef/README.md)
 tools/fdividef/rcp_mantissa.npy
 tools/fdividef/probe_rcp
+
+# expf probe output (build input, never committed)
+tools/expf/expf_sweep.npy
+tools/expf/probe_expf
