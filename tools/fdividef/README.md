@@ -33,11 +33,25 @@ Both mismatch counts **must be 0** — that confirms (a) the mantissa table full
 captures `MUFU.RCP` and (b) `__fdividef` really is `a * rcp.approx.f32(b)` on this
 GPU. If either is non-zero, stop and ping me (the model needs revisiting).
 
-Then commit `rcp_mantissa.npy` here and ping me. I delta-compress it into the cajeta
-`FastMath` table, wire `FastMath.fdividef` into `SplitFinder` gain scoring, and
-re-enable `ConfigParityTest::minChildWeightTreeBitIdentical`.
+## The 33 MB table is a build input, never committed (regenerate-in-CI)
 
-> Note: the 33.6 MB raw table is a probe artifact; the committed cajeta table will
-> be the delta-compressed form (the reciprocal is monotonic, so neighbours differ by
-> ~1 ULP → a few MB). If you'd rather keep even that out of git, say so and we'll
-> git-lfs it or regenerate-in-CI.
+CI is CPU-only, so `rcp_mantissa.npy` is **not** committed (it's `.gitignore`d). It is
+a one-time ground-truth capture. From it I reverse-engineer the SFU's compact
+interpolator — the per-interval quadratic coefficients `MUFU.RCP` actually uses
+(Oberman–Siu) — and **verify the reconstruction reproduces all 2^23 entries
+bit-for-bit**. Only that tiny seed (a few hundred bytes) is committed; `FastMath`
+computes `rcp(m)` from it on CPU, so CI regenerates the behaviour with no GPU and no
+large artifact.
+
+Getting the capture to me (I work on a non-NVIDIA box):
+- **preferred:** `scp tools/fdividef/rcp_mantissa.npy proton:<repo>/tools/fdividef/`
+  (stays out of git history entirely), or
+- a throwaway commit of the `.npy` that I pull and immediately `git rm` after
+  extracting the seed.
+
+Then ping me — I fit + verify the coefficients, wire `FastMath.fdividef` into
+`SplitFinder`, and re-enable `ConfigParityTest::minChildWeightTreeBitIdentical`.
+
+> Research risk: if the SFU interpolator can't be reproduced bit-exactly on CPU
+> (fit doesn't verify against all 2^23), we fall back — git-lfs the delta-compressed
+> table, or add a GPU CI runner. We decide that only if the clean path fails.

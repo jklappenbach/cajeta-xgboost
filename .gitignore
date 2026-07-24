@@ -12,3 +12,8 @@ tmp/
 
 # Golden fixtures are committed under tools/fixtures/ — do NOT ignore them.
 __pycache__/
+
+# GPU reciprocal probe output (build input, never committed — reconstructed on CPU
+# from the compact SFU seed; see tools/fdividef/README.md)
+tools/fdividef/rcp_mantissa.npy
+tools/fdividef/probe_rcp
