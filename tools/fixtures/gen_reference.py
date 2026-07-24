@@ -14,6 +14,7 @@ fixtures (U10) are intentionally NOT in this set — their storage (git-lfs vs.
 regenerate-in-CI) is decided in U10.
 """
 import argparse, os, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(HERE, "generate.py")
@@ -34,11 +35,13 @@ def main():
                     help="cuda = the parity REFERENCE (run on NVIDIA); cpu = driver dry-run")
     args = ap.parse_args()
 
+    import extract_trees
     for name, extra in CONFIGS:
         out = os.path.join(HERE, name if args.device == "cuda" else name + "_cpu")
         cmd = [sys.executable, GEN, "--out", out, "--device", args.device] + extra
         print(f">> {name}  ({args.device})")
         subprocess.run(cmd, check=True)
+        extract_trees.dump_trees(out)   # trees/ arrays for cajeta-side comparison
     print(f"\nDone. {len(CONFIGS)} fixtures under {HERE} (device={args.device}).")
     if args.device == "cuda":
         print("These are the REFERENCE. Commit + push them, then ping me to pull.")
