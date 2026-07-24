@@ -34,4 +34,6 @@ echo ">> building + running the test binary"
     -o "$out/xgboosttests" \
     dev.cajeta.xgboost.selftest.TestMain.run "$here/src/test/cajeta" "$out" >/dev/null
 
+# Parity tests load golden fixtures from tools/fixtures via this env var.
+export XGBOOST_FIXTURES="$here/tools/fixtures"
 "$out/xgboosttests"

@@ -1,0 +1,48 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+
+/**
+ * U2.1.1 — the golden fixture loads into typed cajeta tensors. Validated against
+ * the committed `tiny_reg_cpu` fixture: shapes match the harness's dump, and a
+ * known relation holds (reg round-0 grad == base_score(0.5) − y), proving the
+ * numeric arrays decode correctly through `Npy`.
+ */
+public class FixtureLoaderTest {
+
+    public FixtureLoaderTest() { return; }
+
+    @Test
+    public void loadsTinyRegFixtureWithCorrectShapesAndValues() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg_cpu");
+
+        Tensor<float64> x = f.x();                 // [200, 5]
+        Assert.that(x.shapeAt(0)).isEqualTo((int64) 200);
+        Assert.that(x.shapeAt(1)).isEqualTo((int64) 5);
+
+        Tensor<float64> g = f.grad();              // [rounds=3, 200]
+        Assert.that(g.shapeAt(0)).isEqualTo((int64) 3);
+        Assert.that(g.shapeAt(1)).isEqualTo((int64) 200);
+
+        Tensor<float64> h = f.hess();              // reg hess all ones
+        Assert.thatFloat(h.flatGet(0)).isEqualTo((float64) 1.0);
+        Assert.thatFloat(h.flatGet(199)).isEqualTo((float64) 1.0);
+
+        // reg round-0 grad == base_score(0.5) − y, per instance (bit-exact decode).
+        Tensor<float64> y = f.y();                 // [200]
+        Assert.thatFloat(g.flatGet(0)).isCloseTo((float64) 0.5 - y.flatGet(0),
+                                                 (float64) 0.0000000001);
+        Assert.thatFloat(g.flatGet(7)).isCloseTo((float64) 0.5 - y.flatGet(7),
+                                                 (float64) 0.0000000001);
+
+        Tensor<int32> bins = f.bins();             // [200, 5]
+        Assert.that(bins.shapeAt(0)).isEqualTo((int64) 200);
+        Assert.that(bins.shapeAt(1)).isEqualTo((int64) 5);
+
+        Tensor<int64> cp = f.cutPtrs();            // [features+1] = 6
+        Assert.that(cp.shapeAt(0)).isEqualTo((int64) 6);
+        Assert.that(cp.flatGet(0)).isEqualTo((int64) 0);
+        return;
+    }
+}
