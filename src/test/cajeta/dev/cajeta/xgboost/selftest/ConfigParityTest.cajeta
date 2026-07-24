@@ -8,12 +8,11 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
 /**
  * U4.1.2 / 4.3.1 — a single tree bit-identical to the NVIDIA reference across
  * varied regularization configs (depth, γ, min_child_weight). Each test grows
- * one `tiny_reg`-variant fixture with the matching config and asserts every node.
- *
- * DISABLED until the config-variant reference fixtures are regenerated on NVIDIA
- * (CUDA xgboost 3.1.2) and committed — `gen_reference.py` already carries the
- * variants (`tiny_reg_d2/d6/mcw10/gamma1`). The local, reference-free half of
- * 4.1.2 (that the stopping rules bite) is covered by {@link ConfigStoppingTest}.
+ * one `tiny_reg`-variant fixture (`tiny_reg_d2/d6/mcw10/gamma1`, CUDA xgboost
+ * 3.1.2) with the matching config and asserts every node — topology, split
+ * feature, float32 threshold, default direction, and base_weight. The local,
+ * reference-free half of 4.1.2 (that the stopping rules bite) is covered by
+ * {@link ConfigStoppingTest}.
  */
 public class ConfigParityTest {
 
@@ -58,17 +57,24 @@ public class ConfigParityTest {
     }
 
     @Test
-    @Disabled
     public void shallowDepthTreeBitIdentical() {
         ConfigParityTest.assertTreeMatches("tiny_reg_d2", (int64) 2, (float64) 0.0, (float64) 1.0);
     }
 
     @Test
-    @Disabled
     public void deepDepthTreeBitIdentical() {
         ConfigParityTest.assertTreeMatches("tiny_reg_d6", (int64) 6, (float64) 0.0, (float64) 1.0);
     }
 
+    // DISABLED — known `__fdividef` divergence, not a builder bug. The tree is
+    // structurally bit-identical to the reference (23/23 nodes, all topology +
+    // all base_weights match); only the split *feature* at 2 near-tied internal
+    // nodes (5, 12) differs. Device XGBoost scores split gains with the fast
+    // approximate `__fdividef` (`split_evaluator.h:126`); with min_child_weight=10
+    // a feature's argmax boundary sits on a knife-edge, and the ~1-ulp difference
+    // between `__fdividef` and accurate division flips which boundary wins — and
+    // thus whether that boundary passes the min_child_weight gate. Unblocks when
+    // the GPU-arithmetic fidelity item (`__fdividef` in gain selection) lands.
     @Test
     @Disabled
     public void minChildWeightTreeBitIdentical() {
@@ -76,7 +82,6 @@ public class ConfigParityTest {
     }
 
     @Test
-    @Disabled
     public void gammaTreeBitIdentical() {
         ConfigParityTest.assertTreeMatches("tiny_reg_gamma1", (int64) 4, (float64) 1.0, (float64) 1.0);
     }
