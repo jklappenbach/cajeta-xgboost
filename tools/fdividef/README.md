@@ -20,18 +20,28 @@ nvcc -arch=native -O2 probe_rcp.cu -o probe_rcp
 ./probe_rcp
 ```
 
-Expected output:
+The probe identifies which CPU-reproducible sequence equals `__fdividef` bit-for-bit
+(a raw `a*rcp` does NOT — it's Newton-refined). Output:
 
 ```
-verify: exponent-factoring mismatches = 0 / 268435456
-verify: fdividef==a*rcp mismatches     = 0 / 268435456
+over 268435456 samples:
+  exponent-factoring       mismatches = 0   <-- MATCH
+  M0 a*rcp                 mismatches = <big>
+  M1 rcp+1 Newton          mismatches = 0   <-- MATCH    (example)
+  M2 rcp+2 Newton          mismatches = ...
+  M3 __fdiv_rn (correct)   mismatches = ...
+  M4 a*__frcp_rn           mismatches = ...
+=> factoring HOLDS ...; __fdividef model = the M* line reading MATCH above.
+examples (hex bits): ...
 GPU: <name>  sm_XX
 wrote rcp_mantissa.npy (8388608 entries, 33.6 MB)
 ```
 
-Both mismatch counts **must be 0** — that confirms (a) the mantissa table fully
-captures `MUFU.RCP` and (b) `__fdividef` really is `a * rcp.approx.f32(b)` on this
-GPU. If either is non-zero, stop and ping me (the model needs revisiting).
+**Paste me the whole block.** I need: (1) `exponent-factoring` = 0 (mantissa table
+suffices), and (2) exactly which `M*` line reads `MATCH` (the `__fdividef` model).
+All M1/M2 use `MUFU.RCP` + FMA — both bit-reproducible on CPU — so whichever matches,
+I can port it exactly. If none match, the examples block lets me reverse-engineer the
+sequence by hand.
 
 ## The 33 MB table is a build input, never committed (regenerate-in-CI)
 

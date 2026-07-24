@@ -31,6 +31,17 @@ __device__ __forceinline__ float fdividef_dev(float a, float b) {
     return __fdividef(a, b);   // what XGBoost's Divide() emits on device
 }
 
+// Candidate CPU-reproducible models of __fdividef (all use MUFU.RCP + FMA, both
+// exactly reproducible off-device). The probe reports which matches bit-for-bit.
+__device__ __forceinline__ uint32_t bits(float x){ uint32_t u; memcpy(&u,&x,4); return u; }
+__device__ __forceinline__ float M0(float a,float b){ return a*rcp_approx(b); }                // raw
+__device__ __forceinline__ float M1(float a,float b){ float r=rcp_approx(b); float q=a*r;      // 1 Newton
+    return fmaf(fmaf(-b,q,a), r, q); }
+__device__ __forceinline__ float M2(float a,float b){ float r=rcp_approx(b); float q=a*r;      // 2 Newton
+    q=fmaf(fmaf(-b,q,a),r,q); return fmaf(fmaf(-b,q,a),r,q); }
+__device__ __forceinline__ float M3(float a,float b){ return __fdiv_rn(a,b); }                 // correct rnd
+__device__ __forceinline__ float M4(float a,float b){ return a*__frcp_rn(b); }                 // rn recip
+
 __global__ void fill_table(uint32_t* out, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -41,38 +52,45 @@ __global__ void fill_table(uint32_t* out, int n) {
     out[i] = rb;
 }
 
-// Verify (a) exponent factoring and (b) fdividef == a*rcp, over a pseudo-random
-// sweep of positive normal inputs. Returns mismatch counts via out[0], out[1].
+// Over a pseudo-random sweep of positive-normal (a,b): count (a) exponent-factoring
+// failures for rcp, and (b) per-model mismatches vs __fdividef. mism[0]=factoring,
+// mism[1..5]=M0..M4.
 __global__ void verify(const uint32_t* table, uint64_t* mism, int reps) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t s0 = 0, s1 = 0;
+    uint64_t s[6] = {0,0,0,0,0,0};
     uint32_t rng = 0x9E3779B9u * (uint32_t)(t + 1);
     for (int k = 0; k < reps; ++k) {
         rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-        // build a positive normal float: exponent in [1,254], random mantissa
-        uint32_t exp = 1u + (rng % 254u);
-        uint32_t man = (rng >> 3) & 0x7FFFFFu;
-        uint32_t bb = (exp << 23) | man;
-        float b; memcpy(&b, &bb, 4);
+        uint32_t exp = 1u + (rng % 254u), man = (rng >> 3) & 0x7FFFFFu;
+        uint32_t bb = (exp << 23) | man; float b; memcpy(&b, &bb, 4);
         // (a) factoring: rcp(b) == ldexp(table[man], -(exp-127))
         float rb = rcp_approx(b);
-        uint32_t tb = table[man];             // rcp(mantissa in [1,2)) bits
-        float tm; memcpy(&tm, &tb, 4);
-        int E = (int)exp - 127;
-        float recon = ldexpf(tm, -E);
-        uint32_t rbb, rcb; memcpy(&rbb, &rb, 4); memcpy(&rcb, &recon, 4);
-        if (rbb != rcb) s0++;
-        // (b) fdividef(a,b) == a * rcp(b), a random too
+        float tm; uint32_t tb = table[man]; memcpy(&tm, &tb, 4);
+        float recon = ldexpf(tm, -((int)exp - 127));
+        if (bits(rb) != bits(recon)) s[0]++;
+        // (b) which model reproduces __fdividef?
         rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
         uint32_t ab = ((1u + (rng % 254u)) << 23) | ((rng >> 3) & 0x7FFFFFu);
         float a; memcpy(&a, &ab, 4);
-        float fd = fdividef_dev(a, b);
-        float am = a * rb;
-        uint32_t fdb, amb; memcpy(&fdb, &fd, 4); memcpy(&amb, &am, 4);
-        if (fdb != amb) s1++;
+        uint32_t fd = bits(fdividef_dev(a, b));
+        if (bits(M0(a,b)) != fd) s[1]++;
+        if (bits(M1(a,b)) != fd) s[2]++;
+        if (bits(M2(a,b)) != fd) s[3]++;
+        if (bits(M3(a,b)) != fd) s[4]++;
+        if (bits(M4(a,b)) != fd) s[5]++;
     }
-    atomicAdd((unsigned long long*)&mism[0], (unsigned long long)s0);
-    atomicAdd((unsigned long long*)&mism[1], (unsigned long long)s1);
+    for (int j = 0; j < 6; ++j) atomicAdd((unsigned long long*)&mism[j], (unsigned long long)s[j]);
+}
+
+// Dump a handful of concrete (a,b) with every candidate's bits, for manual diff.
+__global__ void examples(uint32_t* out) {
+    int i = threadIdx.x; if (i >= 8) return;
+    uint32_t ab[8] = {0x40400000,0x40a00000,0x3fc00000,0x41800000,0x3f000000,0x42f60000,0x3e800000,0x40e00000};
+    uint32_t bb[8] = {0x40e00000,0x40100000,0x41600000,0x3fa00000,0x43160000,0x40000000,0x41c80000,0x3f400000};
+    float a,b; memcpy(&a,&ab[i],4); memcpy(&b,&bb[i],4);
+    uint32_t* o = out + i*8;
+    o[0]=ab[i]; o[1]=bb[i]; o[2]=bits(fdividef_dev(a,b));
+    o[3]=bits(M0(a,b)); o[4]=bits(M1(a,b)); o[5]=bits(M2(a,b)); o[6]=bits(M3(a,b)); o[7]=bits(M4(a,b));
 }
 
 static void write_npy_i32(const char* path, const uint32_t* data, int64_t n) {
@@ -102,19 +120,30 @@ int main() {
     uint32_t* h = (uint32_t*)malloc((size_t)N * 4);
     cudaMemcpy(h, d_out, (size_t)N * 4, cudaMemcpyDeviceToHost);
 
-    uint64_t* d_m; cudaMalloc(&d_m, 16); cudaMemset(d_m, 0, 16);
+    uint64_t* d_m; cudaMalloc(&d_m, 48); cudaMemset(d_m, 0, 48);
     verify<<<256, 256>>>(d_out, d_m, 4096);
     cudaDeviceSynchronize();
-    uint64_t m[2]; cudaMemcpy(m, d_m, 16, cudaMemcpyDeviceToHost);
+    uint64_t m[6]; cudaMemcpy(m, d_m, 48, cudaMemcpyDeviceToHost);
     uint64_t total = (uint64_t)256 * 256 * 4096;
-    printf("verify: exponent-factoring mismatches = %llu / %llu\n",
-           (unsigned long long)m[0], (unsigned long long)total);
-    printf("verify: fdividef==a*rcp mismatches     = %llu / %llu\n",
-           (unsigned long long)m[1], (unsigned long long)total);
-    if (m[0] != 0)
-        printf("WARNING: factoring failed — the mantissa table is NOT sufficient; ping me.\n");
-    if (m[1] != 0)
-        printf("WARNING: __fdividef != a*rcp — fdividef needs a different model; ping me.\n");
+    const char* names[6] = {"exponent-factoring",
+        "M0 a*rcp", "M1 rcp+1 Newton", "M2 rcp+2 Newton", "M3 __fdiv_rn (correct)", "M4 a*__frcp_rn"};
+    printf("over %llu samples:\n", (unsigned long long)total);
+    for (int j = 0; j < 6; ++j)
+        printf("  %-24s mismatches = %llu%s\n", names[j], (unsigned long long)m[j],
+               (m[j]==0 ? "   <-- MATCH" : ""));
+    printf("=> factoring %s; __fdividef model = the M* line reading MATCH above.\n",
+           m[0]==0 ? "HOLDS (mantissa table sufficient)" : "FAILED (ping me)");
+
+    // concrete examples for manual diff
+    uint32_t* d_ex; cudaMalloc(&d_ex, 8*8*4); examples<<<1,8>>>(d_ex);
+    cudaDeviceSynchronize();
+    uint32_t ex[64]; cudaMemcpy(ex, d_ex, 8*8*4, cudaMemcpyDeviceToHost);
+    printf("examples (hex bits): a b fdividef | M0 M1 M2 M3 M4\n");
+    for (int i = 0; i < 8; ++i) {
+        uint32_t* o = ex + i*8;
+        printf("  %08x %08x %08x | %08x %08x %08x %08x %08x\n",
+               o[0],o[1],o[2],o[3],o[4],o[5],o[6],o[7]);
+    }
 
     cudaDeviceProp p; cudaGetDeviceProperties(&p, 0);
     printf("GPU: %s  sm_%d%d\n", p.name, p.major, p.minor);
