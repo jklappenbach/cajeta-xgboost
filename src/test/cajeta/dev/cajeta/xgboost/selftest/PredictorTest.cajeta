@@ -1,0 +1,94 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.predict.Predictor;
+
+/**
+ * U8.1.1 — the tree-walk predictor bit-identical to XGBoost's inference. Walks the
+ * **reference** `tiny_reg` trees (so this tests the predictor independent of the
+ * builder's GPU-selection residual) on the raw feature matrix: go left iff
+ * `fvalue < split_condition` (float32), sum leaf values + base margin in tree order.
+ * For `reg:squarederror` the link is the identity, so the margin sum must equal both
+ * `margins.npy` (last round) and `preds.npy` bit-for-bit — no transcendental.
+ */
+public class PredictorTest {
+
+    public PredictorTest() { return; }
+
+    @Test
+    public void regMarginBitIdenticalToReference() {
+        PredictorTest.checkMargin("tiny_reg", (float32) 0.5, true);
+    }
+
+    @Test
+    public void regMissingMarginBitIdenticalToReference() {
+        PredictorTest.checkMargin("tiny_reg_missing", (float32) 0.5, true);   // NaN → default
+    }
+
+    @Test
+    public void binaryRawMarginBitIdenticalToReference() {
+        // base = logit(0.5) = 0; the raw margin (pre-sigmoid) is expf-free → bit-exact.
+        // Final probability = sigmoid(margin) hits expf (U12), so check margin only.
+        PredictorTest.checkMargin("tiny_binary", (float32) 0.0, false);
+    }
+
+    static void checkMargin(String fixture, float32 base, boolean checkPreds) {
+        FixtureLoader f = FixtureLoader.open(fixture);
+        Tensor<float64> x       = f.x();
+        Tensor<float64> preds   = f.preds();      // [n]
+        Tensor<float64> margins = f.margins();    // [rounds, n]
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        int64 rounds = margins.shapeAt(0);
+        int64 cap = (int64) 32;                   // capacity(maxDepth=4)
+
+        // Flatten the reference trees into [rounds*cap] node arrays (tree t at t*cap).
+        int64[]   lc = heap int64[rounds * cap];
+        int64[]   rc = heap int64[rounds * cap];
+        int64[]   si = heap int64[rounds * cap];
+        float32[] sc = heap float32[rounds * cap];
+        boolean[] dl = heap boolean[rounds * cap];
+        int64 i = (int64) 0;
+        while (i < rounds * cap) { lc[i] = (int64) -1; rc[i] = (int64) -1; i = i + (int64) 1; }
+
+        int64 t = (int64) 0;
+        while (t < rounds) {
+            Tensor<int32>   rLC = f.treeLeftChildren((int32) t);
+            Tensor<int32>   rRC = f.treeRightChildren((int32) t);
+            Tensor<int32>   rSI = f.treeSplitIndices((int32) t);
+            Tensor<float32> rSC = f.treeSplitConditions((int32) t);
+            Tensor<int32>   rDL = f.treeDefaultLeft((int32) t);
+            int64 cnt = f.treeBaseWeights((int32) t).shapeAt(0);
+            int64 off = t * cap;
+            int64 k = (int64) 0;
+            while (k < cnt) {
+                lc[off + k] = (int64) rLC.flatGet(k);
+                rc[off + k] = (int64) rRC.flatGet(k);
+                si[off + k] = (int64) rSI.flatGet(k);
+                sc[off + k] = rSC.flatGet(k);
+                dl[off + k] = rDL.flatGet(k) == (int32) 1;
+                k = k + (int64) 1;
+            }
+            t = t + (int64) 1;
+        }
+
+        int64 lastOff = (rounds - (int64) 1) * n;
+        float64[] xrow = heap float64[nf];
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 j = (int64) 0;
+            while (j < nf) { xrow[j] = x.flatGet(r * nf + j); j = j + (int64) 1; }
+            float32 mrg = base;
+            t = (int64) 0;
+            while (t < rounds) {
+                mrg = mrg + Predictor.leaf(lc, rc, si, sc, dl, t * cap, xrow);
+                t = t + (int64) 1;
+            }
+            Assert.thatFloat((float64) mrg).isEqualTo(margins.flatGet(lastOff + r));
+            if (checkPreds) { Assert.thatFloat((float64) mrg).isEqualTo(preds.flatGet(r)); }
+            r = r + (int64) 1;
+        }
+        return;
+    }
+}

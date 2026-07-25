@@ -1,0 +1,66 @@
+package dev.cajeta.xgboost.predict;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Model;
+
+/**
+ * Tree-walk predictor (spec §5.1), reproducing XGBoost's inference bit-for-bit.
+ * A row is routed from the root by comparing its raw feature value to each node's
+ * threshold: **go left iff `fvalue < split_condition`** (float32), and a missing
+ * value (NaN) follows the node's default direction. The reached leaf contributes
+ * its stored value (already `× learning_rate`); the raw margin is `base_margin +
+ * Σ leaf values` accumulated in float32, in tree order.
+ *
+ * The inverse link (identity for `reg:squarederror`, `sigmoid` for binary, softmax
+ * for multiclass) is applied by the caller — the `expf`-bearing links are the U12
+ * transcendental-fidelity item; the raw margin here is `expf`-free and bit-exact.
+ */
+public final class Predictor {
+
+    /**
+     * Walk one tree (node arrays, tree base at `off`, local node ids) on a row's
+     * raw feature values → the reached leaf's value.
+     */
+    /** True iff `v` is NaN (exponent all-ones, nonzero mantissa) — via bits, since
+     *  unordered `!=` cannot be relied on across backends. */
+    static boolean isNaN(float32 v) {
+        return (Cajeta.f32ToBits(v) & (int32) 0x7FFFFFFF) > (int32) 0x7F800000;
+    }
+
+    public static float32 leaf(int64[] lc, int64[] rc, int64[] si, float32[] sc, boolean[] dl,
+                               int64 off, float64[] xrow) {
+        int64 local = (int64) 0;
+        while (lc[off + local] != (int64) -1) {
+            int64 g = off + local;
+            float32 v = (float32) xrow[si[g]];
+            boolean goLeft;
+            if (Predictor.isNaN(v)) { goLeft = dl[g]; }   // missing → default direction
+            else { goLeft = v < sc[g]; }
+            local = goLeft ? lc[g] : rc[g];
+        }
+        return sc[off + local];
+    }
+
+    /**
+     * Raw output margin per row for a single-group model (regression / binary):
+     * `base + Σ_t leaf(tree t)`, float32, tree order. `out` has length `n`.
+     */
+    public static void marginSingle(Model m, Tensor<float64> x, int64 n, int64 nf,
+                                    float32 base, float32[] out) {
+        float64[] xrow = heap float64[nf];
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 j = (int64) 0;
+            while (j < nf) { xrow[j] = x.flatGet(r * nf + j); j = j + (int64) 1; }
+            float32 mrg = base;
+            int64 t = (int64) 0;
+            while (t < m.rounds) {
+                mrg = mrg + Predictor.leaf(m.leftChildren, m.rightChildren, m.splitIndices,
+                                           m.splitConditions, m.defaultLeft, t * m.cap, xrow);
+                t = t + (int64) 1;
+            }
+            out[r] = mrg;
+            r = r + (int64) 1;
+        }
+    }
+}
