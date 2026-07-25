@@ -1,0 +1,105 @@
+package dev.cajeta.xgboost.api;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.predict.Predictor;
+import dev.cajeta.xgboost.sketch.Sketch;
+import dev.cajeta.xgboost.sketch.Binner;
+
+/**
+ * The public `fit`/`predict` surface for `reg:squarederror` (spec §1.7). It ties the
+ * bit-exact pipeline together — raw matrix → quantile cuts (§7.2) → bins (§7.2) →
+ * boosting loop (§3) → {@link Model} — so a caller trains from a raw feature matrix
+ * without touching the internal sketch/binner/booster stages.
+ *
+ * **Determinism is the contract.** {@link #fit} is the default entry point and is
+ * deterministic and bit-exact: it refuses any config outside the deterministic set
+ * (the stochastic-sampling knobs — {@link Params#usesStochasticSampling}), so a user
+ * never forfeits reproducibility silently (§1.7.1). The non-deterministic mode is a
+ * distinctly-named entry point, {@link #fitNonDeterministic} (§1.7.2), and the mode
+ * is recorded in {@link Model#deterministic} so a result's reproducibility is
+ * auditable (§1.7.3).
+ *
+ * Row/column subsampling is not yet implemented (RNG parity is a later unit), so
+ * {@link #fitNonDeterministic} currently runs the same deterministic engine and only
+ * records the non-deterministic mode — the labeled entry point exists so the
+ * contract holds the moment a non-deterministic reduction lands.
+ */
+public final class GBDT {
+
+    /**
+     * Deterministic, bit-exact training (spec §1.7.1). Throws if `p` engages a
+     * stochastic-sampling knob — that is a non-deterministic mode and must go
+     * through {@link #fitNonDeterministic}.
+     *
+     * @param x      raw `[n, nf]` row-major feature matrix (float64).
+     * @param label  per-row targets, length `n`.
+     */
+    public static #Model fit(Tensor<float64> x, float64[] label, int64 n, int64 nf, Params p) {
+        return GBDT.fitMode(x, label, n, nf, p, true);
+    }
+
+    /**
+     * Labeled non-deterministic training (spec §1.7.2). Permits the stochastic
+     * knobs and records the mode as non-deterministic in the model metadata. It
+     * forfeits the bit-exact guarantee.
+     */
+    public static #Model fitNonDeterministic(Tensor<float64> x, float64[] label, int64 n, int64 nf, Params p) {
+        return GBDT.fitMode(x, label, n, nf, p, false);
+    }
+
+    static #Model fitMode(Tensor<float64> x, float64[] label, int64 n, int64 nf, Params p,
+                          boolean deterministic) {
+        if (deterministic && p.usesStochasticSampling()) {
+            throw heap cajeta.error.RecoverableException(
+                "GBDT.fit: subsample/colsample_bytree < 1 is a non-deterministic mode; use GBDT.fitNonDeterministic");
+        }
+        if (p.usesStochasticSampling()) {
+            // Reached only via the non-deterministic entry point. The labeled mode
+            // exists and records itself in metadata, but the sampling engine (RNG
+            // parity) is a later unit — refuse rather than silently train on all
+            // rows/columns and mislabel the result.
+            throw heap cajeta.error.RecoverableException(
+                "GBDT.fitNonDeterministic: subsample/colsample_bytree < 1 is not yet implemented (RNG parity is a later unit)");
+        }
+
+        // Raw → cuts (no-prune) → bins — bit-exact per U9.
+        int64[] cutPtrsA = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cutsNoPrune(x, n, nf, p.maxBin, cutPtrsA);
+        int64 total = cutPtrsA[nf];
+
+        int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;
+        Tensor<int64> cutPtrsT = Tensor.of<int64>(cutPtrsA, cpShape);
+
+        float64[] cutVals = heap float64[total];
+        int64 c = (int64) 0;
+        while (c < total) { cutVals[c] = (float64) cuts[c]; c = c + (int64) 1; }
+        int64[] cvShape = heap int64[1]; cvShape[0] = total;
+        Tensor<float64> cutValuesT = Tensor.of<float64>(cutVals, cvShape);
+
+        int32[] binsA = Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
+        int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
+        Tensor<int32> binsT = Tensor.of<int32>(binsA, bShape);
+
+        // Boosting loop over the binned matrix.
+        float32[] marginHistory = heap float32[p.rounds * n];
+        Model m = Booster.train(binsT, cutPtrsT, cutValuesT, label, n, p.rounds,
+                                p.maxDepth, p.maxLeaves,
+                                p.lambda, p.alpha, p.gamma, p.minChildWeight,
+                                p.eta, p.baseScore, marginHistory);
+        m.deterministic = deterministic;
+        return #m;
+    }
+
+    /**
+     * Predicted output per row for a `reg:squarederror` model: the raw accumulated
+     * margin, which under the identity link is the prediction itself (spec §5.1).
+     * Returns a length-`n` float32 array.
+     */
+    public static #float32[] predict(Model m, Tensor<float64> x, int64 n, int64 nf) {
+        float32[] out = heap float32[n];
+        Predictor.marginSingle(m, x, n, nf, out);
+        return #out;
+    }
+}

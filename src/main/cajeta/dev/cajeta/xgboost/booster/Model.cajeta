@@ -13,12 +13,19 @@ package dev.cajeta.xgboost.booster;
  * internal nodes carry the raw `CalcWeight` in `baseWeights` and the split
  * threshold in `splitConditions`. Leaves have `leftChildren == rightChildren == -1`.
  *
+ * `deterministic` is training-mode metadata (spec §1.7.3): true iff the model was
+ * trained under the deterministic, bit-exact config. It defaults to true (the
+ * deterministic engine) and is flipped by the labeled non-deterministic entry
+ * point ({@code api.GBDT.fitNonDeterministic}); it survives serialization so a
+ * result's reproducibility stays auditable.
+ *
  * The array fields are **owned** (`#=`); callers move them in.
  */
 public final class Model {
     public int64 rounds;
     public int64 cap;                 // per-tree stride (node ids 0..nodeCount[r])
     public float32 baseMargin;        // base_score under the link
+    public boolean deterministic;     // trained under the bit-exact config? (§1.7.3)
     public int64[] nodeCount;         // [rounds] node count of each tree
     public int64[] splitIndices;      // [rounds*cap] split feature (internal)
     public float32[] splitConditions; // threshold (internal) / leaf value (leaf)
@@ -34,6 +41,7 @@ public final class Model {
         this.rounds = rounds;
         this.cap = cap;
         this.baseMargin = baseMargin;
+        this.deterministic = true;
         this.nodeCount #= nodeCount;
         this.splitIndices #= si;
         this.splitConditions #= sc;

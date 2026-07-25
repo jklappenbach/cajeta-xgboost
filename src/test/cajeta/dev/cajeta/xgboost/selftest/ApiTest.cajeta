@@ -1,0 +1,172 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.booster.ModelIO;
+
+/**
+ * U11 — the public `fit`/`predict` API and its determinism contract (spec §1.7).
+ *
+ *  - 11.1.1: the default {@link GBDT#fit} is deterministic and bit-exact — training
+ *    twice from the raw `tiny_reg` matrix yields bit-identical models, each also
+ *    bit-identical to the NVIDIA reference trees, and {@link GBDT#predict} reproduces
+ *    `preds.npy` bit-for-bit. (This exercises the whole raw→cuts→bins→boost→predict
+ *    pipeline through one call.)
+ *  - 11.1.2: the non-deterministic mode is a distinctly-named entry point
+ *    ({@link GBDT#fitNonDeterministic}) and the mode is recorded in
+ *    {@link Model#deterministic}, surviving serialization.
+ *  - 11.3.1: the deterministic path enforces the contract — a stochastic-sampling
+ *    knob is refused by {@link GBDT#fit} (never silently non-deterministic).
+ */
+public class ApiTest {
+
+    public ApiTest() { return; }
+
+    /** The `tiny_reg` reference config (matches BoostingLoopTest). */
+    static #Params tinyRegParams() {
+        Params p = heap Params();
+        p.rounds = (int64) 3;
+        p.maxDepth = (int64) 4;
+        p.maxLeaves = (int64) 0;
+        p.lambda = (float64) 1.0;
+        p.alpha = (float64) 0.0;
+        p.gamma = (float64) 0.0;
+        p.minChildWeight = (float64) 1.0;
+        p.eta = (float64) 0.3;
+        p.baseScore = (float64) 0.5;
+        p.maxBin = (int64) 256;
+        return #p;
+    }
+
+    static #float64[] labelOf(FixtureLoader f, int64 n) {
+        Tensor<float64> yT = f.y();
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+        return #label;
+    }
+
+    @Test
+    public void fitFromRawIsDeterministicAndBitExact() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        Tensor<float64> x = f.x();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        float64[] label = ApiTest.labelOf(f, n);
+
+        Params p = ApiTest.tinyRegParams();
+        Model m1 = GBDT.fit(x, label, n, nf, p);
+        Model m2 = GBDT.fit(x, label, n, nf, p);
+
+        // (a) two default fits are bit-identical to each other (determinism, §1.7.1).
+        Assert.that(m1.rounds).isEqualTo(m2.rounds);
+        Assert.that(m1.cap).isEqualTo(m2.cap);
+        int64 total = m1.rounds * m1.cap;
+        int64 i = (int64) 0;
+        while (i < total) {
+            Assert.that(m1.leftChildren[i]).isEqualTo(m2.leftChildren[i]);
+            Assert.that(m1.rightChildren[i]).isEqualTo(m2.rightChildren[i]);
+            Assert.that(m1.splitIndices[i]).isEqualTo(m2.splitIndices[i]);
+            Assert.that((int64) Cajeta.f32ToBits(m1.splitConditions[i]))
+                  .isEqualTo((int64) Cajeta.f32ToBits(m2.splitConditions[i]));
+            Assert.that((int64) Cajeta.f32ToBits(m1.baseWeights[i]))
+                  .isEqualTo((int64) Cajeta.f32ToBits(m2.baseWeights[i]));
+            Assert.isTrue(m1.defaultLeft[i] == m2.defaultLeft[i]);
+            Assert.isTrue(m1.isLeaf[i] == m2.isLeaf[i]);
+            i = i + (int64) 1;
+        }
+
+        // (b) the fitted model is bit-identical to the NVIDIA reference trees —
+        //     the raw→cuts→bins→boost pipeline is bit-exact end-to-end.
+        int64 cap = m1.cap;
+        int64 r = (int64) 0;
+        while (r < m1.rounds) {
+            Tensor<int32>   rLC = f.treeLeftChildren((int32) r);
+            Tensor<int32>   rRC = f.treeRightChildren((int32) r);
+            Tensor<int32>   rSI = f.treeSplitIndices((int32) r);
+            Tensor<float32> rSC = f.treeSplitConditions((int32) r);
+            Tensor<int32>   rDL = f.treeDefaultLeft((int32) r);
+            Tensor<float32> rBW = f.treeBaseWeights((int32) r);
+            int64 refCount = rBW.shapeAt(0);
+            Assert.that(m1.nodeCount[r]).isEqualTo(refCount);
+
+            int64 off = r * cap;
+            int64 nid = (int64) 0;
+            while (nid < refCount) {
+                Assert.that(m1.leftChildren[off + nid]).isEqualTo((int64) rLC.flatGet(nid));
+                Assert.that(m1.rightChildren[off + nid]).isEqualTo((int64) rRC.flatGet(nid));
+                boolean refLeaf = rLC.flatGet(nid) == (int32) -1;
+                if (!refLeaf) {
+                    Assert.that(m1.splitIndices[off + nid]).isEqualTo((int64) rSI.flatGet(nid));
+                    Assert.thatFloat((float64) m1.splitConditions[off + nid]).isEqualTo((float64) rSC.flatGet(nid));
+                    boolean refLeft = rDL.flatGet(nid) == (int32) 1;
+                    Assert.isTrue(m1.defaultLeft[off + nid] == refLeft);
+                }
+                Assert.thatFloat((float64) m1.baseWeights[off + nid]).isEqualTo((float64) rBW.flatGet(nid));
+                nid = nid + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+
+        // (c) predict() from raw = reference preds bit-for-bit (identity link).
+        Tensor<float64> refPreds = f.preds();
+        float32[] preds = GBDT.predict(m1, x, n, nf);
+        i = (int64) 0;
+        while (i < n) {
+            Assert.thatFloat((float64) preds[i]).isEqualTo(refPreds.flatGet(i));
+            i = i + (int64) 1;
+        }
+
+        // Default fit records the deterministic mode.
+        Assert.isTrue(m1.deterministic);
+        return;
+    }
+
+    @Test
+    public void nonDeterministicModeIsLabeledAndRecorded() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        Tensor<float64> x = f.x();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        float64[] label = ApiTest.labelOf(f, n);
+        Params p = ApiTest.tinyRegParams();
+
+        // The distinctly-named non-deterministic entry point records the mode.
+        Model mND = GBDT.fitNonDeterministic(x, label, n, nf, p);
+        Assert.isFalse(mND.deterministic);
+
+        // The mode survives serialization (auditable, §1.7.3).
+        int8[] buf = ModelIO.serialize(mND);
+        Model back = ModelIO.deserialize(buf);
+        Assert.isFalse(back.deterministic);
+
+        // The deterministic default records the deterministic mode, likewise round-trips.
+        Model mD = GBDT.fit(x, label, n, nf, p);
+        int8[] bufD = ModelIO.serialize(mD);
+        Model backD = ModelIO.deserialize(bufD);
+        Assert.isTrue(backD.deterministic);
+        return;
+    }
+
+    @Test
+    public void deterministicPathRefusesStochasticKnobs() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        Tensor<float64> x = f.x();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        float64[] label = ApiTest.labelOf(f, n);
+
+        Params p = ApiTest.tinyRegParams();
+        p.subsample = (float64) 0.5;   // a non-deterministic knob
+
+        // The default (deterministic) entry point must refuse it — a user never
+        // silently forfeits reproducibility (§1.7.1).
+        Assert.assertThrows(() -> {
+            Model bad = GBDT.fit(x, label, n, nf, p);
+        });
+        return;
+    }
+}

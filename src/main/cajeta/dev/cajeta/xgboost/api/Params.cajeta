@@ -1,0 +1,51 @@
+package dev.cajeta.xgboost.api;
+
+/**
+ * Training hyperparameters for {@link GBDT} (spec §1.7, §3, §7.2). Field names and
+ * defaults mirror XGBoost's, and the defaults are exactly the **deterministic**
+ * config set (spec §6.4): no subsampling (`subsample == 1`), no column sampling
+ * (`colsampleByTree == 1`), so a default-constructed `Params` is bit-exact by
+ * construction. Only `subsample`/`colsampleByTree` can move a run off the
+ * deterministic set; {@link #usesStochasticSampling} flags that, and the
+ * deterministic entry point ({@link GBDT#fit}) rejects it (§1.7.1).
+ */
+public final class Params {
+    public int64   rounds;           // num_boost_round
+    public int64   maxDepth;         // max_depth
+    public int64   maxLeaves;        // max_leaves (0 = unbounded)
+    public float64 lambda;           // reg_lambda (L2)
+    public float64 alpha;            // reg_alpha  (L1)
+    public float64 gamma;            // min_split_loss
+    public float64 minChildWeight;   // min_child_weight
+    public float64 eta;              // learning_rate
+    public float64 baseScore;        // base_score
+    public int64   maxBin;           // max_bin
+    public float64 subsample;        // row subsample fraction (1 = deterministic)
+    public float64 colsampleByTree;  // column subsample fraction (1 = deterministic)
+
+    /** XGBoost defaults — the deterministic, bit-exact config set (§6.4). */
+    public Params() {
+        this.rounds = (int64) 10;
+        this.maxDepth = (int64) 6;
+        this.maxLeaves = (int64) 0;
+        this.lambda = (float64) 1.0;
+        this.alpha = (float64) 0.0;
+        this.gamma = (float64) 0.0;
+        this.minChildWeight = (float64) 1.0;
+        this.eta = (float64) 0.3;
+        this.baseScore = (float64) 0.5;
+        this.maxBin = (int64) 256;
+        this.subsample = (float64) 1.0;
+        this.colsampleByTree = (float64) 1.0;
+        return;
+    }
+
+    /**
+     * True iff a stochastic-sampling knob is engaged — the only way to leave the
+     * deterministic config set. Row/column subsampling depend on XGBoost's RNG,
+     * whose parity is not yet reproduced, so these are non-deterministic (§1.7).
+     */
+    public boolean usesStochasticSampling() {
+        return this.subsample < (float64) 1.0 || this.colsampleByTree < (float64) 1.0;
+    }
+}
