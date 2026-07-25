@@ -1,0 +1,44 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.objective.Softmax;
+
+/**
+ * U7.1.1 (round 0) — `multi:softprob` grad/hess bit-identical to the reference dump
+ * (`tiny_multi`, K=4). Round 0's per-class margins are all the base (0), so
+ * `expf(·)=1`, `wsum=K`, `p=1/K=0.25` exactly (no `expf`): `grad = 0.25 − onehot`,
+ * `hess = 2·0.25·0.75 = 0.375`. Validates the softmax grad/hess formula and the
+ * `[n*K]` layout; later rounds hit `expf` (U12).
+ */
+public class SoftmaxObjectiveTest {
+
+    public SoftmaxObjectiveTest() { return; }
+
+    @Test
+    public void roundZeroGradHessBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("tiny_multi");
+        Tensor<float64> yT      = f.y();
+        Tensor<float64> refGrad = f.grad();   // [rounds, n, K] flat
+        Tensor<float64> refHess = f.hess();
+        int64 n = yT.shapeAt(0);
+        int64 K = (int64) 4;
+
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        float32[] margin = heap float32[n * K];   // all 0 = base margin
+        float64[] grad = heap float64[n * K];
+        float64[] hess = heap float64[n * K];
+        Softmax.gradHess(margin, label, n, K, grad, hess);
+
+        int64 t = (int64) 0;
+        while (t < n * K) {
+            Assert.thatFloat(grad[t]).isEqualTo(refGrad.flatGet(t));
+            Assert.thatFloat(hess[t]).isEqualTo(refHess.flatGet(t));
+            t = t + (int64) 1;
+        }
+        return;
+    }
+}

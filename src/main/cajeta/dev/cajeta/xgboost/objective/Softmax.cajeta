@@ -1,0 +1,63 @@
+package dev.cajeta.xgboost.objective;
+
+/**
+ * `multi:softprob` / `multi:softmax` objective (spec §3.3), reproducing XGBoost's
+ * `SoftmaxMultiClassObj::GetGradient` (`multiclass_obj.cu:120`). Per row, over the
+ * K class margins:
+ *
+ *   wmax = fmaxf(FLT_MIN, margin_k over k)          // note: seeded at FLT_MIN
+ *   wsum = Σ_k expf(margin_k − wmax)                // accumulated in float64
+ *   p_k  = expf(margin_k − wmax) / (float32) wsum
+ *   grad_k = p_k − [k == label]                     // weight = 1
+ *   hess_k = max(2·p_k·(1−p_k), 1e-16)
+ *
+ * Round 0's margins are all equal (base), so `expf(·)=1`, `wsum=K`, and `p_k=1/K`
+ * **exactly** (0.25 for K=4) — no `expf` error. Later rounds evaluate `expf` at
+ * distinct margins and hit the same transcendental-fidelity item as
+ * {@link Logistic} (U6/U7 → U12).
+ */
+public final class Softmax {
+
+    static float32 eps() { return (float32) 0.0000000000000001; }   // 1e-16f
+
+    /** Base margin per class (softmax is shift-invariant; XGBoost inits to 0). */
+    public static float32 baseMargin() { return (float32) 0.0; }
+
+    /**
+     * Fill per-(row,class) grad/hess. `margin`/`grad`/`hess` are row-major `[n*K]`
+     * (row `i`, class `k` at `i*K + k`); `label` is the integer class per row.
+     */
+    public static void gradHess(float32[] margin, float64[] label, int64 n, int64 K,
+                                float64[] grad, float64[] hess) {
+        float32 fltMin = Cajeta.bitsToF32((int32) 0x00800000);   // smallest positive normal
+        int64 i = (int64) 0;
+        while (i < n) {
+            int64 base = i * K;
+            float32 wmax = fltMin;
+            int64 k = (int64) 0;
+            while (k < K) {
+                if (margin[base + k] > wmax) { wmax = margin[base + k]; }
+                k = k + (int64) 1;
+            }
+            float64 wsum = (float64) 0.0;
+            k = (int64) 0;
+            while (k < K) {
+                wsum = wsum + (float64) Math.exp(margin[base + k] - wmax);
+                k = k + (int64) 1;
+            }
+            int64 yc = (int64) label[i];
+            float32 s = (float32) wsum;
+            k = (int64) 0;
+            while (k < K) {
+                float32 p = Math.exp(margin[base + k] - wmax) / s;
+                float32 hp = (float32) 2.0 * p * ((float32) 1.0 - p);
+                float32 h = hp < Softmax.eps() ? Softmax.eps() : hp;
+                float32 g = (k == yc) ? p - (float32) 1.0 : p;
+                grad[base + k] = (float64) g;
+                hess[base + k] = (float64) h;
+                k = k + (int64) 1;
+            }
+            i = i + (int64) 1;
+        }
+    }
+}
