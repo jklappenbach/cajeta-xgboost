@@ -123,13 +123,22 @@ def main():
     ap.add_argument("--base-score", type=float, default=0.5)
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
                     help="cuda = the parity REFERENCE (NVIDIA); cpu = format/loader dev only")
+    ap.add_argument("--x-npy", default="", help="load X from this .npy instead of synthesizing "
+                    "(real-benchmark path, e.g. fetch_benchmark.py); pair with --y-npy")
+    ap.add_argument("--y-npy", default="", help="load y from this .npy instead of synthesizing")
     args = ap.parse_args()
 
     import xgboost as xgb
 
     n_class = args.num_class
-    X, y = build_dataset(args.rows, args.features, args.seed,
-                         args.missing_frac, n_class)
+    if args.x_npy:
+        # External dataset (the real-benchmark path). Same training + dump code
+        # path as the synthetic fixtures, so the format is identical.
+        X = np.load(args.x_npy).astype(np.float64)
+        y = np.load(args.y_npy).astype(np.float64)
+    else:
+        X, y = build_dataset(args.rows, args.features, args.seed,
+                             args.missing_frac, n_class)
 
     # The pinned DETERMINISTIC config (spec §6.4).
     params = {
