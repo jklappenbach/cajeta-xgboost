@@ -52,3 +52,26 @@ float32 minimax coefficients + the two-part `ln2` split + the FMA evaluation ord
 emulated float32. It is a `gpu-numeric-fidelity` item (see
 `../../../cajeta/specs/gpu-numeric-fidelity-spec.md`), the same class as the
 split-selection near-tie: "reproduce the device's exact float arithmetic bit-for-bit."
+
+## Finding (2026-07-25) — both CPU models fall short; needs a finer capture
+
+`gpu-numeric-fidelity` U1.2.1. Two CPU reproductions were tried against the full
+`expf_sweep.npy` (harnesses committed here):
+
+- `analyze_poly_model.py` — Cody–Waite reduce → degree-6 Horner poly → `ldexp`, with
+  **coordinate descent** over each float32 coefficient (±8 ULP) and the `ln2` low part.
+  Stalls at **~30% bit-mismatch**. Right shape (~1 ULP everywhere), wrong exact op
+  sequence — a plain Horner poly is not the device algorithm.
+- `analyze_ex2_model.py` — the `probe_expf.cu` model `ex2.approx(reduce(x))`, emulating
+  `ex2.approx` from the uniform `ex2_table.npy` via `ldexp(table[round(frac·2²³)], floor)`.
+  **~93% mismatch**, errors spread ±5+ ULP. The uniform 2²³ table cannot reproduce the
+  SFU's internal interpolation (the "~15 ULP short" wall): `MUFU.EX2` uses a piecewise
+  quadratic (Oberman–Siu), not a uniform table.
+
+**Conclusion / blocker:** bit-exact device `expf` bottoms out in the exact `MUFU.EX2`
+interpolation, which the current captures don't contain. Unblock needs one of:
+(a) a probe that captures `ex2.approx` at the *exact* float32 inputs the reduction
+produces (not a uniform grid) — then a direct table keyed by input bits is exact; or
+(b) probe `ex2.approx` densely enough per binade to fit the Oberman–Siu piecewise-quad
+coefficients; or (c) lift the accurate-`expf` SASS from the pinned toolchain's libdevice
+and transcribe its exact op sequence + constants. All three need the NVIDIA box.
