@@ -1,0 +1,91 @@
+package dev.cajeta.xgboost.sketch;
+
+import cajeta.math.Tensor;
+
+/**
+ * Quantile cut-point builder (spec §2, §7.2). When a feature has at most `max_bin`
+ * distinct present values the weighted quantile summary keeps them all — no pruning —
+ * and XGBoost's `MakeCuts`/`AddCutPoint` (`src/common/quantile.cc`) reduce to a closed
+ * form over the sorted distinct float32 values:
+ *
+ *   cut[0]      = min − |min| − 1e-5f                 (min sentinel, `MakeCuts`)
+ *   cut[i]      = distinct[i]   (i = 1 … u−1)          (`AddCutPoint`, from index 1)
+ *   cut[u]      = max + (|max| + 1e-5f)                (final "greater than anything")
+ *
+ * giving `u+1` cuts for `u` distinct values. Values are compared/stored as float32.
+ * This reproduces the `tiny_reg` reference cuts bit-for-bit. The pruned case
+ * (#distinct > max_bin, the full GK weighted-quantile sketch) is the remaining piece
+ * for larger data (U10) — {@link #cutsNoPrune} asserts it is not hit.
+ */
+public final class Sketch {
+
+    static boolean isNaN(float32 v) {
+        return (Cajeta.f32ToBits(v) & (int32) 0x7FFFFFFF) > (int32) 0x7F800000;
+    }
+
+    /** Ascending insertion sort of `a[0, m)` (small per-feature columns). */
+    static void sortAsc(float32[] a, int64 m) {
+        int64 i = (int64) 1;
+        while (i < m) {
+            float32 key = a[i];
+            int64 j = i - (int64) 1;
+            while (j >= (int64) 0 && a[j] > key) { a[j + (int64) 1] = a[j]; j = j - (int64) 1; }
+            a[j + (int64) 1] = key;
+            i = i + (int64) 1;
+        }
+    }
+
+    /**
+     * No-prune quantile cuts. Fills `cutPtrs[nf+1]` and returns the concatenated
+     * per-feature cut values. Requires every feature to have ≤ `maxBin` distinct
+     * present values (else it throws — the pruned path is not implemented).
+     */
+    public static #float32[] cutsNoPrune(Tensor<float64> x, int64 n, int64 nf, int64 maxBin,
+                                         int64[] cutPtrs) {
+        float32[] buf = heap float32[nf * (n + (int64) 1)];
+        float32[] col = heap float32[n];
+        float32 eps = (float32) 0.00001;                 // 1e-5f
+        int64 pos = (int64) 0;
+        cutPtrs[0] = (int64) 0;
+
+        int64 f = (int64) 0;
+        while (f < nf) {
+            int64 m = (int64) 0;
+            int64 r = (int64) 0;
+            while (r < n) {
+                float32 v = (float32) x.flatGet(r * nf + f);
+                if (!Sketch.isNaN(v)) { col[m] = v; m = m + (int64) 1; }
+                r = r + (int64) 1;
+            }
+            Sketch.sortAsc(col, m);
+
+            if (m > (int64) 0) {
+                float32 mn = col[0];
+                buf[pos] = (mn - Math.abs(mn)) - eps; pos = pos + (int64) 1;   // min sentinel
+                float32 prev = mn;
+                int64 distinct = (int64) 1;
+                int64 i = (int64) 1;
+                while (i < m) {
+                    if (col[i] != prev) {                 // next distinct value
+                        buf[pos] = col[i]; pos = pos + (int64) 1;
+                        prev = col[i];
+                        distinct = distinct + (int64) 1;
+                    }
+                    i = i + (int64) 1;
+                }
+                if (distinct > maxBin) {
+                    throw heap cajeta.error.RecoverableException(
+                        "Sketch.cutsNoPrune: feature has more distinct values than max_bin (pruning not implemented)");
+                }
+                buf[pos] = prev + (Math.abs(prev) + eps); pos = pos + (int64) 1;   // last sentinel
+            }
+            cutPtrs[f + (int64) 1] = pos;
+            f = f + (int64) 1;
+        }
+
+        float32[] out = heap float32[pos];
+        int64 k = (int64) 0;
+        while (k < pos) { out[k] = buf[k]; k = k + (int64) 1; }
+        return #out;
+    }
+}

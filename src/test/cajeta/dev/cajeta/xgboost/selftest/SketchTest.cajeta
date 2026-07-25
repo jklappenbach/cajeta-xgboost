@@ -1,0 +1,42 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Sketch;
+
+/**
+ * U9.1.1 (cut-points half) — cajeta's quantile sketch reproduces the reference GPU
+ * cut points bit-for-bit for `tiny_reg` (200 rows, all features < max_bin distinct,
+ * so no pruning). Asserts both the per-feature `cut_ptrs` and every concatenated
+ * `cut_value` match `cut_ptrs.npy` / `cut_values.npy`.
+ */
+public class SketchTest {
+
+    public SketchTest() { return; }
+
+    @Test
+    public void cutsMatchReferenceNoPrune() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        Tensor<float64> x     = f.x();
+        Tensor<int64>   refCp = f.cutPtrs();
+        Tensor<float64> refCv = f.cutValues();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+
+        int64[] cutPtrs = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cutsNoPrune(x, n, nf, (int64) 256, cutPtrs);
+
+        int64 i = (int64) 0;
+        while (i < nf + (int64) 1) {
+            Assert.that(cutPtrs[i]).isEqualTo(refCp.flatGet(i));
+            i = i + (int64) 1;
+        }
+        int64 total = cutPtrs[nf];
+        i = (int64) 0;
+        while (i < total) {
+            Assert.thatFloat((float64) cuts[i]).isEqualTo(refCv.flatGet(i));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+}
