@@ -3,6 +3,7 @@ package dev.cajeta.xgboost.selftest;
 import cajeta.lang.Int64;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.tree.Tree;
 
 /**
  * Parity comparator (spec §7.4, plan 10.1.3) — walks a trained {@link Model} against
@@ -81,6 +82,52 @@ public final class ParityRunner {
                 nid = nid + (int64) 1;
             }
             r = r + (int64) 1;
+        }
+        return "";
+    }
+
+    /**
+     * Compare a single grown {@link Tree} against the fixture's reference tree `ti`
+     * (round `ti`). Returns `""` on bit-identity, else the first diverging node/field.
+     */
+    public static #String compareTree(Tree t, FixtureLoader f, int32 ti) {
+        Tensor<int32>   rLC = f.treeLeftChildren(ti);
+        Tensor<int32>   rRC = f.treeRightChildren(ti);
+        Tensor<int32>   rSI = f.treeSplitIndices(ti);
+        Tensor<float32> rSC = f.treeSplitConditions(ti);
+        Tensor<int32>   rDL = f.treeDefaultLeft(ti);
+        Tensor<float32> rBW = f.treeBaseWeights(ti);
+        int64 refCount = rBW.shapeAt(0);
+        int64 r = (int64) ti;
+        if (t.nodeCount != refCount) {
+            return "round " + ParityRunner.s(r) + ": node count " + ParityRunner.s(t.nodeCount)
+                 + " != reference " + ParityRunner.s(refCount);
+        }
+        int64 nid = (int64) 0;
+        while (nid < refCount) {
+            if (t.leftChildren[nid] != (int64) rLC.flatGet(nid)) {
+                return ParityRunner.diff(r, nid, "left_child", t.leftChildren[nid], (int64) rLC.flatGet(nid));
+            }
+            if (t.rightChildren[nid] != (int64) rRC.flatGet(nid)) {
+                return ParityRunner.diff(r, nid, "right_child", t.rightChildren[nid], (int64) rRC.flatGet(nid));
+            }
+            boolean refLeaf = rLC.flatGet(nid) == (int32) -1;
+            if (!refLeaf) {
+                if (t.splitIndices[nid] != (int64) rSI.flatGet(nid)) {
+                    return ParityRunner.diff(r, nid, "split_index", t.splitIndices[nid], (int64) rSI.flatGet(nid));
+                }
+                if (Cajeta.f32ToBits(t.splitConditions[nid]) != Cajeta.f32ToBits(rSC.flatGet(nid))) {
+                    return ParityRunner.diffBits(r, nid, "split_condition", t.splitConditions[nid], rSC.flatGet(nid));
+                }
+                boolean refLeft = rDL.flatGet(nid) == (int32) 1;
+                if (t.defaultLeft[nid] != refLeft) {
+                    return ParityRunner.at(r, nid) + "default_left mismatch";
+                }
+            }
+            if (Cajeta.f32ToBits(t.baseWeights[nid]) != Cajeta.f32ToBits(rBW.flatGet(nid))) {
+                return ParityRunner.diffBits(r, nid, "base_weight", t.baseWeights[nid], rBW.flatGet(nid));
+            }
+            nid = nid + (int64) 1;
         }
         return "";
     }

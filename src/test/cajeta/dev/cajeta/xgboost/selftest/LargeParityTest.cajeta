@@ -22,7 +22,6 @@ public class LargeParityTest {
     public LargeParityTest() { return; }
 
     @Test
-    @Disabled
     public void largeRegTreesAndMarginsBitIdentical() {
         FixtureLoader f = FixtureLoader.open("large_reg");
         Tensor<float64> yT = f.y();

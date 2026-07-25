@@ -207,8 +207,10 @@ def main():
                  else "CPU format/loader fixture — NOT the parity reference"),
         "params": params,
         "dataset": {
-            "rows": args.rows, "features": args.features, "seed": args.seed,
+            # record the ACTUAL shape (the external-data path overrides rows/features).
+            "rows": int(X.shape[0]), "features": int(X.shape[1]), "seed": args.seed,
             "missing_frac": args.missing_frac, "num_class": n_class,
+            "external": bool(args.x_npy),
         },
         "num_round": rounds,
         "artifacts": ["X.npy", "y.npy", "margins.npy", "preds.npy", "grad.npy",
