@@ -43,16 +43,15 @@ public final class Predictor {
 
     /**
      * Raw output margin per row for a single-group model (regression / binary):
-     * `base + Σ_t leaf(tree t)`, float32, tree order. `out` has length `n`.
+     * `baseMargin + Σ_t leaf(tree t)`, float32, tree order. `out` has length `n`.
      */
-    public static void marginSingle(Model m, Tensor<float64> x, int64 n, int64 nf,
-                                    float32 base, float32[] out) {
+    public static void marginSingle(Model m, Tensor<float64> x, int64 n, int64 nf, float32[] out) {
         float64[] xrow = heap float64[nf];
         int64 r = (int64) 0;
         while (r < n) {
             int64 j = (int64) 0;
             while (j < nf) { xrow[j] = x.flatGet(r * nf + j); j = j + (int64) 1; }
-            float32 mrg = base;
+            float32 mrg = m.baseMargin;
             int64 t = (int64) 0;
             while (t < m.rounds) {
                 mrg = mrg + Predictor.leaf(m.leftChildren, m.rightChildren, m.splitIndices,

@@ -1,0 +1,77 @@
+package dev.cajeta.xgboost.booster;
+
+/**
+ * Model (de)serialization (spec §5.2). A {@link Model} is a header (`rounds`,
+ * `cap`, `baseMargin`) plus `nodeCount[rounds]` and seven flat `[rounds*cap]` node
+ * arrays; this writes them as a self-describing little-endian buffer (one 8-byte
+ * word per scalar — float32 fields via their bit pattern) and reads them back into
+ * an identical Model. Round-trip is bit-exact by construction, so a loaded model
+ * predicts identically to the original.
+ */
+public final class ModelIO {
+
+    static int64 words(int64 rounds, int64 cap) {
+        return (int64) 3 + rounds + (int64) 7 * rounds * cap;   // header + nodeCount + 7 arrays
+    }
+
+    public static #int8[] serialize(Model m) {
+        int64 R = m.rounds;
+        int64 C = m.cap;
+        int64 A = R * C;
+        int8[] buf = heap int8[ModelIO.words(R, C) * (int64) 8];
+        Cajeta.storeU64(buf, (int64) 0, R);
+        Cajeta.storeU64(buf, (int64) 8, C);
+        Cajeta.storeU64(buf, (int64) 16, (int64) Cajeta.f32ToBits(m.baseMargin));
+        int64 off = (int64) 24;
+        int64 i = (int64) 0;
+        while (i < R) { Cajeta.storeU64(buf, off, m.nodeCount[i]); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, m.splitIndices[i]); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, (int64) Cajeta.f32ToBits(m.splitConditions[i])); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, m.defaultLeft[i] ? (int64) 1 : (int64) 0); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, m.leftChildren[i]); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, m.rightChildren[i]); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, (int64) Cajeta.f32ToBits(m.baseWeights[i])); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, m.isLeaf[i] ? (int64) 1 : (int64) 0); off = off + (int64) 8; i = i + (int64) 1; }
+        return #buf;
+    }
+
+    public static #Model deserialize(int8[] buf) {
+        int64 R = Cajeta.loadU64(buf, (int64) 0);
+        int64 C = Cajeta.loadU64(buf, (int64) 8);
+        float32 base = Cajeta.bitsToF32((int32) Cajeta.loadU64(buf, (int64) 16));
+        int64 A = R * C;
+        int64[]   nodeCount = heap int64[R];
+        int64[]   si = heap int64[A];
+        float32[] sc = heap float32[A];
+        boolean[] dl = heap boolean[A];
+        int64[]   lc = heap int64[A];
+        int64[]   rc = heap int64[A];
+        float32[] bw = heap float32[A];
+        boolean[] leaf = heap boolean[A];
+        int64 off = (int64) 24;
+        int64 i = (int64) 0;
+        while (i < R) { nodeCount[i] = Cajeta.loadU64(buf, off); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { si[i] = Cajeta.loadU64(buf, off); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { sc[i] = Cajeta.bitsToF32((int32) Cajeta.loadU64(buf, off)); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { dl[i] = Cajeta.loadU64(buf, off) == (int64) 1; off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { lc[i] = Cajeta.loadU64(buf, off); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { rc[i] = Cajeta.loadU64(buf, off); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { bw[i] = Cajeta.bitsToF32((int32) Cajeta.loadU64(buf, off)); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { leaf[i] = Cajeta.loadU64(buf, off) == (int64) 1; off = off + (int64) 8; i = i + (int64) 1; }
+        return heap Model(R, C, base, #nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf);
+    }
+}

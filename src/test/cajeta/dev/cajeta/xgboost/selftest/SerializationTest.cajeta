@@ -1,0 +1,60 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.booster.ModelIO;
+import dev.cajeta.xgboost.predict.Predictor;
+
+/**
+ * U8.1.2 — serialize → load → predict bit-identical (§5.2). Trains the `tiny_reg`
+ * regression model, round-trips it through {@link ModelIO}, and asserts the loaded
+ * model predicts identically to the original — and, since the reg model is bit-exact
+ * (U5) and its trees walk to the reference under the predictor (U8.1.1), that both
+ * equal `preds.npy` bit-for-bit.
+ */
+public class SerializationTest {
+
+    public SerializationTest() { return; }
+
+    @Test
+    public void roundTripPredictsBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        Tensor<float64> yT = f.y();
+        Tensor<float64> x  = f.x();
+        Tensor<float64> preds = f.preds();
+        int64 n  = yT.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        int64 rounds = (int64) 3;
+        float32[] hist = heap float32[rounds * n];
+        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                (int64) 4, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5, hist);
+
+        int8[] buf = ModelIO.serialize(m);
+        Model m2 = ModelIO.deserialize(buf);
+
+        Assert.that(m2.rounds).isEqualTo(m.rounds);
+        Assert.that(m2.cap).isEqualTo(m.cap);
+        Assert.thatFloat((float64) m2.baseMargin).isEqualTo((float64) m.baseMargin);
+
+        float32[] o1 = heap float32[n];
+        float32[] o2 = heap float32[n];
+        Predictor.marginSingle(m,  x, n, nf, o1);
+        Predictor.marginSingle(m2, x, n, nf, o2);
+
+        int64 r = (int64) 0;
+        while (r < n) {
+            Assert.thatFloat((float64) o1[r]).isEqualTo((float64) o2[r]);          // round-trip
+            Assert.thatFloat((float64) o2[r]).isEqualTo(preds.flatGet(r));         // reference parity
+            r = r + (int64) 1;
+        }
+        return;
+    }
+}
