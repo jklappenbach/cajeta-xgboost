@@ -34,3 +34,21 @@ scp expf_sweep.npy proton:/home/julian/code/cpp/cajeta-xgboost/tools/expf/
 Paste the printed model-mismatch block too. From there I diff device-vs-libm `expf`,
 and either (a) confirm no gap, or (b) model device `expf` on CPU (same probe→model
 pattern as `__fdividef`; `ex2.approx.f32` is the SFU op to table if needed).
+
+## Finding (2026-07-24) — structure confirmed; exact float32 coefficients remain
+
+Against `expf_sweep.npy` (device `expf` over the FMA grid), device `expf` is the
+**accurate** path (no `--use_fast_math`), and its structure reproduces cleanly:
+
+1. Cody–Waite reduction: `j = rint(x·log2e)`, `f = x − j·ln2` (`f ∈ ~[−0.347, 0.347]`).
+2. `e^f` via a **degree-6 minimax polynomial** — the fitted coefficients are *tuned*,
+   not Taylor: `c5 ≈ 0.008360` (vs `1/5! = 0.008333`), `c6 ≈ 0.001384` (vs `1/6! =
+   0.001389`). Fit residual ≈ 1.6e-7 (~1 ULP): the float64 fit sits at the noise floor,
+   so the residual is the reduction/eval order, not the model shape.
+3. Scale by `2^j` (`ldexp`).
+
+So bit-exact device `expf` is a **coefficient-nail-down** problem: recover the exact
+float32 minimax coefficients + the two-part `ln2` split + the FMA evaluation order, in
+emulated float32. It is a `gpu-numeric-fidelity` item (see
+`../../../cajeta/specs/gpu-numeric-fidelity-spec.md`), the same class as the
+split-selection near-tie: "reproduce the device's exact float arithmetic bit-for-bit."
