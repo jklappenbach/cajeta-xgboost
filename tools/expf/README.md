@@ -75,3 +75,28 @@ produces (not a uniform grid) — then a direct table keyed by input bits is exa
 (b) probe `ex2.approx` densely enough per binade to fit the Oberman–Siu piecewise-quad
 coefficients; or (c) lift the accurate-`expf` SASS from the pinned toolchain's libdevice
 and transcribe its exact op sequence + constants. All three need the NVIDIA box.
+
+## Refinement (2026-07-25) — it's njuffa accurate `expf`; needs the libdevice IR
+
+XGBoost's device `expf` (no `--use_fast_math`) is the **accurate** path, and it is
+Norbert Juffa's well-known algorithm (`analyze_njuffa_model.py`): magic-number `rint`
+(`fma(x, log2e, 1.5·2²³) − 1.5·2²³`), two-part `ln2` reduction, degree-6 minimax poly,
+`ldexp`. With his classic coefficients it reproduces `expf_sweep.npy` to **maxULP = 2**
+(31% of points off by 1–2 ULP). Coordinate descent over every float32 coefficient +
+the `ln2`/`log2e` constants (`analyze_coeff_descent.py`) only reaches ~30% — the
+residual is **structural** (the exact op association of `1 + f + f²·P`, `ldexp` vs
+bit-`scalbn`, `rintf` vs the magic number), not coefficient tuning.
+
+So this is NOT the SFU `ex2.approx` after all (that was the *fast* `__expf`); it's a
+pure-FMA polynomial, fully reproducible on CPU once the exact op sequence is known.
+**Cheapest unblock — no hardware probe, just a file on the box:** disassemble
+`__nv_expf` from the pinned toolchain's libdevice and transcribe it verbatim:
+
+```bash
+# on Phoenix (the CUDA toolkit that built the 3.1.2 device objects)
+llvm-dis "$(find / -name 'libdevice*.bc' 2>/dev/null | head -1)" -o - \
+  | sed -n '/define.*__nv_expf/,/^}/p'
+```
+
+That IR gives the exact FMA order + float32 constants → transcribe into `FastMath.expf`
+and it is bit-exact. (This machine's only `libdevice*.bc` are empty clang test stubs.)
