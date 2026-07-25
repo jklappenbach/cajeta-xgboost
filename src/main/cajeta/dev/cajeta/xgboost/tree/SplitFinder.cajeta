@@ -59,7 +59,10 @@ public final class SplitFinder {
         float64 gd = q.floatGrad(gq);
         float64 hd = q.floatHess(hq);
         if (hd < minChildWeight || hd <= (float64) 0.0) { return (float32) 0.0; }
-        return (float32) (((float64) 0.0 - SplitFinder.thresholdL1(gd, alpha)) / (hd + lambda));
+        // Unary negation, matching XGBoost's `-ThresholdL1(...)` (param.h:245): for an
+        // exactly-zero gradient sum this yields −0.0 (not the +0.0 of `0.0 − x`), so a
+        // balanced node's stored weight is bit-identical to the reference.
+        return (float32) ((- SplitFinder.thresholdL1(gd, alpha)) / (hd + lambda));
     }
 
     /**

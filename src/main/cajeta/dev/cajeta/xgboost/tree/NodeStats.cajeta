@@ -26,9 +26,11 @@ public final class NodeStats {
         return heap NodeStats(g, h);
     }
 
-    /** Optimal leaf weight `w = -G/(H+lambda)`, at float32 (XGBoost's stored type). */
+    /** Optimal leaf weight `w = -G/(H+lambda)`, at float32 (XGBoost's stored type).
+     *  Unary negation (not `0.0 - g`) so an exactly-zero G yields −0.0, matching
+     *  XGBoost's `-G` (param.h:245) bit-for-bit. */
     public float32 weight(float64 lambda) {
-        return (float32) (((float64) 0.0 - this.g) / (this.h + lambda));
+        return (float32) ((- this.g) / (this.h + lambda));
     }
 
     /** The gain contribution `G^2/(H+lambda)` of this node (split scoring). */

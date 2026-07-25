@@ -10,21 +10,19 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
  * depth 6). Round-0 gradients (`0.5 − y`, hess `0.25`) are expf-free, so the tree is
  * bit-exact independent of the U12 `expf` link; full-model binary parity (rounds 1+)
  * stays U12-gated. This exercises the builder on binary gradients at real depth and
- * bin occupancy.
+ * bin occupancy — bit-exact at scale (all nodes, splits included).
  *
- * FINDING (2026-07-24): bit-exact at scale EXCEPT the root `base_weight`, where the
- * reference is `−0.0` and cajeta is `+0.0`. The `large_binary` labels are exactly
- * balanced (y = logits > median), so `Σ grad = Σ(0.5 − y) = 0` exactly, and the sign
- * of that zero — hence of `CalcWeight = −Σgrad/(Σhess+λ)` — is fixed by the GPU's
- * deterministic reduction order (§6.2). Matching that signed zero is a U12
- * reduction-fidelity item; `@Disabled` until then.
+ * The `large_binary` labels are exactly balanced (y = logits > median), so
+ * `Σ grad = Σ(0.5 − y) = 0` exactly, and `CalcWeight = −Σgrad/(Σhess+λ)` must yield
+ * `−0.0` (XGBoost's unary `-G`), not the `+0.0` of `0.0 − G`. `SplitFinder.leafWeight`
+ * now uses unary negation, so the root `base_weight` signed zero matches. Like reg,
+ * binary round-0 shows no split-selection near-tie divergence at scale.
  */
 public class LargeBinaryTest {
 
     public LargeBinaryTest() { return; }
 
     @Test
-    @Disabled
     public void roundZeroBinaryTreeBitIdenticalAtScale() {
         FixtureLoader f = FixtureLoader.open("large_binary");
         float64[] g = f.gradRound(0);
