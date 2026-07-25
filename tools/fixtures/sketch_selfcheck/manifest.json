@@ -1,0 +1,11 @@
+{
+  "note": "ALGORITHM self-check for the pruned GK sketch (plan U10.2.2) \u2014 NOT a GPU parity reference. Locks cajeta Sketch.cuts to the float32 algorithm from xgboost-ref; GPU 3.1.2 parity is validated against large_reg on NVIDIA.",
+  "max_bin": 8,
+  "rows": 300,
+  "features": 3,
+  "cuts_per_feature": [
+    7,
+    9,
+    9
+  ]
+}

@@ -64,9 +64,9 @@ public final class GBDT {
                 "GBDT.fitNonDeterministic: subsample/colsample_bytree < 1 is not yet implemented (RNG parity is a later unit)");
         }
 
-        // Raw → cuts (no-prune) → bins — bit-exact per U9.
+        // Raw → cuts (GPU sketch, prune-capable) → bins — bit-exact per U9/U10.
         int64[] cutPtrsA = heap int64[nf + (int64) 1];
-        float32[] cuts = Sketch.cutsNoPrune(x, n, nf, p.maxBin, cutPtrsA);
+        float32[] cuts = Sketch.cuts(x, n, nf, p.maxBin, cutPtrsA);
         int64 total = cutPtrsA[nf];
 
         int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;

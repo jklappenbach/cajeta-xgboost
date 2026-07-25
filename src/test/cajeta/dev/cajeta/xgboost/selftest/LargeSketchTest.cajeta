@@ -1,0 +1,48 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Sketch;
+
+/**
+ * U10.2.2 / spec §7.2 at scale — cajeta's pruned GK sketch reproduces the NVIDIA GPU
+ * reference `cut_values`/`cut_ptrs` bit-for-bit for `large_reg` (20k×50, every feature
+ * continuous so XGBoost prunes to 256 bins). This is the bit-exact confirmation that
+ * cajeta's `SetPrune`+`MakeCuts` port matches the real GPU 3.1.2 device sketch — the
+ * step `SketchPruneTest` (algorithm self-check) cannot make without the fixture.
+ *
+ * `@Disabled` until `large_reg` is generated on the NVIDIA box (pinned xgboost 3.1.2)
+ * and committed. Enabling this + LargeParityTest closes the raw→bins→trees loop at
+ * scale (trees still gated on the U12 split-selection near-tie).
+ */
+public class LargeSketchTest {
+
+    public LargeSketchTest() { return; }
+
+    @Test
+    @Disabled
+    public void largeRegCutsBitIdenticalToReference() {
+        FixtureLoader f = FixtureLoader.open("large_reg");
+        Tensor<float64> x     = f.x();
+        Tensor<int64>   refCp = f.cutPtrs();
+        Tensor<float64> refCv = f.cutValues();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+
+        int64[] cutPtrs = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cuts(x, n, nf, (int64) 256, cutPtrs);
+
+        int64 i = (int64) 0;
+        while (i < nf + (int64) 1) {
+            Assert.that(cutPtrs[i]).isEqualTo(refCp.flatGet(i));
+            i = i + (int64) 1;
+        }
+        int64 total = cutPtrs[nf];
+        i = (int64) 0;
+        while (i < total) {
+            Assert.thatFloat((float64) cuts[i]).isEqualTo(refCv.flatGet(i));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+}

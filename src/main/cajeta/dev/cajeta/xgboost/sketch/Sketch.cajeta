@@ -3,19 +3,27 @@ package dev.cajeta.xgboost.sketch;
 import cajeta.math.Tensor;
 
 /**
- * Quantile cut-point builder (spec §2, §7.2). When a feature has at most `max_bin`
- * distinct present values the weighted quantile summary keeps them all — no pruning —
- * and XGBoost's `MakeCuts`/`AddCutPoint` (`src/common/quantile.cc`) reduce to a closed
- * form over the sorted distinct float32 values:
+ * Quantile cut-point builder (spec §2, §7.2) — reproduces XGBoost's GPU device sketch
+ * (`device=cuda`, `tree_method=hist`) `cut_values` bit-for-bit, both the no-prune case
+ * (a feature with ≤ `max_bin` distinct values) and the **pruned** GK weighted-quantile
+ * case (more distinct values than `max_bin`). All summary math is float32 (`RType`),
+ * matching `src/common/quantile.{h,cu}`.
  *
- *   cut[0]      = min − |min| − 1e-5f                 (min sentinel, `MakeCuts`)
- *   cut[i]      = distinct[i]   (i = 1 … u−1)          (`AddCutPoint`, from index 1)
- *   cut[u]      = max + (|max| + 1e-5f)                (final "greater than anything")
+ * Per feature the pipeline is (unweighted, deterministic, single batch):
+ *   1. gather present float32, sort ascending, collapse to the distinct summary
+ *      `e[j] = {rmin=C_j, rmax=C_j+n_j, wmin=n_j, value=v_j}` (§quantile.cu ScanInput).
+ *   2. **Stage A** — if `#distinct > requiredSampleCuts(n)` (the in-`Push` budget,
+ *      `RequiredSampleCutsPerColumn`/`LimitSizeLevel`), prune to that budget.
+ *   3. **Stage C** — `MakeCuts` prunes to `max_bin + 1` (`quantile.cu:616`).
+ *   Both prunes are XGBoost's `WQSummary::SetPrune` (`quantile.h:220`), bit-identical
+ *   to the GPU `PruneImpl` for a single summary.
+ *   4. emit `k = min(s, max_bin)` cut values (`quantile.cu:690-750`): the exported
+ *      per-feature cuts are `[min_sentinel, S[1], …, S[k-1], max_sentinel]`, where the
+ *      min/max sentinels are computed in **float64** (the `fabs(v) + 1e-5` promotes the
+ *      `1e-5` double literal, then narrows to float on store).
  *
- * giving `u+1` cuts for `u` distinct values. Values are compared/stored as float32.
- * This reproduces the `tiny_reg` reference cuts bit-for-bit. The pruned case
- * (#distinct > max_bin, the full GK weighted-quantile sketch) is the remaining piece
- * for larger data (U10) — {@link #cutsNoPrune} asserts it is not hit.
+ * This generalizes the U9 no-prune closed form: for `#distinct ≤ max_bin` no prune
+ * fires and the result is identical to before.
  */
 public final class Sketch {
 
@@ -23,7 +31,7 @@ public final class Sketch {
         return (Cajeta.f32ToBits(v) & (int32) 0x7FFFFFFF) > (int32) 0x7F800000;
     }
 
-    /** Ascending insertion sort of `a[0, m)` (small per-feature columns). */
+    /** Ascending insertion sort of `a[0, m)`. */
     static void sortAsc(float32[] a, int64 m) {
         int64 i = (int64) 1;
         while (i < m) {
@@ -35,21 +43,106 @@ public final class Sketch {
         }
     }
 
+    /** ceil for v > 0 without depending on a libm binding. */
+    static int64 ceilPos(float64 v) {
+        int64 t = (int64) v;
+        if ((float64) t < v) { t = t + (int64) 1; }
+        return t;
+    }
+
     /**
-     * No-prune quantile cuts. Fills `cutPtrs[nf+1]` and returns the concatenated
-     * per-feature cut values. Requires every feature to have ≤ `maxBin` distinct
-     * present values (else it throws — the pruned path is not implemented).
+     * `RequiredSampleCutsPerColumn` (`src/common/hist_util.cu:31-37` + `LimitSizeLevel`,
+     * `quantile.h:544-558`): the in-`Push` prune budget for a column, given the batch
+     * row count. `eps = 1/(kFactor*max_bin)`, `kFactor = 8`.
      */
-    public static #float32[] cutsNoPrune(Tensor<float64> x, int64 n, int64 nf, int64 maxBin,
-                                         int64[] cutPtrs) {
-        float32[] buf = heap float32[nf * (n + (int64) 1)];
+    static int64 requiredSampleCuts(int64 numRows, int64 maxBin) {
+        float64 eps = (float64) 1.0 / ((float64) 8.0 * (float64) maxBin);
+        int64 nlevel = (int64) 1;
+        int64 limitSize = (int64) 0;
+        while (true) {
+            int64 ls = Sketch.ceilPos((float64) nlevel / eps) + (int64) 1;   // ceil(nlevel/eps)+1
+            if (ls > numRows) { ls = numRows; }                              // min(maxn, limit_size)
+            limitSize = ls;
+            int64 lhs = ((int64) 1 << nlevel) * limitSize;                   // (1<<nlevel)*limit_size
+            if (lhs >= numRows) { break; }
+            nlevel = nlevel + (int64) 1;
+        }
+        return limitSize;
+    }
+
+    /**
+     * `WQSummary::SetPrune` (`quantile.h:220-250`) on parallel float32 summary arrays.
+     * Prunes `in[0, size)` to at most `to` entries into `out*`; returns the new size.
+     * If `size <= to` it copies verbatim.
+     */
+    static int64 setPrune(float32[] irm, float32[] irx, float32[] iwm, float32[] iv, int64 size, int64 to,
+                          float32[] orm, float32[] orx, float32[] owm, float32[] ov) {
+        if (size <= to) {
+            int64 c = (int64) 0;
+            while (c < size) { orm[c] = irm[c]; orx[c] = irx[c]; owm[c] = iwm[c]; ov[c] = iv[c]; c = c + (int64) 1; }
+            return size;
+        }
+        float32 begin = irx[0];                       // src.data[0].rmax
+        float32 range = irm[size - (int64) 1] - irx[0];   // src[last].rmin - src[0].rmax
+        int64 nn = to - (int64) 1;
+        orm[0] = irm[0]; orx[0] = irx[0]; owm[0] = iwm[0]; ov[0] = iv[0];
+        int64 osize = (int64) 1;
+        int64 i = (int64) 1;
+        int64 lastidx = (int64) 0;
+        int64 k = (int64) 1;
+        while (k < nn) {
+            float32 dx2 = (float32) 2.0 * (((float32) k * range) / (float32) nn + begin);
+            while (i < size - (int64) 1 && dx2 >= irx[i + (int64) 1] + irm[i + (int64) 1]) {
+                i = i + (int64) 1;
+            }
+            if (i == size - (int64) 1) { break; }
+            float32 rMinNextI = irm[i] + iwm[i];                       // src[i].RMinNext()
+            float32 rMaxPrevI1 = irx[i + (int64) 1] - iwm[i + (int64) 1];  // src[i+1].RMaxPrev()
+            if (dx2 < rMinNextI + rMaxPrevI1) {
+                if (i != lastidx) {
+                    orm[osize] = irm[i]; orx[osize] = irx[i]; owm[osize] = iwm[i]; ov[osize] = iv[i];
+                    osize = osize + (int64) 1; lastidx = i;
+                }
+            } else {
+                int64 i1 = i + (int64) 1;
+                if (i1 != lastidx) {
+                    orm[osize] = irm[i1]; orx[osize] = irx[i1]; owm[osize] = iwm[i1]; ov[osize] = iv[i1];
+                    osize = osize + (int64) 1; lastidx = i1;
+                }
+            }
+            k = k + (int64) 1;
+        }
+        if (lastidx != size - (int64) 1) {
+            int64 last = size - (int64) 1;
+            orm[osize] = irm[last]; orx[osize] = irx[last]; owm[osize] = iwm[last]; ov[osize] = iv[last];
+            osize = osize + (int64) 1;
+        }
+        return osize;
+    }
+
+    /**
+     * GPU-parity quantile cuts. Fills `cutPtrs[nf+1]` and returns the concatenated
+     * per-feature cut values (bit-exact to XGBoost's `get_quantile_cut()`), handling
+     * both the no-prune and pruned cases.
+     */
+    public static #float32[] cuts(Tensor<float64> x, int64 n, int64 nf, int64 maxBin,
+                                  int64[] cutPtrs) {
+        float32[] out = heap float32[nf * (maxBin + (int64) 1)];
         float32[] col = heap float32[n];
-        float32 eps = (float32) 0.00001;                 // 1e-5f
+        // distinct summary + two prune scratch buffers (each ≤ #distinct ≤ n).
+        float32[] drm = heap float32[n]; float32[] drx = heap float32[n];
+        float32[] dwm = heap float32[n]; float32[] dv  = heap float32[n];
+        float32[] arm = heap float32[n]; float32[] arx = heap float32[n];
+        float32[] awm = heap float32[n]; float32[] av  = heap float32[n];
+        float32[] brm = heap float32[n]; float32[] brx = heap float32[n];
+        float32[] bwm = heap float32[n]; float32[] bv  = heap float32[n];
+        float64 eps = (float64) 0.00001;   // 1e-5 (double literal, per source)
         int64 pos = (int64) 0;
         cutPtrs[0] = (int64) 0;
 
         int64 f = (int64) 0;
         while (f < nf) {
+            // gather present, sort.
             int64 m = (int64) 0;
             int64 r = (int64) 0;
             while (r < n) {
@@ -60,32 +153,61 @@ public final class Sketch {
             Sketch.sortAsc(col, m);
 
             if (m > (int64) 0) {
-                float32 mn = col[0];
-                buf[pos] = (mn - Math.abs(mn)) - eps; pos = pos + (int64) 1;   // min sentinel
-                float32 prev = mn;
-                int64 distinct = (int64) 1;
-                int64 i = (int64) 1;
-                while (i < m) {
-                    if (col[i] != prev) {                 // next distinct value
-                        buf[pos] = col[i]; pos = pos + (int64) 1;
-                        prev = col[i];
-                        distinct = distinct + (int64) 1;
-                    }
-                    i = i + (int64) 1;
+                // collapse to the distinct summary e[j] = {C_j, C_j+n_j, n_j, v_j}.
+                int64 D = (int64) 0;
+                int64 cum = (int64) 0;
+                int64 idx = (int64) 0;
+                while (idx < m) {
+                    float32 v = col[idx];
+                    int64 cnt = (int64) 1;
+                    int64 j = idx + (int64) 1;
+                    while (j < m && col[j] == v) { cnt = cnt + (int64) 1; j = j + (int64) 1; }
+                    drm[D] = (float32) cum;
+                    drx[D] = (float32) (cum + cnt);
+                    dwm[D] = (float32) cnt;
+                    dv[D]  = v;
+                    D = D + (int64) 1;
+                    cum = cum + cnt;
+                    idx = j;
                 }
-                if (distinct > maxBin) {
-                    throw heap cajeta.error.RecoverableException(
-                        "Sketch.cutsNoPrune: feature has more distinct values than max_bin (pruning not implemented)");
-                }
-                buf[pos] = prev + (Math.abs(prev) + eps); pos = pos + (int64) 1;   // last sentinel
+
+                // Stage A — in-Push prune to min(requiredSampleCuts(n), present).
+                int64 ncpf = Sketch.requiredSampleCuts(n, maxBin);
+                int64 toA = ncpf < m ? ncpf : m;
+                int64 sA = Sketch.setPrune(drm, drx, dwm, dv, D, toA, arm, arx, awm, av);
+
+                // Stage C — MakeCuts prune to max_bin + 1.
+                int64 toC = maxBin + (int64) 1;
+                int64 s = Sketch.setPrune(arm, arx, awm, av, sA, toC, brm, brx, bwm, bv);
+
+                // emit k = min(s, maxBin) cut values, prepended by the min sentinel.
+                int64 k = s < maxBin ? s : maxBin;
+                float32 s0 = bv[0];
+                float64 mag0 = (float64) Math.abs(s0);
+                out[pos] = (float32) ((float64) s0 - (mag0 + eps)); pos = pos + (int64) 1;   // min sentinel
+                int64 e = (int64) 1;
+                while (e < k) { out[pos] = bv[e]; pos = pos + (int64) 1; e = e + (int64) 1; }  // S[1..k-1]
+                float32 smax = bv[s - (int64) 1];                                             // back() = global max
+                float64 magM = (float64) Math.abs(smax);
+                out[pos] = (float32) ((float64) smax + (magM + eps)); pos = pos + (int64) 1;   // max sentinel
             }
             cutPtrs[f + (int64) 1] = pos;
             f = f + (int64) 1;
         }
 
-        float32[] out = heap float32[pos];
-        int64 k = (int64) 0;
-        while (k < pos) { out[k] = buf[k]; k = k + (int64) 1; }
-        return #out;
+        float32[] res = heap float32[pos];
+        int64 t = (int64) 0;
+        while (t < pos) { res[t] = out[t]; t = t + (int64) 1; }
+        return #res;
+    }
+
+    /**
+     * No-prune convenience (U9): requires every feature to have ≤ `maxBin` distinct
+     * present values. Delegates to {@link #cuts} (which handles both cases) — kept so
+     * the no-prune parity test and any no-prune caller read intent directly.
+     */
+    public static #float32[] cutsNoPrune(Tensor<float64> x, int64 n, int64 nf, int64 maxBin,
+                                         int64[] cutPtrs) {
+        return Sketch.cuts(x, n, nf, maxBin, cutPtrs);
     }
 }

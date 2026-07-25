@@ -1,0 +1,48 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Sketch;
+
+/**
+ * U10.2.2 — the pruned GK quantile sketch. `Sketch.cuts` reproduces the pruned
+ * cut points for a small dataset (max_bin = 8) that exercises all three paths:
+ *   f0: 6 distinct  → no prune;
+ *   f1: 40 distinct → Stage-C prune (to max_bin+1) only;
+ *   f2: ~300 rows/distinct → Stage-A (in-Push budget) prune then Stage-C.
+ * The expected cuts come from `prune_sketch_ref.py`, an INDEPENDENT float32
+ * reimplementation of XGBoost's SetPrune + MakeCuts from the source — so this locks
+ * cajeta's port to the algorithm bit-for-bit without needing an NVIDIA box. (Bit-exact
+ * agreement with the real GPU 3.1.2 sketch is validated separately in LargeSketchTest
+ * against the `large_reg` golden fixture.)
+ */
+public class SketchPruneTest {
+
+    public SketchPruneTest() { return; }
+
+    @Test
+    public void prunedCutsMatchReference() {
+        FixtureLoader f = FixtureLoader.open("sketch_selfcheck");
+        Tensor<float64> x     = f.x();
+        Tensor<int64>   refCp = f.cutPtrs();
+        Tensor<float64> refCv = f.cutValues();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+
+        int64[] cutPtrs = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cuts(x, n, nf, (int64) 8, cutPtrs);
+
+        int64 i = (int64) 0;
+        while (i < nf + (int64) 1) {
+            Assert.that(cutPtrs[i]).isEqualTo(refCp.flatGet(i));
+            i = i + (int64) 1;
+        }
+        int64 total = cutPtrs[nf];
+        i = (int64) 0;
+        while (i < total) {
+            Assert.thatFloat((float64) cuts[i]).isEqualTo(refCv.flatGet(i));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+}
