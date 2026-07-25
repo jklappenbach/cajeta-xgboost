@@ -1,0 +1,34 @@
+package dev.cajeta.xgboost.predict;
+
+import cajeta.math.Tensor;
+
+/**
+ * Feature importance (spec §5.3), reproducing XGBoost's `get_score` totals. Over
+ * every split (internal) node of every tree, accumulate per split feature:
+ *
+ *   weight       += 1                 (split count)
+ *   total_gain   += loss_change       (the node's gain)
+ *   total_cover  += sum_hessian        (the node's hessian coverage)
+ *
+ * Sums are accumulated in float64 (XGBoost keeps a `double` per feature), in tree
+ * then node order, so the result is bit-identical to `get_score(total_gain/…)`.
+ */
+public final class Importance {
+
+    /** Accumulate one tree's split-node contributions into the per-feature totals. */
+    public static void addTree(Tensor<int32> leftChildren, Tensor<int32> splitIndices,
+                               Tensor<float32> lossChanges, Tensor<float64> sumHessian,
+                               int64 nodeCount,
+                               float64[] weight, float64[] totalGain, float64[] totalCover) {
+        int64 nid = (int64) 0;
+        while (nid < nodeCount) {
+            if (leftChildren.flatGet(nid) != (int32) -1) {           // split node
+                int64 fdx = (int64) splitIndices.flatGet(nid);
+                weight[fdx] = weight[fdx] + (float64) 1.0;
+                totalGain[fdx] = totalGain[fdx] + (float64) lossChanges.flatGet(nid);
+                totalCover[fdx] = totalCover[fdx] + sumHessian.flatGet(nid);
+            }
+            nid = nid + (int64) 1;
+        }
+    }
+}

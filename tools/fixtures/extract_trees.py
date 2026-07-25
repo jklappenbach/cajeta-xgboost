@@ -23,7 +23,7 @@ FIELDS = {
     "split_indices": np.int32, "split_conditions": np.float32,
     "default_left": np.int32, "left_children": np.int32,
     "right_children": np.int32, "base_weights": np.float32,
-    "sum_hessian": np.float64,
+    "sum_hessian": np.float64, "loss_changes": np.float32,
 }
 
 

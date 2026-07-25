@@ -64,4 +64,8 @@ public final class FixtureLoader {
     public #Tensor<int32>   treeLeftChildren(int32 i)    { return Npy.loadI32(this.treePath(i, "left_children")); }
     public #Tensor<int32>   treeRightChildren(int32 i)   { return Npy.loadI32(this.treePath(i, "right_children")); }
     public #Tensor<float64> treeSumHessian(int32 i)      { return Npy.loadF64(this.treePath(i, "sum_hessian")); }
+    public #Tensor<float32> treeLossChanges(int32 i)     { return Npy.loadF32(this.treePath(i, "loss_changes")); }
+
+    /** Reference feature importance (`get_score`, float32), `type` = weight|total_gain|total_cover. */
+    public #Tensor<float32> importance(String type) { return Npy.loadF32(this.path("importance_" + type + ".npy")); }
 }
