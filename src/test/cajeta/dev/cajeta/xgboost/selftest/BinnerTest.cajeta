@@ -1,0 +1,45 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Binner;
+
+/**
+ * U9.1.1 (bin-index half) — cajeta's `SearchBin` maps raw features to bin indices
+ * bit-identically to the reference `bins.npy`. Given the reference cut points,
+ * binning `tiny_reg` and `tiny_reg_missing` (which exercises NaN → −1) must
+ * reproduce every stored bin index — validating the `upper_bound`/clamp rule and
+ * the float32 comparison. (Reproducing the cut *points* from raw data — the GPU
+ * quantile sketch — is 9.2.1b.)
+ */
+public class BinnerTest {
+
+    public BinnerTest() { return; }
+
+    static void check(String fixture) {
+        FixtureLoader f = FixtureLoader.open(fixture);
+        Tensor<float64> x  = f.x();
+        Tensor<int64>   cp = f.cutPtrs();
+        Tensor<float64> cv = f.cutValues();
+        Tensor<int32>   refBins = f.bins();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+
+        int32[] bins = Binner.bin(x, cp, cv, n, nf);
+        int64 i = (int64) 0;
+        while (i < n * nf) {
+            Assert.that((int64) bins[i]).isEqualTo((int64) refBins.flatGet(i));
+            i = i + (int64) 1;
+        }
+    }
+
+    @Test
+    public void binsMatchReference() {
+        BinnerTest.check("tiny_reg");
+    }
+
+    @Test
+    public void binsMatchReferenceWithMissing() {
+        BinnerTest.check("tiny_reg_missing");
+    }
+}

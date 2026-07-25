@@ -1,0 +1,68 @@
+package dev.cajeta.xgboost.sketch;
+
+import cajeta.math.Tensor;
+
+/**
+ * Bin-index build (`GHistIndex`) — maps raw feature values to bin indices against a
+ * fixed set of cut points, reproducing XGBoost's `HistogramCuts::SearchBin`
+ * (`src/common/hist_util.h:119`) bit-for-bit (spec §2, §7.2):
+ *
+ *   bin = min( upper_bound(cuts, value), nbins − 1 )     // comparison in float32
+ *
+ * i.e. the position of the first cut strictly greater than the value, with only the
+ * `idx == nbins → nbins − 1` clamp (the `idx -= !!(idx == end)` line) — **no** blanket
+ * `−1`. Missing (NaN) maps to `−1`. Both the feature values and the cut values are
+ * compared as float32, matching XGBoost's `bst_float` storage.
+ */
+public final class Binner {
+
+    /** NaN via bits (unordered `!=` is unreliable across backends). */
+    static boolean isNaN(float32 v) {
+        return (Cajeta.f32ToBits(v) & (int32) 0x7FFFFFFF) > (int32) 0x7F800000;
+    }
+
+    /**
+     * Local bin index of `v` within feature cuts `cutValues[b0, b1)`:
+     * `min(upper_bound, nbins − 1)`, float32 comparison.
+     */
+    public static int32 searchBin(Tensor<float64> cutValues, int64 b0, int64 b1, float32 v) {
+        int64 lo = b0;
+        int64 hi = b1;
+        while (lo < hi) {                                  // upper_bound (side = right)
+            int64 mid = lo + (hi - lo) / (int64) 2;
+            if ((float32) cutValues.flatGet(mid) > v) { hi = mid; }
+            else { lo = mid + (int64) 1; }
+        }
+        int64 nb = b1 - b0;
+        int64 idx = lo - b0;
+        if (idx > nb - (int64) 1) { idx = nb - (int64) 1; }
+        return (int32) idx;
+    }
+
+    /**
+     * Bin every (row, feature): `out[r*nf + f]` = local bin index, `−1` for missing.
+     * `x` is `[n, nf]` row-major float64; `cutPtrs` is `[nf+1]`; `cutValues` is the
+     * concatenated per-feature cuts.
+     */
+    public static #int32[] bin(Tensor<float64> x, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                               int64 n, int64 nf) {
+        int32[] out = heap int32[n * nf];
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 f = (int64) 0;
+            while (f < nf) {
+                float32 v = (float32) x.flatGet(r * nf + f);
+                if (Binner.isNaN(v)) {
+                    out[r * nf + f] = (int32) -1;
+                } else {
+                    int64 b0 = cutPtrs.flatGet(f);
+                    int64 b1 = cutPtrs.flatGet(f + (int64) 1);
+                    out[r * nf + f] = Binner.searchBin(cutValues, b0, b1, v);
+                }
+                f = f + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return #out;
+    }
+}
