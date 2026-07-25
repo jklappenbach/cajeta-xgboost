@@ -34,6 +34,17 @@ CONFIGS = [
     ("tiny_reg_d6",      ["--objective", "reg:squarederror", "--rows", "200",  "--features", "5", "--max-depth", "6"]),
     ("tiny_reg_mcw10",   ["--objective", "reg:squarederror", "--rows", "200",  "--features", "5", "--min-child-weight", "10"]),
     ("tiny_reg_gamma1",  ["--objective", "reg:squarederror", "--rows", "200",  "--features", "5", "--gamma", "1.0"]),
+
+    # U10 large-dataset parity (spec §7.3). ≥100k rows, ≥50 features, controlled
+    # missing fraction, depth 6 to exercise real tree depth + bin occupancy. These
+    # are NOT committed by default — they are big (~60 MB each), so their storage
+    # (git-lfs vs regenerate) is decided in U10. Generate on NVIDIA with e.g.
+    #   python gen_reference.py --only large_reg,large_binary,large_multi
+    # Every feature is continuous (>> max_bin distinct) so XGBoost prunes to 256
+    # bins; the committed `bins`/`cut_*` are the §7.1 identical-bins ground truth.
+    ("large_reg",    ["--objective", "reg:squarederror", "--rows", "100000", "--features", "50", "--missing-frac", "0.05", "--max-depth", "6"]),
+    ("large_binary", ["--objective", "binary:logistic",  "--rows", "100000", "--features", "50", "--num-class", "2", "--missing-frac", "0.05", "--max-depth", "6"]),
+    ("large_multi",  ["--objective", "multi:softprob",   "--rows", "100000", "--features", "50", "--num-class", "4", "--missing-frac", "0.05", "--max-depth", "6"]),
 ]
 
 

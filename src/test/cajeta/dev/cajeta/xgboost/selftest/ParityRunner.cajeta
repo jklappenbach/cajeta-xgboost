@@ -1,0 +1,113 @@
+package dev.cajeta.xgboost.selftest;
+
+import cajeta.lang.Int64;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Model;
+
+/**
+ * Parity comparator (spec §7.4, plan 10.1.3) — walks a trained {@link Model} against
+ * a fixture's reference trees round by round, node by node, and against the reference
+ * per-round margins. Each `compare*` returns `""` iff everything is bit-identical, or
+ * a message naming the **first** divergence — which round, which node, which field —
+ * so drift fails with the exact `(round, tree, node)` location rather than a bulk
+ * mismatch. Comparisons are bit-level (float fields via {@code f32ToBits}), matching
+ * the per-node checks the per-unit tests do inline; this centralizes them for the
+ * large-dataset parity suite.
+ */
+public final class ParityRunner {
+
+    static #String s(int64 v) { return Int64.of(v).toString(); }
+
+    static #String at(int64 r, int64 nid) {
+        return "round " + ParityRunner.s(r) + " node " + ParityRunner.s(nid) + ": ";
+    }
+
+    static #String diff(int64 r, int64 nid, String field, int64 got, int64 want) {
+        return ParityRunner.at(r, nid) + field + " " + ParityRunner.s(got)
+             + " != reference " + ParityRunner.s(want);
+    }
+
+    static #String diffBits(int64 r, int64 nid, String field, float32 got, float32 want) {
+        return ParityRunner.at(r, nid) + field + " differs (f32 bits "
+             + ParityRunner.s((int64) Cajeta.f32ToBits(got)) + " vs reference "
+             + ParityRunner.s((int64) Cajeta.f32ToBits(want)) + ")";
+    }
+
+    /**
+     * Compare `m`'s first `rounds` trees against the fixture's reference trees.
+     * Returns `""` on full bit-identity, else the first diverging node/field.
+     */
+    public static #String compareTrees(Model m, FixtureLoader f, int64 rounds) {
+        int64 cap = m.cap;
+        int64 r = (int64) 0;
+        while (r < rounds) {
+            Tensor<int32>   rLC = f.treeLeftChildren((int32) r);
+            Tensor<int32>   rRC = f.treeRightChildren((int32) r);
+            Tensor<int32>   rSI = f.treeSplitIndices((int32) r);
+            Tensor<float32> rSC = f.treeSplitConditions((int32) r);
+            Tensor<int32>   rDL = f.treeDefaultLeft((int32) r);
+            Tensor<float32> rBW = f.treeBaseWeights((int32) r);
+            int64 refCount = rBW.shapeAt(0);
+            if (m.nodeCount[r] != refCount) {
+                return "round " + ParityRunner.s(r) + ": node count " + ParityRunner.s(m.nodeCount[r])
+                     + " != reference " + ParityRunner.s(refCount);
+            }
+            int64 off = r * cap;
+            int64 nid = (int64) 0;
+            while (nid < refCount) {
+                int64 g = off + nid;
+                if (m.leftChildren[g] != (int64) rLC.flatGet(nid)) {
+                    return ParityRunner.diff(r, nid, "left_child", m.leftChildren[g], (int64) rLC.flatGet(nid));
+                }
+                if (m.rightChildren[g] != (int64) rRC.flatGet(nid)) {
+                    return ParityRunner.diff(r, nid, "right_child", m.rightChildren[g], (int64) rRC.flatGet(nid));
+                }
+                boolean refLeaf = rLC.flatGet(nid) == (int32) -1;
+                if (!refLeaf) {
+                    if (m.splitIndices[g] != (int64) rSI.flatGet(nid)) {
+                        return ParityRunner.diff(r, nid, "split_index", m.splitIndices[g], (int64) rSI.flatGet(nid));
+                    }
+                    if (Cajeta.f32ToBits(m.splitConditions[g]) != Cajeta.f32ToBits(rSC.flatGet(nid))) {
+                        return ParityRunner.diffBits(r, nid, "split_condition", m.splitConditions[g], rSC.flatGet(nid));
+                    }
+                    boolean refLeft = rDL.flatGet(nid) == (int32) 1;
+                    if (m.defaultLeft[g] != refLeft) {
+                        return ParityRunner.at(r, nid) + "default_left mismatch";
+                    }
+                }
+                if (Cajeta.f32ToBits(m.baseWeights[g]) != Cajeta.f32ToBits(rBW.flatGet(nid))) {
+                    return ParityRunner.diffBits(r, nid, "base_weight", m.baseWeights[g], rBW.flatGet(nid));
+                }
+                nid = nid + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return "";
+    }
+
+    /**
+     * Compare cumulative per-round margins `[rounds*n]` against the reference
+     * `margins.npy` `[rounds, n]`. Returns `""` on bit-identity, else the first
+     * diverging `(round, row)`.
+     */
+    public static #String compareMargins(float32[] marginHistory, Tensor<float64> refMargins,
+                                         int64 rounds, int64 n) {
+        int64 r = (int64) 0;
+        while (r < rounds) {
+            int64 hoff = r * n;
+            int64 i = (int64) 0;
+            while (i < n) {
+                int32 got  = Cajeta.f32ToBits(marginHistory[hoff + i]);
+                int32 want = Cajeta.f32ToBits((float32) refMargins.flatGet(hoff + i));
+                if (got != want) {
+                    return "round " + ParityRunner.s(r) + " row " + ParityRunner.s(i)
+                         + ": margin differs (f32 bits " + ParityRunner.s((int64) got)
+                         + " vs reference " + ParityRunner.s((int64) want) + ")";
+                }
+                i = i + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return "";
+    }
+}

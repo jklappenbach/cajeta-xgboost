@@ -1,0 +1,47 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+
+/**
+ * U10.1.1 — large-dataset identical-bins parity (spec §7.1, §7.3). Feeds XGBoost's
+ * own bin assignments for the large synthetic (`large_reg`: 100k×50, 5% missing,
+ * depth 6) to the reg builder and asserts, via {@link ParityRunner}, that every
+ * tree/node and every per-round margin is bit-identical to the NVIDIA reference —
+ * proving the tree builder at real depth and bin occupancy, isolated from the sketch.
+ *
+ * `@Disabled` until `large_reg` is generated on the NVIDIA box and its storage is
+ * settled (git-lfs vs regenerate) — it needs the committed fixture. Binary/multi
+ * large fixtures land alongside but their full-model parity is U12-gated (the `expf`
+ * link, rounds 1+); only round-0 trees are bit-exact pre-U12.
+ */
+public class LargeParityTest {
+
+    public LargeParityTest() { return; }
+
+    @Test
+    @Disabled
+    public void largeRegTreesAndMarginsBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("large_reg");
+        Tensor<float64> yT = f.y();
+        int64 n = yT.shapeAt(0);
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        int64 rounds = (int64) 3;
+        float32[] marginHistory = heap float32[rounds * n];
+        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                (int64) 6, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5, marginHistory);
+
+        String treeDiff = ParityRunner.compareTrees(m, f, rounds);
+        Assert.that(treeDiff).isEqualTo("");
+        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
+        Assert.that(marginDiff).isEqualTo("");
+        return;
+    }
+}
