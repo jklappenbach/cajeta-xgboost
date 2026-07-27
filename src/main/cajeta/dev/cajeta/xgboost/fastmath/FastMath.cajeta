@@ -4,6 +4,21 @@ import cajeta.math.Tensor;
 import cajeta.math.npio.Npy;
 
 /**
+ * Bit-exact CPU reproductions of the device CUDA SFU transcendentals XGBoost's GPU
+ * path depends on: `__fdividef` (split-gain scoring) and `ex2.approx` (the core of
+ * device `expf`, used by `binary:logistic` / `multi:softmax` gradients).
+ *
+ * Both bottom out in a silicon lookup table with no closed form, and both are
+ * handled the same way: a one-time GPU capture is the ground truth, it is
+ * `.gitignore`d (33 MB each, never committed), and it loads at runtime from an
+ * env-var path. When the capture is absent — CI, which is CPU-only — each model
+ * falls back to correctly-rounded accurate math: not the SFU value, but close
+ * enough to keep the non-knife-edge cases right and the plumbing testable off-GPU.
+ * (The eventual replacement for both is a compact reverse-engineered interpolator
+ * seed that regenerates the table on CPU; see `tools/fdividef/README.md`.)
+ *
+ * ---
+ *
  * Bit-exact reproduction of device CUDA's `__fdividef(a, b)` — the fast
  * approximate division XGBoost's GPU split evaluator uses to score split gains
  * (`src/tree/split_evaluator.h:126`, `Divide` → `__fdividef`). Accurate division
@@ -34,7 +49,7 @@ public final class FastMath {
     private static Tensor<int32> rcpTable;
     private static boolean rcpTried;
 
-    static void ensureTable() {
+    static void ensureRcpTable() {
         if (!FastMath.rcpTried) {
             FastMath.rcpTried = true;
             String p = System.env.get("RCP_TABLE");
@@ -42,9 +57,9 @@ public final class FastMath {
         }
     }
 
-    /** True once the probed SFU table is loaded — gain scoring is then bit-exact. */
-    public static boolean hasTable() {
-        FastMath.ensureTable();
+    /** True once the probed SFU reciprocal table is loaded — gain scoring is then bit-exact. */
+    public static boolean hasRcpTable() {
+        FastMath.ensureRcpTable();
         return FastMath.rcpTable != null;
     }
 
@@ -57,7 +72,7 @@ public final class FastMath {
      * non-knife-edge splits correct, and it keeps the plumbing testable off-GPU.
      */
     public static float32 rcpMantissa(int32 idx) {
-        FastMath.ensureTable();
+        FastMath.ensureRcpTable();
         int32 i = idx & (int32) 0x7FFFFF;
         if (FastMath.rcpTable != null) {
             return Cajeta.bitsToF32(FastMath.rcpTable.flatGet((int64) i));
@@ -91,5 +106,60 @@ public final class FastMath {
         int32 rcpBbits = (rmb & (int32) 0x807FFFFF) | (newExp << (int32) 23);
         float32 rcpB = Cajeta.bitsToF32(rcpBbits);
         return a * rcpB;                                    // single float32 multiply
+    }
+
+    // ---- ex2.approx.f32 — the core of device `expf` -------------------------------
+    //
+    // Recovered from the pinned toolchain's `__nv_expf` libdevice IR (2026-07-27);
+    // full transcription, decoded constants and the validation table are in
+    // `tools/expf/README.md` § "RESOLVED (2026-07-27)". Device `expf` is NOT a
+    // minimax polynomial — it reduces its argument into [0,1) and evaluates the SFU
+    // `ex2.approx` there, reapplying `2^n` as a separate float32 multiply.
+    //
+    // Like `MUFU.RCP`, `MUFU.EX2` is a silicon table with no closed form, so the
+    // same capture-and-load treatment applies. The captured table
+    // (`tools/expf/ex2_table.npy`) holds `ex2.approx(i/2^23)` for `i` in [0, 2^23) —
+    // exactly the reduced-argument domain, so no exponent factoring is needed here.
+
+    // The probed 2^23 `ex2.approx.f32` table over [0,1) (int32 bit patterns), loaded
+    // once from the `EX2_TABLE` npy path. Absent (CI, no capture) → placeholder.
+    private static Tensor<int32> ex2Table;
+    private static boolean ex2Tried;
+
+    static void ensureEx2Table() {
+        if (!FastMath.ex2Tried) {
+            FastMath.ex2Tried = true;
+            String p = System.env.get("EX2_TABLE");
+            if (p != null) { FastMath.ex2Table #= Npy.loadI32(p); }
+        }
+    }
+
+    /** True once the probed SFU exp2 table is loaded — `expf` is then bit-exact. */
+    public static boolean hasEx2Table() {
+        FastMath.ensureEx2Table();
+        return FastMath.ex2Table != null;
+    }
+
+    /**
+     * `ex2.approx.f32(f)` for `f = idx / 2^23`, the float32 in `[0, 1)` whose
+     * 23-bit fraction is `idx`. Result is in `[1, 2)`.
+     *
+     * The device indexes this table by **truncating** the reduced argument's
+     * fraction to 23 bits, not rounding it — round-to-nearest indexing mismatches
+     * 29% of the domain, truncation 0.23% (and that remainder is only the denormal
+     * tail, which no capture covers and no gradient can observe). Callers must
+     * therefore pass `floor(f · 2^23)`; {@link #expf} does.
+     *
+     * Uses the probed SFU table when present (bit-exact device `expf`); otherwise
+     * the correctly-rounded `exp2` — NOT the SFU value, but it keeps the plumbing
+     * testable off-GPU.
+     */
+    public static float32 ex2Mantissa(int32 idx) {
+        FastMath.ensureEx2Table();
+        int32 i = idx & (int32) 0x7FFFFF;
+        if (FastMath.ex2Table != null) {
+            return Cajeta.bitsToF32(FastMath.ex2Table.flatGet((int64) i));
+        }
+        return (float32) Math.exp2((float64) i / (float64) 8388608.0);
     }
 }

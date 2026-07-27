@@ -4,11 +4,17 @@ import dev.cajeta.unit.Assert;
 import dev.cajeta.xgboost.fastmath.FastMath;
 
 /**
- * Plumbing tests for {@link FastMath#fdividef} — the exponent-adjust + multiply
- * that turns the mantissa reciprocal table into a full `__fdividef`. These hold
- * **bit-exactly regardless of the table's values** (they exercise the factoring
- * `rcp(2^E·m) = ldexp(rcp(m), −E)`), so they lock the plumbing down before the
- * probed hardware table replaces the placeholder reciprocal.
+ * Plumbing tests for the {@link FastMath} SFU models — {@link FastMath#fdividef}
+ * (the exponent-adjust + multiply that turns the mantissa reciprocal table into a
+ * full `__fdividef`) and {@link FastMath#ex2Mantissa} (the `ex2.approx.f32` table
+ * over `[0,1)` that device `expf` reduces into).
+ *
+ * Every assertion here holds **regardless of the table's values** — the division
+ * tests exercise the factoring `rcp(2^E·m) = ldexp(rcp(m), −E)`, and the exp2 tests
+ * assert only structural properties the SFU table and the accurate placeholder share
+ * (`2^0 = 1`, range `[1,2)`, monotonicity, 23-bit index masking; all four verified
+ * against the captured `ex2_table.npy`). So they lock the plumbing down on CI, which
+ * is CPU-only and has no capture, and stay valid once the probed tables load.
  */
 public class FastMathTest {
 
@@ -43,5 +49,56 @@ public class FastMathTest {
               .isEqualTo((float64) 3.5);
         Assert.thatFloat((float64) FastMath.fdividef((float32) 3.0, (float32) 16.0))
               .isEqualTo((float64) 0.1875);
+    }
+
+    // ---- ex2.approx.f32 over [0,1) — the core of device `expf` --------------------
+
+    static int64 EX2_N() { return (int64) 8388608; }        // 2^23 table entries
+    static int64 STEP()  { return (int64) 65536; }          // 128 samples, CI-light
+
+    @Test
+    public void ex2AtZeroIsExactlyOne() {
+        // 2^0 = 1. The probed table's first entry is exactly 1.0f and so is the
+        // accurate placeholder, so this pins the index origin either way.
+        Assert.thatFloat((float64) FastMath.ex2Mantissa((int32) 0))
+              .isEqualTo((float64) 1.0);
+    }
+
+    @Test
+    public void ex2StaysInUnitBinade() {
+        // f in [0,1) => 2^f in [1,2), so every entry shares one binade — which is
+        // what lets `expf` reapply the exponent as a separate multiply.
+        int64 i = (int64) 0;
+        while (i < FastMathTest.EX2_N()) {
+            float32 v = FastMath.ex2Mantissa((int32) i);
+            Assert.isTrue(v >= (float32) 1.0);
+            Assert.isTrue(v < (float32) 2.0);
+            i = i + FastMathTest.STEP();
+        }
+    }
+
+    @Test
+    public void ex2IsMonotoneNonDecreasing() {
+        int64 i = FastMathTest.STEP();
+        float32 prev = FastMath.ex2Mantissa((int32) 0);
+        while (i < FastMathTest.EX2_N()) {
+            float32 v = FastMath.ex2Mantissa((int32) i);
+            Assert.isTrue(v >= prev);
+            prev = v;
+            i = i + FastMathTest.STEP();
+        }
+    }
+
+    @Test
+    public void ex2IndexMasksToTwentyThreeBits() {
+        // The reduced argument's fraction is 23 bits; nothing above bit 22 is an
+        // index, so a stray high bit must not reach the table.
+        int64 i = (int64) 0;
+        while (i < FastMathTest.EX2_N()) {
+            int32 raw = (int32) i;
+            Assert.thatFloat((float64) FastMath.ex2Mantissa(raw | ((int32) 0x00800000)))
+                  .isEqualTo((float64) FastMath.ex2Mantissa(raw));
+            i = i + FastMathTest.STEP();
+        }
     }
 }

@@ -40,4 +40,8 @@ export XGBOOST_FIXTURES="$here/tools/fixtures"
 # Absent (e.g. CI without the capture) → FastMath uses a correctly-rounded fallback.
 rcp="$here/tools/fdividef/rcp_mantissa.npy"
 [ -f "$rcp" ] && export RCP_TABLE="$rcp"
+# Probed SFU exp2 table for bit-exact device expf (Logistic/Softmax gradients).
+# Same deal: absent → FastMath falls back to correctly-rounded exp2.
+ex2="$here/tools/expf/ex2_table.npy"
+[ -f "$ex2" ] && export EX2_TABLE="$ex2"
 "$out/xgboosttests"
