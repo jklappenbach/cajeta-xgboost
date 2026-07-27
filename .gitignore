@@ -22,3 +22,4 @@ tools/fdividef/probe_rcp
 tools/expf/expf_sweep.npy
 tools/expf/probe_expf
 tools/expf/ex2_table.npy
+tools/expf/model_libdevice

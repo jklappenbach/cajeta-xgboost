@@ -35,7 +35,7 @@ Paste the printed model-mismatch block too. From there I diff device-vs-libm `ex
 and either (a) confirm no gap, or (b) model device `expf` on CPU (same probe→model
 pattern as `__fdividef`; `ex2.approx.f32` is the SFU op to table if needed).
 
-## Finding (2026-07-24) — structure confirmed; exact float32 coefficients remain
+## ~~Finding (2026-07-24) — structure confirmed; exact float32 coefficients remain~~ (SUPERSEDED 2026-07-27)
 
 Against `expf_sweep.npy` (device `expf` over the FMA grid), device `expf` is the
 **accurate** path (no `--use_fast_math`), and its structure reproduces cleanly:
@@ -53,7 +53,7 @@ emulated float32. It is a `gpu-numeric-fidelity` item (see
 `../../../cajeta/specs/gpu-numeric-fidelity-spec.md`), the same class as the
 split-selection near-tie: "reproduce the device's exact float arithmetic bit-for-bit."
 
-## Finding (2026-07-25) — both CPU models fall short; needs a finer capture
+## ~~Finding (2026-07-25) — both CPU models fall short; needs a finer capture~~ (SUPERSEDED 2026-07-27)
 
 `gpu-numeric-fidelity` U1.2.1. Two CPU reproductions were tried against the full
 `expf_sweep.npy` (harnesses committed here):
@@ -76,7 +76,7 @@ produces (not a uniform grid) — then a direct table keyed by input bits is exa
 coefficients; or (c) lift the accurate-`expf` SASS from the pinned toolchain's libdevice
 and transcribe its exact op sequence + constants. All three need the NVIDIA box.
 
-## Refinement (2026-07-25) — it's njuffa accurate `expf`; needs the libdevice IR
+## ~~Refinement (2026-07-25) — it's njuffa accurate `expf`; needs the libdevice IR~~ (WRONG — see below)
 
 XGBoost's device `expf` (no `--use_fast_math`) is the **accurate** path, and it is
 Norbert Juffa's well-known algorithm (`analyze_njuffa_model.py`): magic-number `rint`
@@ -100,3 +100,65 @@ llvm-dis "$(find / -name 'libdevice*.bc' 2>/dev/null | head -1)" -o - \
 
 That IR gives the exact FMA order + float32 constants → transcribe into `FastMath.expf`
 and it is bit-exact. (This machine's only `libdevice*.bc` are empty clang test stubs.)
+
+---
+
+## RESOLVED (2026-07-27) — the libdevice IR; bit-exact on every normal result
+
+The `__nv_expf` IR arrived from Phoenix and **refutes the njuffa-polynomial reading
+above**. There is no minimax polynomial. The SFU `ex2.approx` *is* the core — applied
+to an argument reduced into `[0,1)`, with the `2^n` reapplied as a separate multiply.
+That is why coefficient descent stalled at maxULP=2: it was fitting a polynomial to a
+hardware table. The earlier `ex2` attempt (`analyze_ex2_model.py`, 93% mismatch) had
+the right instruction but the wrong reduction — it fed `ex2` the *unreduced* `x·log2e`
+and rebuilt with `ldexp`, instead of the IR's saturate/`fma_rd` exponent split.
+
+Transcribed (non-FTZ path; `__nvvm_reflect` selects FTZ, and XGBoost builds without it):
+
+```
+C  = L2E_HI / 252.0f                        // folded at compile time, round-to-nearest
+j  = saturate(fmaf(a, C, 0.5f))             // -> [0,1]; NaN -> 0
+i  = fma_rd(j, 252.0f, 8388609.0f)          // round-toward -inf; 8388609 = 2^23 + 1
+n  = i - 8388735.0f                         // 8388735 = 2^23 + 127; n in [-126,126], exact
+f  = fmaf(a, L2E_LO, fmaf(a, L2E_HI, -n))   // reduced arg, in [0,1)
+s  = bitcast<float>(bitcast<int>(i) << 23)  // = 2^n
+return ex2.approx.ftz(f) * s
+```
+
+Constants decoded from the IR's bitcasts: `1069066811 = 0x3FB8AA3B` = `L2E_HI`
+(log2 e), `849703008 = 0x32A57060` = `L2E_LO` (1.9259630e-8, the log2 e tail),
+`1262485504 = 0x4B400000` = `2^23`. The `<< 23` works because the low 9 bits of
+`0x4B000000` are zero, so `bits(i) << 23` lands `(n + 127)` in the exponent field.
+
+`ex2.approx` is indexed by **truncating** the fraction to 23 bits — `floor(f·2^23)`,
+not `rint`. Round-to-nearest indexing gives 29.3% mismatch; truncation gives 0.23%.
+
+**Validation** (`model_libdevice.c`, committed here — build: `cc -O2 -mfma
+model_libdevice.c -o model_libdevice -lm`), against the full `expf_sweep.npy`:
+
+| domain | points | mismatches |
+|---|---|---|
+| **normal results** (the whole XGBoost range) | 8,310,140 | **0 — bit-exact** |
+| denormal tail (`x < -87.34`, saturate clamped) | 18,948 | 18,948 (≤2 ULP) |
+
+The denormal tail is **not** a model defect: there the clamp pushes `f` outside `[0,1)`
+and the reconstruction needs `ex2.approx` at negative arguments, which
+`ex2_table.npy` (captured only over `[0,1)`) does not contain. 16,089 of those match
+round-toward-zero on the denormal; the rest are unresolvable without a wider capture.
+**It is also unobservable through XGBoost.** `Sigmoid(x) = 1/(expf(min(-x,88.7)) + 1
++ 1e-16)` is exactly `1.0f` in float32 once `expf` drops below ~3e-8 (ULP near 1.0 is
+6e-8); the denormal tail starts at 1e-38, thirty orders of magnitude further down. So
+every `expf` value the gradient path can actually distinguish is bit-exact.
+
+### Shipping `ex2.approx`
+
+No coefficient fit is needed — `FastMath.ex2Mantissa` follows the existing
+`rcpMantissa` pattern: the capture stays `.gitignore`d and loads at runtime from an
+env-var path (`EX2_TABLE`, as `RCP_TABLE` does), with an accurate-math placeholder
+when absent so the plumbing stays testable off-GPU.
+
+For the record, the table's structure was confirmed to be Oberman–Siu piecewise
+quadratic (a 64-segment quadratic fits it to 0.62 float32 ULP, and adding segments
+does not improve past ~0.57 — that floor is the table's own float32 rounding). A fit
+is therefore viable if the table ever needs to be eliminated, but it cannot be made
+bit-exact from float64 fitting alone.
