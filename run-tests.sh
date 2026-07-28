@@ -18,10 +18,19 @@ UNIT_REPO="${UNIT_REPO:-$here/../cajeta-unit}"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 
-unit_cja="$UNIT_REPO/build/archive/dev.cajeta.unit-0.1.0.cja"
-if [[ ! -f "$unit_cja" ]]; then
-    echo ">> building cajeta-unit .cja ($UNIT_REPO)"
-    ( cd "$UNIT_REPO" && "$CAJETA" build >/dev/null )
+# cajeta-unit's version lives in ITS manifest — never hardcode it here. This
+# used to name dev.cajeta.unit-0.1.0.cja outright and only rebuild when that
+# exact file was missing, which failed two ways: a stale archive silently won
+# (a months-old one broke the suite after the bracket-literal migration), and
+# any version bump left this pointing at a file that would never exist again.
+# Build unconditionally (the build is incremental, so a no-op is cheap) and
+# resolve whatever version it produced.
+echo ">> building cajeta-unit .cja ($UNIT_REPO)"
+( cd "$UNIT_REPO" && "$CAJETA" build >/dev/null )
+unit_cja="$(ls -t "$UNIT_REPO"/build/archive/dev.cajeta.unit-*.cja 2>/dev/null | head -1)"
+if [[ -z "$unit_cja" ]]; then
+    echo "no dev.cajeta.unit-*.cja under $UNIT_REPO/build/archive" >&2
+    exit 1
 fi
 
 echo ">> building xgboost library .cja"
