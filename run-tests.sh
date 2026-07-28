@@ -44,4 +44,9 @@ rcp="$here/tools/fdividef/rcp_mantissa.npy"
 # Same deal: absent → FastMath falls back to correctly-rounded exp2.
 ex2="$here/tools/expf/ex2_table.npy"
 [ -f "$ex2" ] && export EX2_TABLE="$ex2"
+# Device expf sweep over [-90, 90] — the ground truth FastMathExpfTest compares
+# against bit-for-bit. Absent → that comparison self-skips; the plumbing
+# assertions, which need no capture, still run.
+sweep="$here/tools/expf/expf_sweep.npy"
+[ -f "$sweep" ] && export EXPF_SWEEP="$sweep"
 "$out/xgboosttests"

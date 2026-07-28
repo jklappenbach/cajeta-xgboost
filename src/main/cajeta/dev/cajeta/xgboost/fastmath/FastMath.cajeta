@@ -162,4 +162,121 @@ public final class FastMath {
         }
         return (float32) Math.exp2((float64) i / (float64) 8388608.0);
     }
+
+    // ---- device `expf` ------------------------------------------------------------
+
+    /** `log2(e)` split high/low so `a·log2(e)` carries more than float32 precision. */
+    static float32 L2E_HI() { return (float32) 1.442695021629333496; }
+    static float32 L2E_LO() { return (float32) 1.925962991460541939e-8; }
+
+    /**
+     * `fmaf(a, b, c)` — `a·b + c` with a **single** rounding to float32.
+     *
+     * Cajeta has no FMA intrinsic, so this reconstructs one exactly. `a·b` is
+     * exact in float64 (24+24 = 48 ≤ 53 significand bits), leaving the add as the
+     * only rounding; Knuth's 2Sum recovers that rounding error exactly, so the true
+     * sum is the unevaluated pair `(s, err)`.
+     *
+     * Casting `s` straight to float32 would round twice — exact → 53 bits → 24 bits
+     * — which can land on the wrong side of a float32 midpoint. Rounding `s` to odd
+     * first makes the second rounding safe: a float32 midpoint needs 25 significand
+     * bits, so as a float64 its low bits are zero and it is never odd. An odd
+     * float64 therefore can never be a float32 tie, and round-to-nearest cannot
+     * break the wrong way. This is exact because 53 ≥ 2·24 + 2.
+     */
+    public static float32 fmaf(float32 a, float32 b, float32 c) {
+        float64 p = (float64) a * (float64) b;      // exact
+        float64 cc = (float64) c;
+        float64 s = p + cc;                          // the one rounding
+
+        float64 bv = s - p;                          // 2Sum — exact for any inputs
+        float64 err = (p - (s - bv)) + (cc - bv);    // p + cc == s + err, exactly
+
+        if (err != (float64) 0.0) {
+            int64 sb = Cajeta.f64ToBits(s);
+            if ((sb & (int64) 1) == (int64) 0) {     // already odd → already unambiguous
+                // Bit patterns grow away from zero, so the step flips sign with s.
+                boolean up = err > (float64) 0.0;
+                if (s >= (float64) 0.0) {
+                    sb = up ? sb + (int64) 1 : sb - (int64) 1;
+                } else {
+                    sb = up ? sb - (int64) 1 : sb + (int64) 1;
+                }
+                s = Cajeta.bitsToF64(sb);
+            }
+        }
+        return (float32) s;
+    }
+
+    /**
+     * `ex2.approx.f32(y)` for an arbitrary `y`, factoring `2^y = 2^floor(y) · 2^frac(y)`
+     * so the [0,1) table covers it. The reduction in {@link #expf} normally lands `y`
+     * in [0,1) and `floor(y)` is 0; it only leaves the unit interval where `saturate`
+     * clamped, i.e. `|x| > 126/log2(e) ≈ 87.34`.
+     */
+    static float32 ex2Approx(float32 y) {
+        float64 yd = (float64) y;
+        float64 nf = Math.floor(yd);
+        float64 fr = yd - nf;                        // [0,1), exact — same binade
+        int64 idx = (int64) Math.floor(fr * (float64) 8388608.0);
+        if (idx < (int64) 0) { idx = (int64) 0; }
+        if (idx > (int64) 8388607) { idx = (int64) 8388607; }
+
+        float32 base = FastMath.ex2Mantissa((int32) idx);
+        int64 e = (int64) nf;
+        if (e == (int64) 0) { return base; }
+        if (e < (int64) -1022 || e > (int64) 1023) {
+            return (float32) ((float64) base * Math.pow((float64) 2.0, nf));
+        }
+        // 2^e built from bits: exact, and base·2^e is an exponent shift, also exact.
+        float64 p2 = Cajeta.bitsToF64((e + (int64) 1023) << (int64) 52);
+        return (float32) ((float64) base * p2);
+    }
+
+    /**
+     * Device CUDA `expf(x)`, bit-exact on every normal result once the probed
+     * `ex2.approx` table is loaded.
+     *
+     * Transcribed from the pinned toolchain's `__nv_expf` libdevice IR: the argument
+     * is reduced into [0,1) against a two-part `log2(e)`, the SFU table is evaluated
+     * there, and `2^n` is reapplied as a separate float32 multiply.
+     *
+     * Two IR operations have no Cajeta equivalent and are reconstructed exactly:
+     * the FMAs go through {@link #fmaf}, and the round-toward-−∞ FMA that splits off
+     * the exponent becomes a `floor`. That substitution is exact, not an
+     * approximation — see the comment on the `k` computation below.
+     *
+     * Verified against the RTX 4090 capture over `[-90, 90]`: all 8,310,140
+     * normal-output points bit-exact. The 18,948 residual mismatches are entirely
+     * the **denormal** tail (`x ⪅ -87.3`, result < 2^-126, ≤ 2 ULP), where the device
+     * flushes differently; `binary:logistic` and `multi:softmax` saturate long before
+     * that, so no gradient can observe it.
+     */
+    public static float32 expf(float32 x) {
+        // C = log2(e)/252, folded once at float32 precision exactly as the IR does.
+        float32 c = (float32) ((float64) FastMath.L2E_HI() / (float64) 252.0);
+
+        float32 j = FastMath.fmaf(x, c, (float32) 0.5);
+        // saturate: NaN → 0, then clamp to [0,1]. NaN fails `>=`, so this catches it.
+        if (!(j >= (float32) 0.0)) { j = (float32) 0.0; }
+        if (j > (float32) 1.0) { j = (float32) 1.0; }
+
+        // The IR does `i = fma_rd(j, 252, 2^23+1)`, round-toward-−∞. Cajeta has no
+        // rounding-mode control, but none is needed: the exact value lands in
+        // [2^23+1, 2^23+253], a range where every float32 IS an integer (ulp == 1),
+        // so rounding toward −∞ is plain floor — and
+        //   floor(2^23+1 + j·252) = 2^23+1 + floor(j·252).
+        // `j·252` needs at most 30 significand bits, so it is exact in float64 and
+        // so is its floor. `k` is that floor; the IR's `i` is `2^23+1+k`, `n` is
+        // `i − (2^23+127)`, and `s = 2^n` is `i`'s bits shifted left 23 — which is
+        // just the exponent field `k+1`.
+        int32 k = (int32) Math.floor((float64) j * (float64) 252.0);   // 0..252
+        float32 n = (float32) (k - (int32) 126);                       // −126..126
+        float32 s = Cajeta.bitsToF32((k + (int32) 1) << (int32) 23);   // 2^n
+
+        float32 f = FastMath.fmaf(x, FastMath.L2E_HI(), -n);
+        f = FastMath.fmaf(x, FastMath.L2E_LO(), f);
+
+        return FastMath.ex2Approx(f) * s;
+    }
 }

@@ -1,0 +1,145 @@
+package dev.cajeta.xgboost.selftest;
+
+import cajeta.math.Tensor;
+import cajeta.math.npio.Npy;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.xgboost.fastmath.FastMath;
+
+/**
+ * Tests for {@link FastMath#expf} — the bit-exact reproduction of device CUDA
+ * `expf` — and for {@link FastMath#fmaf}, the exact float32 FMA it is built on.
+ *
+ * Three tiers, so the model is covered whether or not a GPU capture is present:
+ *
+ *  1. **`fmaf` exactness**, capture-independent. `fmaf(a, b, -(a*b))` is the exact
+ *     rounding error of `a*b`, so `a*b + err` must reconstruct the exact product.
+ *     Only a true single-rounding FMA satisfies this; a naive `a*b + c` returns 0
+ *     for the residual and fails immediately.
+ *  2. **Reduction sanity**, capture-independent. Without the capture `ex2Mantissa`
+ *     falls back to correctly-rounded `exp2`, so `expf` should track accurate `exp`
+ *     to within a few ULP across the domain. This is what catches a broken exponent
+ *     split — those errors are factors of two, not ULPs.
+ *  3. **Bit-for-bit against the device sweep** (plan 1.1.1), which needs both
+ *     `EXPF_SWEEP` and `EX2_TABLE`. Both captures are 32 MB and `.gitignore`d, so
+ *     this tier self-skips on CI and runs locally via `run-tests.sh`.
+ *
+ * Tier 3 asserts bit-equality only for **normal** results. The denormal tail
+ * (`x ⪅ -87.3`) is where `saturate` pushes the reduced argument outside `[0,1)` and
+ * the capture has no entries; it is held to 2 ULP instead. `Sigmoid` cannot observe
+ * the difference — it is exactly `1.0f` in float32 once `expf` drops below ~3e-8,
+ * thirty orders of magnitude above the tail.
+ */
+public class FastMathExpfTest {
+
+    public FastMathExpfTest() { return; }
+
+    // ---- fmaf: a single rounding, not two -----------------------------------------
+
+    static void twoProductIsExact(float32 a, float32 b) {
+        float32 p = a * b;                        // rounded float32 product
+        float32 e = FastMath.fmaf(a, b, -p);      // its exact residual
+        // p + e must reconstruct the product exactly. The exact product needs at
+        // most 48 significand bits, so float64 holds it with room to spare.
+        Assert.thatFloat((float64) p + (float64) e)
+              .isEqualTo((float64) a * (float64) b);
+    }
+
+    @Test
+    public void fmafRecoversTheExactProduct() {
+        FastMathExpfTest.twoProductIsExact((float32) 1.1, (float32) 1.7);
+        FastMathExpfTest.twoProductIsExact((float32) 123.456, (float32) 789.012);
+        FastMathExpfTest.twoProductIsExact((float32) 0.1, (float32) 0.3);
+        FastMathExpfTest.twoProductIsExact((float32) 1.4426950216, (float32) 87.3);
+        FastMathExpfTest.twoProductIsExact((float32) -3.7, (float32) 2.9);
+        FastMathExpfTest.twoProductIsExact((float32) 1.0e-20, (float32) 3.3e18);
+    }
+
+    @Test
+    public void fmafIsPlainArithmeticWhenNothingRounds() {
+        // Small integers are exact all the way through, so fmaf must agree with the
+        // obvious expression — a guard against the round-to-odd step over-correcting.
+        Assert.thatFloat((float64) FastMath.fmaf((float32) 3.0, (float32) 5.0, (float32) 7.0))
+              .isEqualTo((float64) 22.0);
+        Assert.thatFloat((float64) FastMath.fmaf((float32) -2.0, (float32) 8.0, (float32) 1.5))
+              .isEqualTo((float64) -14.5);
+        Assert.thatFloat((float64) FastMath.fmaf((float32) 0.0, (float32) 1.0e30, (float32) 0.25))
+              .isEqualTo((float64) 0.25);
+    }
+
+    // ---- expf: structure and reduction --------------------------------------------
+
+    @Test
+    public void expfAtZeroIsExactlyOne() {
+        // Pins the whole exponent split: j = 0.5 → k = 126 → n = 0 → s = 1, and the
+        // reduced argument is 0, whose table entry is exactly 1.0f on both paths.
+        Assert.thatFloat((float64) FastMath.expf((float32) 0.0))
+              .isEqualTo((float64) 1.0);
+    }
+
+    @Test
+    public void expfIsMonotoneNonDecreasing() {
+        float32 x = (float32) -87.0;
+        float32 prev = FastMath.expf(x);
+        while (x < (float32) 88.0) {
+            x = x + (float32) 0.125;
+            float32 v = FastMath.expf(x);
+            Assert.isTrue(v >= prev);
+            prev = v;
+        }
+    }
+
+    @Test
+    public void expfTracksAccurateExpAcrossTheDomain() {
+        // Capture-independent: without EX2_TABLE the table falls back to
+        // correctly-rounded exp2, so anything worse than a few ULP here is the
+        // reduction, not the table. A wrong exponent split shows up as a factor of 2.
+        float32 x = (float32) -87.0;
+        while (x <= (float32) 88.0) {
+            float64 got = (float64) FastMath.expf(x);
+            float64 want = Math.exp((float64) x);
+            float64 rel = (got - want) / want;
+            if (rel < (float64) 0.0) { rel = -rel; }
+            Assert.isTrue(rel <= (float64) 1.0e-5);
+            x = x + (float32) 0.25;
+        }
+    }
+
+    // ---- expf: bit-for-bit against the device capture (plan 1.1.1) ------------------
+
+    static int32 SWEEP_N() { return (int32) 8388608; }     // 2^23 grid points
+    static int32 STRIDE()  { return (int32) 1024; }        // 8192 samples, CI-light
+
+    /** The sweep's grid: `x_k = fmaf(k, 180/(2^23-1), -90)`, k in [0, 2^23). */
+    static float32 gridX(int32 k) {
+        float32 step = (float32) ((float64) 180.0 / (float64) 8388607.0);
+        return FastMath.fmaf((float32) k, step, (float32) -90.0);
+    }
+
+    @Test
+    public void expfMatchesTheDeviceSweepBitForBit() {
+        String path = System.env.get("EXPF_SWEEP");
+        if (path == null) { return; }              // no capture (CI) — tiers 1+2 stand
+        if (!FastMath.hasEx2Table()) { return; }   // sweep without the SFU table proves nothing
+
+        Tensor<int32> sweep = Npy.loadI32(path);
+
+        int32 k = (int32) 0;
+        while (k < FastMathExpfTest.SWEEP_N()) {
+            int32 devBits = sweep.flatGet((int64) k);
+            int32 expo = (devBits >> (int32) 23) & (int32) 0xFF;
+            // Skip the overflow tail (inf/NaN) and the underflow tail (exactly 0);
+            // neither is a value the model claims to reproduce.
+            if (expo != (int32) 0xFF && devBits != (int32) 0) {
+                int32 gotBits = Cajeta.f32ToBits(FastMath.expf(FastMathExpfTest.gridX(k)));
+                if (expo != (int32) 0) {
+                    Assert.isTrue(gotBits == devBits);      // normal → bit-exact
+                } else {
+                    int32 d = gotBits - devBits;            // denormal tail → 2 ULP
+                    if (d < (int32) 0) { d = -d; }
+                    Assert.isTrue(d <= (int32) 2);
+                }
+            }
+            k = k + FastMathExpfTest.STRIDE();
+        }
+    }
+}
