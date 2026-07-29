@@ -74,6 +74,16 @@
             ]
         },
 
+        "tour": {
+            // The runnable tour (tour/src): builds the library, compiles the
+            // tour against it, runs it. Exits non-zero if any demonstrated
+            // claim fails — the tour doubles as a public-surface smoke test.
+            "description": "Build + run the guided tour of the public API",
+            "actions": [
+                { "action": "exec", "command": "./run-tour.sh" }
+            ]
+        },
+
         "release": {
             "description": "Optimized release build of the library (.cja)",
             "actions": [
