@@ -1,14 +1,21 @@
 # CI + release for the cajeta-xgboost library (.cja).
 #
-# A pure-Cajeta library (like cajeta-codec): CI installs a published cajeta
-# toolchain, builds the xgboost .cja + the cajeta-unit dependency, runs the
-# suite, and — on a v* tag — publishes the built .cja as a GitHub Release asset
-# and to the signed Olla registry (olla.cajeta.dev).
+# A pure-Cajeta library: CI installs a published cajeta toolchain, runs the
+# suite via ./run-tests.sh (which resolves cajeta-unit itself — sibling
+# checkout locally, sha256-verified Olla fetch on a bare runner — and wires
+# the fixture/capture env), builds the .cja from the manifest, and — on a v*
+# tag — publishes it as a GitHub Release asset and to the signed Olla
+# registry.
 #
-# Triggers (workflow is push-to-main; no PR flow):
+# The probed SFU capture tables (RCP_TABLE / EX2_TABLE, 32 MB each) are
+# .gitignore'd and absent in CI: FastMath falls back to correctly-rounded
+# math and every capture-dependent test self-skips. Bit-exactness against
+# the captures is a local/GPU-runner concern, not this job's.
+#
+# Triggers (push-to-main flow; no PRs):
 #   - push to main         → build + test (no publish)
-#   - push a `v*` tag       → build + test + publish (Release + Olla)
-#   - workflow_dispatch     → dry-run (build+test) or production (also publishes)
+#   - push a `v*` tag      → build + test + publish (Release + Olla)
+#   - workflow_dispatch    → dry-run (build+test) or production (also publishes)
 
 name: release
 
@@ -26,12 +33,13 @@ on:
         options: [dry-run, production]
 
 permissions:
-  contents: write   # softprops/action-gh-release creates the Release on a tag
+  contents: write
 
 env:
-  # A published cajeta toolchain that ships cajeta.nucleo.* (frame/column) — the
-  # library depends on it from the tree-builder units onward. Bump as needed.
-  CAJETA_VERSION: v0.10.0
+  # Must match a release tag of jklappenbach/cajeta. v0.11.0 is the current
+  # ecosystem toolchain (NET-14); the sources need >= v0.10.1 (bracket array
+  # literals + the annotation surface).
+  CAJETA_VERSION: v0.11.0
 
 jobs:
   build-test:
@@ -40,12 +48,6 @@ jobs:
     steps:
       - name: Checkout cajeta-xgboost
         uses: actions/checkout@v4
-
-      - name: Checkout cajeta-unit (test framework dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: jklappenbach/cajeta-unit
-          path: cajeta-unit-dep
 
       - name: Install cajeta toolchain (${{ env.CAJETA_VERSION }})
         env:
@@ -59,21 +61,35 @@ jobs:
           cajeta --version || true
 
       - name: Run the test suite
-        env:
-          UNIT_REPO: ${{ github.workspace }}/cajeta-unit-dep
+        # No UNIT_REPO here: the bare runner takes run-tests.sh's Olla-fetch
+        # path at the dev.cajeta.unit version pinned in cajeta.json.
+        timeout-minutes: 30
         run: ./run-tests.sh
 
       - name: Build the release .cja
         id: build
         run: |
           set -euo pipefail
-          VERSION="$(cat VERSION)"
-          out="$(mktemp -d)"
-          cajeta --emit=cja -o "$out/dev.cajeta.xgboost-${VERSION}.cja" \
-            dev.cajeta.xgboost.XGBoost.run src/main/cajeta "$out"
-          mkdir -p dist
-          cp "$out/dev.cajeta.xgboost-${VERSION}.cja" dist/
-          echo "artifact=dist/dev.cajeta.xgboost-${VERSION}.cja" >> "$GITHUB_OUTPUT"
+          # cajeta.json is the single source of truth for the version — the
+          # deleted VERSION file is the codec-0.7.1-shipped-as-0.7.0 bug class.
+          # Read it through the toolchain: the manifest is JSONC, so jq cannot
+          # parse it and naive comment-stripping corrupts https:// URLs.
+          VERSION="$(cajeta info | awk '/^[[:space:]]*version:/{print $2; exit}')"
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read version from cajeta.json via 'cajeta info'" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$VERSION" ]; then
+              echo "::error::tag v${tag_version} disagrees with cajeta.json version ${VERSION} — bump the manifest or retag" >&2
+              exit 1
+            fi
+          fi
+          cajeta build
+          art="build/archive/dev.cajeta.xgboost-${VERSION}.cja"
+          [ -f "$art" ] || { echo "::error::expected $art after cajeta build" >&2; exit 1; }
+          echo "artifact=$art" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Upload .cja as a build artifact
@@ -82,7 +98,6 @@ jobs:
           name: cajeta-xgboost-${{ steps.build.outputs.version }}
           path: ${{ steps.build.outputs.artifact }}
 
-      # Publish a GitHub Release only on a v* tag push, or a production dispatch.
       - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'production')
         uses: softprops/action-gh-release@v2
@@ -93,7 +108,7 @@ jobs:
           files: ${{ steps.build.outputs.artifact }}
 
       # Signed publish to the Olla registry (olla.cajeta.dev). Requires the
-      # OLLA_* repo/org secrets; see cajeta/docs/olla-ci-publish.md.
+      # OLLA_* repo secrets; see cajeta/docs/olla-ci-publish.md.
       - name: Publish to Olla
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'production')
         uses: jklappenbach/cajeta/.github/actions/olla-publish@main

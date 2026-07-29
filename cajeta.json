@@ -1,0 +1,90 @@
+{
+    // cajeta-xgboost — a bit-exact-to-NVIDIA GBDT (gradient-boosted decision
+    // tree) trainer and predictor: XGBoost's gpu_hist algorithm reproduced in
+    // pure Cajeta, deterministic to the bit against the reference's CUDA
+    // output (quantile sketch, int64 fixed-point histogram, split selection,
+    // objectives with device-transcendental models). See docs/ for the tour
+    // and the determinism contract.
+    //
+    // A LIBRARY project: no `entry-method`, so the build emits a reusable
+    // `.cja` rather than an executable.
+    //
+    // VERSIONING — `details.version` is the SINGLE source of truth. It names
+    // the built archive (`dev.cajeta.xgboost-<version>.cja`), it is what CI
+    // publishes to Olla, and CI asserts a `v*` tag agrees with it. The old
+    // VERSION file is gone — that duplication is what shipped cajeta-codec's
+    // 0.7.1 as a 0.7.0 artifact.
+
+    "details": {
+        "name":               "dev.cajeta.xgboost",
+        "version":            "0.1.0",
+        "description":        "cajeta-xgboost — bit-exact-to-NVIDIA GBDT training and prediction",
+        "license":            "Apache-2.0",
+        "authors":            ["Julian Klappenbach"],
+        "cajeta-lang-version": "1.0"
+    },
+
+    "settings": {
+        // FastMath loads the probed SFU tables (RCP_TABLE / EX2_TABLE) and
+        // FixtureLoader reads golden fixtures from disk.
+        "capabilities": ["filesystem"],
+
+        // The core stdlib (cajeta.lang, cajeta.math, cajeta.nucleo, …) is
+        // built into the toolchain — not declared, not fetched.
+        "dependencies": {},
+
+        // The suite is driven by cajeta-unit's reflective @Test discovery;
+        // run-tests.sh resolves the archive (sibling checkout, then store,
+        // then a sha256-verified Olla fetch at this pin).
+        "dev-dependencies": {
+            "dev.cajeta.unit": "0.2.0"
+        },
+
+        "repositories": [
+            { "name": "central", "url": "https://olla.cajeta.dev",
+              "priority": 0 }
+        ],
+
+        // NO `entry-method` — this is a library; the build emits a .cja.
+        "build": {
+            "source-root": "src/main/cajeta",
+            "target": "host"
+        }
+    },
+
+    "tasks": {
+
+        "build": {
+            "description": "Compile sources to a .cja library archive",
+            "actions": [
+                { "action": "build", "flavor": "debug", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "test": {
+            // Delegates to ./run-tests.sh: the suite compiles test sources
+            // against the built .cja with cajeta-unit on the classpath, and
+            // the script owns fixture/capture wiring (XGBOOST_FIXTURES,
+            // RCP_TABLE, EX2_TABLE, EXPF_SWEEP — capture-dependent tests
+            // self-skip when the .gitignore'd 32 MB tables are absent).
+            "description": "Build + run the library's test suite",
+            "actions": [
+                { "action": "exec", "command": "./run-tests.sh" }
+            ]
+        },
+
+        "release": {
+            "description": "Optimized release build of the library (.cja)",
+            "actions": [
+                { "action": "build", "flavor": "release", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "clean": {
+            "description": "Wipe build outputs",
+            "actions": [ { "action": "clean" } ]
+        }
+    }
+}
