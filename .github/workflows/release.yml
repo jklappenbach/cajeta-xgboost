@@ -108,9 +108,25 @@ jobs:
           files: ${{ steps.build.outputs.artifact }}
 
       # Signed publish to the Olla registry (olla.cajeta.dev). Requires the
-      # OLLA_* repo secrets; see cajeta/docs/olla-ci-publish.md.
+      # OLLA_* repo secrets; until they are set on THIS repo, releases are
+      # bridged via cajeta-logging's publish-sibling workflow (authorized
+      # 2026-07-29), and this step skips with a loud warning instead of
+      # failing the cut. Secrets cannot appear in `if:` directly, hence the
+      # detect step.
+      - name: Detect Olla credentials
+        id: creds
+        env:
+          T: ${{ secrets.OLLA_TOKEN }}
+        run: |
+          if [ -n "$T" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::no OLLA_* secrets on this repo — the Olla publish is SKIPPED; bridge via cajeta-logging's publish-sibling or add the secrets"
+          fi
+
       - name: Publish to Olla
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'production')
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'production')) && steps.creds.outputs.have == 'true'
         uses: jklappenbach/cajeta/.github/actions/olla-publish@main
         with:
           cja-path: ${{ steps.build.outputs.artifact }}
