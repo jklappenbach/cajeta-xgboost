@@ -1,5 +1,7 @@
 package dev.cajeta.xgboost.selftest;
 
+import dev.cajeta.xgboost.fastmath.FastMath;
+
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.objective.Logistic;
@@ -44,6 +46,15 @@ public class LogisticObjectiveTest {
     @Test
     @Disabled
     public void multiRoundGradHessBitIdentical() {
+        // RE-GATED 2026-07-29 with a corrected reason. The original gate blamed
+        // expf fidelity; the real problem is the FIXTURE: grad.npy rounds >= 1
+        // are a NUMPY reconstruction (generate.py compute_grad_hess — np.exp,
+        // no 88.7 clamp, no kEps, different division order), not a device dump.
+        // Bit-matching it is neither device parity nor achievable by the
+        // device-faithful sigmoid (59% of rows differ ~1 ULP under EVERY expf
+        // variant, including numpy-vs-libm). Un-gate when the fixtures carry
+        // REAL device grads — captured via the self-hosted NVIDIA runner
+        // (gpu-numeric-fidelity U2/U3 probe program).
         FixtureLoader f = FixtureLoader.open("tiny_binary");
         Tensor<float64> yT      = f.y();
         Tensor<float64> refGrad = f.grad();

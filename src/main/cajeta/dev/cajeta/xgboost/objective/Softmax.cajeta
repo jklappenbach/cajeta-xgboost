@@ -1,5 +1,7 @@
 package dev.cajeta.xgboost.objective;
 
+import dev.cajeta.xgboost.fastmath.FastMath;
+
 /**
  * `multi:softprob` / `multi:softmax` objective (spec §3.3), reproducing XGBoost's
  * `SoftmaxMultiClassObj::GetGradient` (`multiclass_obj.cu:120`). Per row, over the
@@ -39,17 +41,21 @@ public final class Softmax {
                 if (margin[base + k] > wmax) { wmax = margin[base + k]; }
                 k = k + (int64) 1;
             }
+            // Reference common::Softmax op order: each term is the FLOAT32
+            // device expf (the value the reference stores back into the span),
+            // and only then widened into the float64 accumulator. Accumulating
+            // the unrounded float64 exp instead diverges from round 1 on.
             float64 wsum = (float64) 0.0;
             k = (int64) 0;
             while (k < K) {
-                wsum = wsum + (float64) Math.exp(margin[base + k] - wmax);
+                wsum = wsum + (float64) FastMath.expf(margin[base + k] - wmax);
                 k = k + (int64) 1;
             }
             int64 yc = (int64) label[i];
             float32 s = (float32) wsum;
             k = (int64) 0;
             while (k < K) {
-                float32 p = Math.exp(margin[base + k] - wmax) / s;
+                float32 p = FastMath.expf(margin[base + k] - wmax) / s;
                 float32 hp = (float32) 2.0 * p * ((float32) 1.0 - p);
                 float32 h = hp < Softmax.eps() ? Softmax.eps() : hp;
                 float32 g = (k == yc) ? p - (float32) 1.0 : p;

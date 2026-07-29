@@ -1,5 +1,7 @@
 package dev.cajeta.xgboost.selftest;
 
+import dev.cajeta.xgboost.fastmath.FastMath;
+
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.tree.Tree;
@@ -27,6 +29,8 @@ public class MultiTreeTest {
     @Test
     @Disabled
     public void roundZeroClassTreesBitIdentical() {
+        // RE-GATED 2026-07-29, reason re-verified: split index 29 vs 31 with
+        // both SFU tables loaded — the Unit 2 near-tie, same as BinaryTreeTest.
         FixtureLoader f = FixtureLoader.open("tiny_multi");
         Tensor<float64> gAll = f.grad();   // [rounds, n, K] flat
         Tensor<float64> hAll = f.hess();

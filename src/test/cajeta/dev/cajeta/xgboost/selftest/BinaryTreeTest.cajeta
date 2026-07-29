@@ -1,5 +1,7 @@
 package dev.cajeta.xgboost.selftest;
 
+import dev.cajeta.xgboost.fastmath.FastMath;
+
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.tree.Tree;
@@ -27,6 +29,11 @@ public class BinaryTreeTest {
     @Test
     @Disabled
     public void firstBinaryTreeBitIdenticalToNvidiaReference() {
+        // RE-GATED 2026-07-29, reason re-verified: with the probed __fdividef
+        // table LOADED the tree still diverges (child topology 6 vs 4) — the
+        // near-tie is in the gain-scoring op order itself, not the reciprocal.
+        // Unit 2 (gpu-numeric-fidelity), now unblocked by the self-hosted
+        // NVIDIA runner for the evaluate-kernel probe.
         FixtureLoader f = FixtureLoader.open("tiny_binary");
         float64[] g = f.gradRound(0);   // 0.5 − y, exact
         float64[] h = f.hessRound(0);   // 0.25, exact

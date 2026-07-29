@@ -1,5 +1,7 @@
 package dev.cajeta.xgboost.objective;
 
+import dev.cajeta.xgboost.fastmath.FastMath;
+
 /**
  * `binary:logistic` objective (spec §3.2). All arithmetic is float32 to match
  * XGBoost's `GradientPair` / `common::Sigmoid` (`bst_float`, `1/(1+expf(-x))`):
@@ -11,19 +13,30 @@ package dev.cajeta.xgboost.objective;
  * The link is the logistic sigmoid, so the base margin is `logit(base_score)` and
  * the final prediction is `sigmoid(accumulated margin)` (a probability).
  *
- * Fidelity note: `expf` is a transcendental; the reference trees were built with
- * XGBoost's device `expf`. This uses the cajeta `Math.exp` intrinsic (libm on CPU).
- * If a per-round grad diverges from the dump on a knife-edge, that is the same
- * class of GPU-transcendental fidelity as `__fdividef` (probe + model per U4.4).
+ * Fidelity note (gpu-numeric-fidelity U1.2.4): the reference trees were built
+ * with XGBoost's device `expf`, and this now reproduces it exactly —
+ * {@link dev.cajeta.xgboost.fastmath.FastMath#expf} is the bit-exact device
+ * model (SFU `ex2.approx` on a reduced argument) when the probed table is
+ * loaded, correctly-rounded otherwise. The whole reference op order is
+ * mirrored: `x = min(-m, 88.7f)` (the overflow clamp — which also keeps the
+ * argument inside the model's bit-exact domain), then
+ * `denom = expf(x) + 1.0f + 1e-16f` in float32 left-to-right, then an IEEE
+ * float32 divide. See xgboost `src/common/math.h::Sigmoid(float)`.
  */
 public final class Logistic {
 
     static float32 eps() { return (float32) 0.0000000000000001; }   // 1e-16f
 
-    /** `1 / (1 + expf(−m))`, float32. */
+    static float32 kEps() { return (float32) 0.0000000000000001; }  // 1e-16f
+
+    /** Reference `Sigmoid(float)` verbatim: clamp, device `expf`, `+kEps`, divide. */
     public static float32 sigmoid(float32 m) {
-        float32 e = Math.exp(- m);
-        return (float32) 1.0 / ((float32) 1.0 + e);
+        float32 x = - m;
+        if (x > (float32) 88.7) {
+            x = (float32) 88.7;                    // avoid exp overflow (reference)
+        }
+        float32 denom = FastMath.expf(x) + (float32) 1.0 + Logistic.kEps();
+        return (float32) 1.0 / denom;
     }
 
     /** First-order gradient for one row: `sigmoid(margin) − label`, as float64. */
