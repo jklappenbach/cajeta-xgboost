@@ -34,6 +34,12 @@ public final class FixtureLoader {
     public #Tensor<float64> grad()      { return Npy.loadF64(this.path("grad.npy")); }
     public #Tensor<float64> hess()      { return Npy.loadF64(this.path("hess.npy")); }
     public #Tensor<float64> margins()   { return Npy.loadF64(this.path("margins.npy")); }
+    /** REAL device grad/hess, captured on PHOENIX (RTX 4090) by
+     *  tools/gpuprobe/probe_device_grads.cu — keyed by INPUT margin row
+     *  (row r = grads the device computes FROM margins[r]), unlike grad.npy
+     *  whose rounds >= 1 are a numpy reconstruction. */
+    public #Tensor<float64> deviceGrad() { return Npy.loadF64(this.path("device_grad.npy")); }
+    public #Tensor<float64> deviceHess() { return Npy.loadF64(this.path("device_hess.npy")); }
     public #Tensor<float64> preds()     { return Npy.loadF64(this.path("preds.npy")); }
     public #Tensor<int32>   bins()      { return Npy.loadI32(this.path("bins.npy")); }
     public #Tensor<int64>   cutPtrs()   { return Npy.loadI64(this.path("cut_ptrs.npy")); }

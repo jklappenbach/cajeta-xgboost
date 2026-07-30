@@ -43,34 +43,37 @@ public class LogisticObjectiveTest {
         return;
     }
 
+    /**
+     * UN-GATED 2026-07-29 against REAL device ground truth. The original
+     * fixture (grad.npy rounds >= 1) was a numpy reconstruction and matched no
+     * device-faithful model; device_grad/device_hess.npy were captured on
+     * PHOENIX (RTX 4090, tools/gpuprobe/probe_device_grads.cu — verbatim 3.1.2
+     * objective kernels) and this asserts bit-identity against THOSE, keyed by
+     * input margin row. Validated 1500/1500 exact at capture time. Requires
+     * the probed ex2 table (device expf); self-skips without it, like every
+     * capture-gated bit-exactness assertion.
+     */
     @Test
-    @Disabled
     public void multiRoundGradHessBitIdentical() {
-        // RE-GATED 2026-07-29 with a corrected reason. The original gate blamed
-        // expf fidelity; the real problem is the FIXTURE: grad.npy rounds >= 1
-        // are a NUMPY reconstruction (generate.py compute_grad_hess — np.exp,
-        // no 88.7 clamp, no kEps, different division order), not a device dump.
-        // Bit-matching it is neither device parity nor achievable by the
-        // device-faithful sigmoid (59% of rows differ ~1 ULP under EVERY expf
-        // variant, including numpy-vs-libm). Un-gate when the fixtures carry
-        // REAL device grads — captured via the self-hosted NVIDIA runner
-        // (gpu-numeric-fidelity U2/U3 probe program).
+        if (!FastMath.hasEx2Table()) {
+            return;
+        }
         FixtureLoader f = FixtureLoader.open("tiny_binary");
         Tensor<float64> yT      = f.y();
-        Tensor<float64> refGrad = f.grad();
-        Tensor<float64> refHess = f.hess();
+        Tensor<float64> devGrad = f.deviceGrad();
+        Tensor<float64> devHess = f.deviceHess();
         Tensor<float64> margins = f.margins();
         int64 n = yT.shapeAt(0);
-        int64 rounds = refGrad.shapeAt(0);
+        int64 rows = devGrad.shapeAt(0);
 
-        int64 r = (int64) 1;
-        while (r < rounds) {
+        int64 r = (int64) 0;
+        while (r < rows) {
             int64 rn = r * n;
             int64 i = (int64) 0;
             while (i < n) {
-                float32 mIn = (float32) margins.flatGet((r - (int64) 1) * n + i);
-                Assert.thatFloat(Logistic.grad(mIn, yT.flatGet(i))).isEqualTo(refGrad.flatGet(rn + i));
-                Assert.thatFloat(Logistic.hess(mIn, yT.flatGet(i))).isEqualTo(refHess.flatGet(rn + i));
+                float32 mIn = (float32) margins.flatGet(rn + i);
+                Assert.thatFloat(Logistic.grad(mIn, yT.flatGet(i))).isEqualTo(devGrad.flatGet(rn + i));
+                Assert.thatFloat(Logistic.hess(mIn, yT.flatGet(i))).isEqualTo(devHess.flatGet(rn + i));
                 i = i + (int64) 1;
             }
             r = r + (int64) 1;

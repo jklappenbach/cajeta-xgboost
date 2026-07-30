@@ -2,6 +2,7 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
+import dev.cajeta.xgboost.fastmath.FastMath;
 import dev.cajeta.xgboost.objective.Softmax;
 
 /**
@@ -38,6 +39,58 @@ public class SoftmaxObjectiveTest {
             Assert.thatFloat(grad[t]).isEqualTo(refGrad.flatGet(t));
             Assert.thatFloat(hess[t]).isEqualTo(refHess.flatGet(t));
             t = t + (int64) 1;
+        }
+        return;
+    }
+
+    /**
+     * Multi-round softmax grad/hess bit-identical to REAL device ground truth
+     * — device_grad/device_hess.npy captured on PHOENIX (RTX 4090,
+     * tools/gpuprobe/probe_device_grads.cu: the verbatim multiclass_obj.cu
+     * GetGradient kernel), keyed by input margin row. Nonzero margins hit
+     * device expf on every term, so this pins the whole Softmax op order —
+     * float-min wmax seed, float32-rounded terms into the float64 wsum,
+     * recomputed p, the reference clamp. Validated 7200/7200 exact at capture
+     * time. Needs the probed ex2 table; self-skips without it.
+     */
+    @Test
+    public void multiRoundGradHessDeviceBitIdentical() {
+        if (!FastMath.hasEx2Table()) {
+            return;
+        }
+        FixtureLoader f = FixtureLoader.open("tiny_multi");
+        Tensor<float64> yT      = f.y();
+        Tensor<float64> devGrad = f.deviceGrad();   // [rows, n, K]
+        Tensor<float64> devHess = f.deviceHess();
+        Tensor<float64> margins = f.margins();      // [rows, n, K]
+        int64 n = yT.shapeAt(0);
+        int64 K = (int64) 4;
+        int64 rows = devGrad.shapeAt(0);
+
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        float32[] margin = heap float32[n * K];
+        float64[] grad = heap float64[n * K];
+        float64[] hess = heap float64[n * K];
+
+        int64 r = (int64) 0;
+        while (r < rows) {
+            int64 base = r * n * K;
+            int64 t = (int64) 0;
+            while (t < n * K) {
+                margin[t] = (float32) margins.flatGet(base + t);
+                t = t + (int64) 1;
+            }
+            Softmax.gradHess(margin, label, n, K, grad, hess);
+            t = (int64) 0;
+            while (t < n * K) {
+                Assert.thatFloat(grad[t]).isEqualTo(devGrad.flatGet(base + t));
+                Assert.thatFloat(hess[t]).isEqualTo(devHess.flatGet(base + t));
+                t = t + (int64) 1;
+            }
+            r = r + (int64) 1;
         }
         return;
     }
