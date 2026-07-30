@@ -15,25 +15,17 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
  * scale, min_child_weight gate, and CalcWeight all see hess ≠ 1 here. Later rounds
  * need bit-exact `expf` (U6 fidelity item), so this asserts tree 0 only.
  *
- * DISABLED — 28/29 nodes bit-identical; one residual split-feature label (node 11,
- * feature 6 vs 4, same partition topology). Identical signature to `tiny_reg_mcw10`
- * node 14: a min_child_weight near-tie the reference resolves via XGBoost 3.1.2's
- * exact GPU split-selection, which no rule from xgboost-ref reproduces. hess=0.25
- * makes min_child_weight bind more, so binary surfaces it too. Deferred to U12 with
- * the mcw10 residual; re-enable when that GPU-selection semantics is resolved.
+ * RE-ENABLED (gpu-numeric-fidelity 2.1.2) — the node-11 residual was the device's
+ * selection granularity: a min_child_weight-BLIND argmax per 32-bin tile, with the
+ * weight gate applied only to each tile's winner (`SplitFinder.findBest`, level 1+2).
+ * hess=0.25 makes min_child_weight bind more, so binary surfaced it too.
  */
 public class BinaryTreeTest {
 
     public BinaryTreeTest() { return; }
 
     @Test
-    @Disabled
     public void firstBinaryTreeBitIdenticalToNvidiaReference() {
-        // RE-GATED 2026-07-29, reason re-verified: with the probed __fdividef
-        // table LOADED the tree still diverges (child topology 6 vs 4) — the
-        // near-tie is in the gain-scoring op order itself, not the reciprocal.
-        // Unit 2 (gpu-numeric-fidelity), now unblocked by the self-hosted
-        // NVIDIA runner for the evaluate-kernel probe.
         FixtureLoader f = FixtureLoader.open("tiny_binary");
         float64[] g = f.gradRound(0);   // 0.5 − y, exact
         float64[] h = f.hessRound(0);   // 0.25, exact

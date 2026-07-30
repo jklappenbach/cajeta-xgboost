@@ -1,0 +1,32 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.xgboost.tree.Tree;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+
+/**
+ * gpu-numeric-fidelity 2.2.1 — standalone dump driver. Grows exactly one tree
+ * (tiny_reg_mcw10, the ConfigParityTest::minChildWeightTreeBitIdentical config)
+ * so TreeBuilder's XGBOOST_NODE_DUMP hook fires from a single known build —
+ * running the whole suite instead would let every tree that reaches the target
+ * nid overwrite the dump. Not a @Test; compiled as its own entry point by
+ * tools/gpuprobe/dump-node.sh:
+ *
+ *   XGBOOST_FIXTURES=tools/fixtures XGBOOST_NODE_DUMP=tools/gpuprobe/node14 \
+ *   XGBOOST_NODE_DUMP_NID=14 <binary>
+ */
+public final class NodeDumpMain {
+
+    public NodeDumpMain() { return; }
+
+    public static int32 run() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg_mcw10");
+        float64[] g = f.gradRound(0);
+        float64[] h = f.hessRound(0);
+        int64 n = (int64) g.count();
+        Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+                                      (int64) 4, (int64) 0,
+                                      (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                      (float64) 10.0, (float64) 0.3);
+        return t.nodeCount > (int64) 0 ? (int32) 0 : (int32) 1;
+    }
+}

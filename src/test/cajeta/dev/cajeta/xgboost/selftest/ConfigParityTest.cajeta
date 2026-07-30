@@ -66,16 +66,17 @@ public class ConfigParityTest {
         ConfigParityTest.assertTreeMatches("tiny_reg_d6", (int64) 6, (float64) 0.0, (float64) 1.0);
     }
 
-    // DISABLED — 22/23 nodes bit-identical; one residual split-feature label (node 14).
-    // Per-boundary min_child_weight gating (added to findBest) fixed nodes 5/12 — it
-    // matches XGBoost's recorded loss_change at node 5 exactly (8.942413). But node 14
-    // is a deeper gap: its rows/histogram are verified identical to the reference (base
-    // weight matches to the bit), and feature 1 there genuinely has a higher valid gain
-    // (96.706 vs feature 4's 96.521, confirmed three independent ways), yet XGBoost
-    // records feature 4. No selection rule derivable from xgboost-ref (post-argmax gate,
-    // per-boundary gate, warp-block-32 argmax either alignment, f32-vs-double gain)
-    // reproduces that. Needs XGBoost 3.1.2's exact GPU split-selection semantics — a
-    // deeper reverse-engineering than the __fdividef arithmetic (which is now correct).
+    // DISABLED (gpu-numeric-fidelity 2.1.1) — one residual: node 14 splitIndices,
+    // reference feature 4 (96.521) vs port feature 1 (96.706). SplitFinder now
+    // implements the device's real three-level selection (mcw-BLIND 32-bin tile
+    // argmax → gated tile winner → cross-feature reduce; it fixed BinaryTreeTest
+    // node 11) and node 14 STILL diverges: feature 1's 96.706 boundary (gidx 318)
+    // wins its own tile [297,329) and passes mcw under every tie-break — the
+    // feature has no missing values, so even the gainL/gainR direction tie can't
+    // flip validity. Verified against the committed tools/gpuprobe/node14 dump.
+    // No CPU-derivable rule produces feature 4; awaiting the silicon replay
+    // (tools/gpuprobe/probe_evaluate_gain.cu on PHOENIX) to see whether the
+    // device's gain bits at gidx 318/981 differ or the divergence is upstream.
     @Test
     @Disabled
     public void minChildWeightTreeBitIdentical() {

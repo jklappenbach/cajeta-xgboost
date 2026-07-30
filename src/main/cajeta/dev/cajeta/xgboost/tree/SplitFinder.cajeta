@@ -11,14 +11,21 @@ import dev.cajeta.xgboost.fastmath.FastMath;
  * `CalcGainGivenWeight`), `src/tree/updater_gpu_common.cuh`
  * (`DeviceSplitCandidate::Update`).
  *
- * Algorithm, per feature:
- *   exclusive-scan the feature's bins; at each boundary evaluate the gain with
- *   the missing gpair sent left vs right (pick the larger). Take the max-gain
- *   boundary (lowest bin on ties) — this stage ignores `min_child_weight`.
- * Across features: keep the candidate with strictly greater gain (so ties go to
- *   the lowest feature index) **and** both children's dequantized hessian
- *   ≥ `min_child_weight`. A feature whose argmax boundary fails the weight gate
- *   is dropped, not replaced by its second-best boundary — matching XGBoost.
+ * Selection is the device's THREE-level rule (`Numerical`, evaluate_splits.cu:113-148
+ * with kBlockSize == 32, + `DeviceSplitCandidate::Update`, updater_gpu_common.cuh:69):
+ *   1. Per 32-bin TILE (tiles feature-aligned at `gidx_begin`): an UNCONDITIONAL,
+ *      min_child_weight-BLIND argmax over the tile's boundaries (`cub::ArgMax`,
+ *      ties → lowest bin). Each boundary's gain sends the missing gpair left vs
+ *      right and keeps the larger (`LossChangeMissing`; ties → right).
+ *   2. Only the tile WINNER reaches `Update`: both children's dequantized hessian
+ *      ≥ `min_child_weight`, and strictly greater gain than the feature's running
+ *      best (ties → earliest tile). A tile whose raw-gain winner fails the weight
+ *      gate contributes NOTHING — its valid runners-up are discarded with it.
+ *   3. Across features: strictly greater gain (ties → lowest feature index).
+ * Level 1's mcw-blindness is load-bearing: a per-boundary-gated argmax considers
+ * strictly more candidates and picks provably different trees (tiny_reg_mcw10
+ * node 14: feature 1 has a valid 96.706 boundary the device never surfaces —
+ * its tile is won by an mcw-invalid boundary — so feature 4's 96.521 wins).
  *
  * Gain uses float32 with the source's narrowing: `(f32)(ThresholdL1(G,α)²) /
  * (f32)(H+λ)`, children only (the parent term is constant across candidates).
@@ -115,7 +122,10 @@ public final class SplitFinder {
             int64 missG = parentG - fSumG;
             int64 missH = parentH - fSumH;
 
-            // Stage A — per-feature argmax over exclusive-scan boundaries.
+            // Stage A — the device's tiled argmax (levels 1+2 of the selection
+            // rule; see the class doc). Tiles are 32 boundaries wide, aligned to
+            // the feature's first bin (`scan_begin = gidx_begin`); the exclusive
+            // prefix runs across tiles (the device's SumCallbackOp).
             boolean featHas = false;
             float32 featGain = (float32) 0.0;
             int64 featP = (int64) 0;
@@ -125,41 +135,66 @@ public final class SplitFinder {
 
             int64 scanG = (int64) 0;           // exclusive prefix over the feature's bins
             int64 scanH = (int64) 0;
-            int64 p = b0;
-            while (p < b1) {
-                // missing-left: left = scan + missing
-                int64 lLG = scanG + missG;
-                int64 lLH = scanH + missH;
-                float32 gainL = SplitFinder.splitGain(q, lLG, lLH,
-                                                      parentG - lLG, parentH - lLH, lambda, alpha);
-                // missing-right: left = scan
-                float32 gainR = SplitFinder.splitGain(q, scanG, scanH,
-                                                      parentG - scanG, parentH - scanH, lambda, alpha);
-                boolean missLeft = gainL > gainR;
-                float32 gain = missLeft ? gainL : gainR;
+            int64 tileStart = b0;
+            while (tileStart < b1) {
+                int64 tileEnd = tileStart + (int64) 32;
+                if (tileEnd > b1) { tileEnd = b1; }
 
-                // min_child_weight gates each boundary *inside* the argmax: a boundary
-                // whose chosen-direction children violate it is excluded, so a feature
-                // contributes its best VALID boundary — not its global argmax then a
-                // post-hoc reject. (Decides tiny_reg_mcw10 node 5: the global argmax at
-                // gidx 986 is 39/8 → gated, so the valid gidx 917 = 11/36 wins the feature.)
-                int64 cLH = missLeft ? scanH + missH : scanH;
-                int64 cRH = parentH - cLH;
-                boolean valid = q.floatHess(cLH) >= minChildWeight
-                             && q.floatHess(cRH) >= minChildWeight;
+                // Level 1 — min_child_weight-BLIND argmax within the tile
+                // (cub::ArgMax: strict > replacement, so ties → lowest bin).
+                boolean tileHas = false;
+                float32 tileGain = (float32) 0.0;
+                int64 tileP = (int64) 0;
+                int64 tileScanG = (int64) 0;
+                int64 tileScanH = (int64) 0;
+                boolean tileMissLeft = true;
 
-                if (valid && (!featHas || gain > featGain)) {
-                    featHas = true;
-                    featGain = gain;
-                    featP = p;
-                    featScanG = scanG;
-                    featScanH = scanH;
-                    featMissLeft = missLeft;
+                int64 p = tileStart;
+                while (p < tileEnd) {
+                    // missing-left: left = scan + missing
+                    int64 lLG = scanG + missG;
+                    int64 lLH = scanH + missH;
+                    float32 gainL = SplitFinder.splitGain(q, lLG, lLH,
+                                                          parentG - lLG, parentH - lLH, lambda, alpha);
+                    // missing-right: left = scan
+                    float32 gainR = SplitFinder.splitGain(q, scanG, scanH,
+                                                          parentG - scanG, parentH - scanH, lambda, alpha);
+                    boolean missLeft = gainL > gainR;
+                    float32 gain = missLeft ? gainL : gainR;
+
+                    if (!tileHas || gain > tileGain) {
+                        tileHas = true;
+                        tileGain = gain;
+                        tileP = p;
+                        tileScanG = scanG;
+                        tileScanH = scanH;
+                        tileMissLeft = missLeft;
+                    }
+
+                    scanG = scanG + hist.g[p];
+                    scanH = scanH + hist.h[p];
+                    p = p + (int64) 1;
                 }
 
-                scanG = scanG + hist.g[p];
-                scanH = scanH + hist.h[p];
-                p = p + (int64) 1;
+                // Level 2 — only the tile winner reaches Update: the weight gate
+                // applies HERE, and a gated winner takes its whole tile with it
+                // (valid runners-up in the same tile are never considered).
+                if (tileHas) {
+                    int64 cLH = tileMissLeft ? tileScanH + missH : tileScanH;
+                    int64 cRH = parentH - cLH;
+                    boolean valid = q.floatHess(cLH) >= minChildWeight
+                                 && q.floatHess(cRH) >= minChildWeight;
+                    if (valid && (!featHas || tileGain > featGain)) {
+                        featHas = true;
+                        featGain = tileGain;
+                        featP = tileP;
+                        featScanG = tileScanG;
+                        featScanH = tileScanH;
+                        featMissLeft = tileMissLeft;
+                    }
+                }
+
+                tileStart = tileEnd;
             }
 
             // Stage B — cross-feature Update: strict > and min_child_weight gate.

@@ -1,6 +1,7 @@
 package dev.cajeta.xgboost.tree;
 
 import cajeta.math.Tensor;
+import cajeta.math.npio.Npy;
 
 /**
  * Grows one regression tree over binned data, reproducing XGBoost's GPU `hist`
@@ -118,6 +119,20 @@ public final class TreeBuilder {
 
             // This node's histogram is already resident in the store.
             Histogram hist = Histogram.fromStore(histG, histH, base, nbins, nf, totGof[nid], totHof[nid]);
+
+            // gpu-numeric-fidelity 2.2.1 — evaluate-probe input dump. With
+            // XGBOOST_NODE_DUMP=<dir> and XGBOOST_NODE_DUMP_NID=<nid>, this node's
+            // evaluation inputs are written to <dir> as npys and the build continues.
+            // Consumed by tools/gpuprobe/probe_evaluate_gain.cu (verbatim device
+            // evaluation of one node on real hardware). Zero cost when unset.
+            String dumpDir = System.env.get("XGBOOST_NODE_DUMP");
+            if (dumpDir != null) {
+                String dumpNid = System.env.get("XGBOOST_NODE_DUMP_NID");
+                if (dumpNid != null && dumpNid.equals(Int64.of(nid).toString())) {
+                    TreeBuilder.dumpNode(dumpDir, histG, histH, base, nbins, nf, cutPtrs, q,
+                                         totGof[nid], totHof[nid], lambda, alpha, minChildWeight);
+                }
+            }
             // Raw node weight (XGBoost's base_weight — no shrinkage).
             float32 rawW = SplitFinder.leafWeight(q, hist.totalG, hist.totalH, lambda, alpha, minChildWeight);
 
@@ -200,6 +215,54 @@ public final class TreeBuilder {
         int64 rr = (int64) 0;
         while (rr < n) { leafOf[rr] = position[rr]; rr = rr + (int64) 1; }
         return nodeCount;
+    }
+
+    /**
+     * Write one node's split-evaluation inputs as npys (gpu-numeric-fidelity
+     * 2.2.1): the node histogram, parent sums, cut pointers, and the quantiser
+     * scales + regularization config — everything probe_evaluate_gain.cu needs
+     * to replay this node's evaluation verbatim on device.
+     */
+    static void dumpNode(String dir, int64[] histG, int64[] histH, int64 base,
+                         int64 nbins, int64 nf, Tensor<int64> cutPtrs, GradientQuantiser q,
+                         int64 parentG, int64 parentH,
+                         float64 lambda, float64 alpha, float64 minChildWeight) {
+        int64[] hshape = heap int64[1];
+        hshape[0] = nbins;
+        Tensor<int64> hg = Tensor.zeros<int64>(hshape);
+        Tensor<int64> hh = Tensor.zeros<int64>(hshape);
+        int64 b = (int64) 0;
+        while (b < nbins) {
+            hg.flatSet(b, histG[base + b]);
+            hh.flatSet(b, histH[base + b]);
+            b = b + (int64) 1;
+        }
+        Npy.saveI64(dir + "/hist_g.npy", hg);
+        Npy.saveI64(dir + "/hist_h.npy", hh);
+
+        int64[] pshape = heap int64[1];
+        pshape[0] = (int64) 2;
+        Tensor<int64> par = Tensor.zeros<int64>(pshape);
+        par.flatSet((int64) 0, parentG);
+        par.flatSet((int64) 1, parentH);
+        Npy.saveI64(dir + "/parent.npy", par);
+
+        int64[] cshape = heap int64[1];
+        cshape[0] = nf + (int64) 1;
+        Tensor<int64> cp = Tensor.zeros<int64>(cshape);
+        int64 f = (int64) 0;
+        while (f <= nf) { cp.flatSet(f, cutPtrs.flatGet(f)); f = f + (int64) 1; }
+        Npy.saveI64(dir + "/cut_ptrs.npy", cp);
+
+        int64[] sshape = heap int64[1];
+        sshape[0] = (int64) 5;
+        Tensor<float64> cfg = Tensor.zeros<float64>(sshape);
+        cfg.flatSet((int64) 0, q.toFloatGrad);
+        cfg.flatSet((int64) 1, q.toFloatHess);
+        cfg.flatSet((int64) 2, lambda);
+        cfg.flatSet((int64) 3, alpha);
+        cfg.flatSet((int64) 4, minChildWeight);
+        Npy.saveF64(dir + "/scales.npy", cfg);
     }
 
     /**

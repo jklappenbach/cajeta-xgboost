@@ -15,12 +15,13 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
  * asserted node-by-node. Validates K-group growth and the builder on multiclass
  * gradients (mixed-sign grad, hess=0.375). Later rounds hit `expf` (U12).
  *
- * DISABLED — class **k=3 is fully bit-identical (31/31 nodes)**, proving K-group
- * growth + the objective are correct; k=1/k=2 match node count with a few residual
- * split-feature labels, and k=0 cascades from one (node 9 picks a different feature,
- * so its subtree — including split-vs-leaf counts, 31 vs 29 — diverges). All of it is
- * the same GPU split-selection near-tie as `tiny_reg_mcw10` node 14 / binary node 11,
- * deferred to U12. Re-enable when that GPU-selection semantics is resolved.
+ * DISABLED (gpu-numeric-fidelity 2.1.2) — the tile-granularity fix (SplitFinder's
+ * mcw-blind 32-bin tile argmax, which closed BinaryTreeTest node 11) MOVED this
+ * test's failure but did not clear it: previously a node-count divergence (29 vs
+ * 31 from node 9's split), now a leaf-weight mismatch (-1.12909 vs -1.15563) —
+ * an upstream split still differs. Same residual family as tiny_reg_mcw10
+ * node 14; awaiting the silicon replay (tools/gpuprobe/probe_evaluate_gain.cu).
+ * k=3 was already 31/31 (K-group growth + objective were never suspect).
  */
 public class MultiTreeTest {
 
@@ -29,8 +30,6 @@ public class MultiTreeTest {
     @Test
     @Disabled
     public void roundZeroClassTreesBitIdentical() {
-        // RE-GATED 2026-07-29, reason re-verified: split index 29 vs 31 with
-        // both SFU tables loaded — the Unit 2 near-tie, same as BinaryTreeTest.
         FixtureLoader f = FixtureLoader.open("tiny_multi");
         Tensor<float64> gAll = f.grad();   // [rounds, n, K] flat
         Tensor<float64> hAll = f.hess();
