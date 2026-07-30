@@ -56,18 +56,33 @@ NODE_NEW = """  dh::safe_cuda(cub::DeviceSegmentedReduce::Sum(
 void GPUHistEvaluator::CopyToHost"""
 
 
-def main() -> int:
-    path = f"{sys.argv[1]}/src/tree/gpu_hist/evaluate_splits.cu"
+def edit(path: str, pairs) -> None:
     src = open(path, newline="").read()
     eol = "\r\n" if "\r\n" in src else "\n"
     norm = src.replace("\r\n", "\n")
-    for old, new, tag in ((TILE_OLD, TILE_NEW, "tile"), (NODE_OLD, NODE_NEW, "node")):
+    for old, new, tag in pairs:
         if old not in norm:
-            print(f"NEEDLE MISSING: {tag}", file=sys.stderr)
-            return 1
+            print(f"NEEDLE MISSING in {path}: {tag}", file=sys.stderr)
+            sys.exit(1)
         norm = norm.replace(old, new, 1)
     open(path, "w", newline="").write(norm.replace("\n", eol) if eol == "\r\n" else norm)
-    print(f"instrumented {path} ({tagcount(norm)} probes)")
+
+
+def main() -> int:
+    root = sys.argv[1]
+    path = f"{root}/src/tree/gpu_hist/evaluate_splits.cu"
+    edit(path, ((TILE_OLD, TILE_NEW, "tile"), (NODE_OLD, NODE_NEW, "node")))
+    print(f"instrumented {path} (2 probes)")
+    # FindOpenMP's CUDA component fails under the VS generator on the runner;
+    # OpenMP is host-side only and the probe pins nthread=1, so let
+    # -DUSE_OPENMP=OFF actually stick instead of being FORCEd back on.
+    edit(
+        f"{root}/CMakeLists.txt",
+        (('set(USE_OPENMP ON CACHE BOOL "CUDA requires OpenMP" FORCE)',
+          '# [probe] USE_OPENMP left as passed (host-side only here)',
+          "openmp-force"),),
+    )
+    print("neutralized the CUDA-forces-OpenMP cache line")
     return 0
 
 
