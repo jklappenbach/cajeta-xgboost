@@ -8,17 +8,14 @@ import dev.cajeta.xgboost.sketch.Sketch;
  * U10.2.2 / spec §7.2 at scale — cajeta's pruned GK sketch vs the NVIDIA GPU reference
  * for `large_reg` (20k×50, every feature continuous → pruned to 256 bins).
  *
- * FINDING (2026-07-24, validated against the 3.1.2 fixture): the **structure is
- * bit-exact** — `cut_ptrs` (256 bins/feature) and both per-feature sentinels (the
- * min-value first cut and the max-value last cut) match to the bit, and the cuts are
- * strictly increasing. The **interior** quantile cut *values* drift by ≤ ~1 summary
- * rank (max abs 0.02, 99pct 0.002): XGBoost's GPU device sketch selects them via a
- * float prefix-scan + prune whose accumulation tips ~83% of interior boundaries one
- * distinct value away from the exact integer-summary `SetPrune` (the documented
- * algorithm cajeta faithfully ports, self-checked bit-for-bit in `SketchPruneTest`).
- * That is a GPU float-fidelity artifact of the same class as expf/split-selection →
- * **carried to U12** (GPU sketch fidelity). This test guards the bit-exact part; exact
- * interior parity is the U12 item.
+ * HISTORY: the first port ran the CPU `WQSummary::SetPrune` over a distinct
+ * summary and drifted on ~83% of interior picks (structure + endpoints exact).
+ * gpu-numeric-fidelity U3 established the device NEVER runs SetPrune: it prunes
+ * RAW per-row entries via `PruneImpl` + `BinarySearchQuery` (independent float32
+ * rank target per output, verbatim entry picks), collapses duplicates after
+ * (`ScanInput`), prunes again in `MakeCuts`, then `Unique` + `FixError`.
+ * `Sketch.cuts` now models that pipeline; `largeRegInteriorCutsBitIdentical`
+ * asserts every interior cut to the bit (plan 3.1.1).
  */
 public class LargeSketchTest {
 
@@ -59,6 +56,30 @@ public class LargeSketchTest {
                 c = c + (int64) 1;
             }
             ff = ff + (int64) 1;
+        }
+        return;
+    }
+
+    /** gpu-numeric-fidelity 3.1.1 — EVERY `large_reg` cut value bit-identical to
+     *  the NVIDIA 3.1.2 reference, interior included. */
+    @Test
+    public void largeRegInteriorCutsBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("large_reg");
+        Tensor<float64> x     = f.x();
+        Tensor<int64>   refCp = f.cutPtrs();
+        Tensor<float64> refCv = f.cutValues();
+        int64 n  = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+
+        int64[] cutPtrs = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cuts(x, n, nf, (int64) 256, cutPtrs);
+
+        int64 total = cutPtrs[nf];
+        Assert.that(total).isEqualTo(refCp.flatGet(nf));
+        int64 i = (int64) 0;
+        while (i < total) {
+            Assert.thatFloat((float64) cuts[i]).isEqualTo(refCv.flatGet(i));
+            i = i + (int64) 1;
         }
         return;
     }

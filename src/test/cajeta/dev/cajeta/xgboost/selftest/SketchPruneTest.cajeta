@@ -11,8 +11,9 @@ import dev.cajeta.xgboost.sketch.Sketch;
  *   f1: 40 distinct → Stage-C prune (to max_bin+1) only;
  *   f2: ~300 rows/distinct → Stage-A (in-Push budget) prune then Stage-C.
  * The expected cuts come from `prune_sketch_ref.py`, an INDEPENDENT float32
- * reimplementation of XGBoost's SetPrune + MakeCuts from the source — so this locks
- * cajeta's port to the algorithm bit-for-bit without needing an NVIDIA box. (Bit-exact
+ * reimplementation of the DEVICE pipeline (PruneImpl/BinarySearchQuery over raw
+ * entries, ScanInput collapse, Unique, FixError — gpu-numeric-fidelity U3) — so this
+ * locks cajeta's port to the algorithm bit-for-bit without needing an NVIDIA box. (Bit-exact
  * agreement with the real GPU 3.1.2 sketch is validated separately in LargeSketchTest
  * against the `large_reg` golden fixture.)
  */
