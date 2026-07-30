@@ -66,19 +66,14 @@ public class ConfigParityTest {
         ConfigParityTest.assertTreeMatches("tiny_reg_d6", (int64) 6, (float64) 0.0, (float64) 1.0);
     }
 
-    // DISABLED (gpu-numeric-fidelity 2.1.1) — one residual: node 14 splitIndices,
-    // reference feature 4 (96.521) vs port feature 1 (96.706). SplitFinder now
-    // implements the device's real three-level selection (mcw-BLIND 32-bin tile
-    // argmax → gated tile winner → cross-feature reduce; it fixed BinaryTreeTest
-    // node 11) and node 14 STILL diverges: feature 1's 96.706 boundary (gidx 318)
-    // wins its own tile [297,329) and passes mcw under every tie-break — the
-    // feature has no missing values, so even the gainL/gainR direction tie can't
-    // flip validity. Verified against the committed tools/gpuprobe/node14 dump.
-    // No CPU-derivable rule produces feature 4; awaiting the silicon replay
-    // (tools/gpuprobe/probe_evaluate_gain.cu on PHOENIX) to see whether the
-    // device's gain bits at gidx 318/981 differ or the divergence is upstream.
+    // RE-ENABLED (gpu-numeric-fidelity 2.1.1) — node 14 was the TILE-GRID
+    // ANCHOR: the fixture's exported bin space is the device's shifted by one
+    // (min-sentinel cut + 1-based bins), so the device's 32-boundary tiles land
+    // at b0+1+32k in port coordinates, not b0+32k. With the corrected anchor,
+    // feature 1's 96.706 candidates share a tile with an mcw-invalid 97.98
+    // winner — the tile dies at the gate (instrumented-3.1.2 silicon replay,
+    // 2026-07-30) and feature 4's 96.521 wins, exactly as recorded.
     @Test
-    @Disabled
     public void minChildWeightTreeBitIdentical() {
         ConfigParityTest.assertTreeMatches("tiny_reg_mcw10", (int64) 4, (float64) 0.0, (float64) 10.0);
     }

@@ -123,9 +123,20 @@ public final class SplitFinder {
             int64 missH = parentH - fSumH;
 
             // Stage A — the device's tiled argmax (levels 1+2 of the selection
-            // rule; see the class doc). Tiles are 32 boundaries wide, aligned to
-            // the feature's first bin (`scan_begin = gidx_begin`); the exclusive
-            // prefix runs across tiles (the device's SumCallbackOp).
+            // rule; see the class doc). Tiles are 32 boundaries wide, anchored at
+            // b0 + 1: the fixture export prepends each feature's min_fvalue to
+            // cut_values and bins.npy never occupies local bin 0, so PORT bin
+            // space is the device's shifted by one — device lane P maps to port
+            // boundary P + f + 1, and the device's tile grid (multiples of 32
+            // from ITS feature start) lands on b0+1+32k here. Port boundary
+            // p == b0 is a phantom the device never evaluates (skipped), and the
+            // first real boundary's threshold cutValues[b0] IS the device's
+            // min_fvalue. Established by the instrumented-3.1.2 silicon replay
+            // (gpu-numeric-fidelity 2.2.1): tiny_reg_mcw10 node 14's feature-1
+            // tile [298,330) holds both the valid 96.706 candidates and an
+            // mcw-invalid 97.98 winner — the tile dies at the gate, so the
+            // reference records feature 4 (96.521). The exclusive prefix runs
+            // across tiles (the device's SumCallbackOp).
             boolean featHas = false;
             float32 featGain = (float32) 0.0;
             int64 featP = (int64) 0;
@@ -135,7 +146,10 @@ public final class SplitFinder {
 
             int64 scanG = (int64) 0;           // exclusive prefix over the feature's bins
             int64 scanH = (int64) 0;
-            int64 tileStart = b0;
+            // Local bin 0 (port slot b0) is the min-sentinel — always empty
+            // (bins.npy is 1-based per feature), so starting the scan at b0+1
+            // drops nothing.
+            int64 tileStart = b0 + (int64) 1;
             while (tileStart < b1) {
                 int64 tileEnd = tileStart + (int64) 32;
                 if (tileEnd > b1) { tileEnd = b1; }

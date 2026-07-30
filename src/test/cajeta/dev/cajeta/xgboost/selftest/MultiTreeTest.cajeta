@@ -15,20 +15,17 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
  * asserted node-by-node. Validates K-group growth and the builder on multiclass
  * gradients (mixed-sign grad, hess=0.375). Later rounds hit `expf` (U12).
  *
- * DISABLED (gpu-numeric-fidelity 2.1.2) — the tile-granularity fix (SplitFinder's
- * mcw-blind 32-bin tile argmax, which closed BinaryTreeTest node 11) MOVED this
- * test's failure but did not clear it: previously a node-count divergence (29 vs
- * 31 from node 9's split), now a leaf-weight mismatch (-1.12909 vs -1.15563) —
- * an upstream split still differs. Same residual family as tiny_reg_mcw10
- * node 14; awaiting the silicon replay (tools/gpuprobe/probe_evaluate_gain.cu).
- * k=3 was already 31/31 (K-group growth + objective were never suspect).
+ * RE-ENABLED (gpu-numeric-fidelity 2.1.2) — the residuals were the tile-grid
+ * anchor: the device's 32-boundary tiles land at b0+1+32k in the exported bin
+ * space (min-sentinel cut + 1-based bins), not b0+32k. See SplitFinder.findBest
+ * and the instrumented-3.1.2 silicon replay (2026-07-30). k=3 was already
+ * 31/31 (K-group growth + objective were never suspect).
  */
 public class MultiTreeTest {
 
     public MultiTreeTest() { return; }
 
     @Test
-    @Disabled
     public void roundZeroClassTreesBitIdentical() {
         FixtureLoader f = FixtureLoader.open("tiny_multi");
         Tensor<float64> gAll = f.grad();   // [rounds, n, K] flat
