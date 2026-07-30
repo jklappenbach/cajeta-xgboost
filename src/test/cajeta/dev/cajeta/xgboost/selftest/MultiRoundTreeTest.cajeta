@@ -1,0 +1,81 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.Tree;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+
+/**
+ * gpu-numeric-fidelity 1.1.3 — rounds-1+ tree parity against the NVIDIA
+ * reference, grown from the REAL device gradients (`device_grad/device_hess`,
+ * captured on PHOENIX by probe_device_grads.cu — verbatim 3.1.2 objective
+ * kernels on real silicon). Round r's tree consumes the gradients the device
+ * computes FROM margins[r-1] (= device capture row r-1), so each round is
+ * asserted independently of the port's own margin accumulation.
+ *
+ * Round 0 stays with BinaryTreeTest / MultiTreeTest (analytic base-margin
+ * gradients, no capture needed). Together they close the "parity every round"
+ * half of 1.3.1: binary rounds 0-2 and all K=4 softmax class trees rounds 0-2
+ * bit-identical — topology, split feature, threshold, default direction,
+ * base_weight.
+ */
+public class MultiRoundTreeTest {
+
+    public MultiRoundTreeTest() { return; }
+
+    @Test
+    public void binaryRoundsOnePlusBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("tiny_binary");
+        int64 rounds = f.deviceGrad().shapeAt(0);
+
+        int32 r = (int32) 1;
+        while ((int64) r < rounds) {
+            float64[] g = f.deviceGradRound(r - (int32) 1);
+            float64[] h = f.deviceHessRound(r - (int32) 1);
+            int64 n = (int64) g.count();
+
+            Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+                                          (int64) 4, (int64) 0,
+                                          (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                          (float64) 0.3);
+            TreeAsserts.assertMatches(t, f, r);
+            r = r + (int32) 1;
+        }
+        return;
+    }
+
+    @Test
+    public void softmaxRoundsOnePlusClassTreesBitIdentical() {
+        FixtureLoader f = FixtureLoader.open("tiny_multi");
+        Tensor<float64> devG = f.deviceGrad();   // [rounds, n, K] flat
+        Tensor<float64> devH = f.deviceHess();
+        int64 rounds = devG.shapeAt(0);
+        int64 n = devG.shapeAt(1);
+        int64 K = devG.shapeAt(2);
+
+        int64 r = (int64) 1;
+        while (r < rounds) {
+            int64 base = (r - (int64) 1) * n * K;   // capture row r-1 feeds round r
+            int64 k = (int64) 0;
+            while (k < K) {
+                float64[] gk = heap float64[n];
+                float64[] hk = heap float64[n];
+                int64 i = (int64) 0;
+                while (i < n) {
+                    gk[i] = devG.flatGet(base + i * K + k);
+                    hk[i] = devH.flatGet(base + i * K + k);
+                    i = i + (int64) 1;
+                }
+
+                Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), gk, hk, n,
+                                              (int64) 4, (int64) 0,
+                                              (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                              (float64) 0.3);
+                TreeAsserts.assertMatches(t, f, (int32) (r * K + k));
+                k = k + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return;
+    }
+}

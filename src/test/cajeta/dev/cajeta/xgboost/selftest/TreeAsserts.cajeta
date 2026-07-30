@@ -1,0 +1,45 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.tree.Tree;
+
+/**
+ * Node-by-node bit-identity assertion of a grown {@link Tree} against a
+ * fixture's recorded reference tree `t<idx>` — topology, split feature,
+ * float32 threshold, default direction, and base_weight (the shared loop of
+ * BinaryTreeTest / MultiTreeTest / ConfigParityTest, factored for the
+ * multi-round tests).
+ */
+public final class TreeAsserts {
+
+    public TreeAsserts() { return; }
+
+    public static void assertMatches(Tree t, FixtureLoader f, int32 treeIdx) {
+        Tensor<int32>   rLC = f.treeLeftChildren(treeIdx);
+        Tensor<int32>   rRC = f.treeRightChildren(treeIdx);
+        Tensor<int32>   rSI = f.treeSplitIndices(treeIdx);
+        Tensor<float32> rSC = f.treeSplitConditions(treeIdx);
+        Tensor<int32>   rDL = f.treeDefaultLeft(treeIdx);
+        Tensor<float32> rBW = f.treeBaseWeights(treeIdx);
+
+        int64 refCount = rBW.shapeAt(0);
+        Assert.that(t.nodeCount).isEqualTo(refCount);
+
+        int64 nid = (int64) 0;
+        while (nid < refCount) {
+            Assert.that(t.leftChildren[nid]).isEqualTo((int64) rLC.flatGet(nid));
+            Assert.that(t.rightChildren[nid]).isEqualTo((int64) rRC.flatGet(nid));
+            boolean refLeaf = rLC.flatGet(nid) == (int32) -1;
+            if (!refLeaf) {
+                Assert.that(t.splitIndices[nid]).isEqualTo((int64) rSI.flatGet(nid));
+                Assert.thatFloat((float64) t.splitConditions[nid]).isEqualTo((float64) rSC.flatGet(nid));
+                boolean refLeft = rDL.flatGet(nid) == (int32) 1;
+                Assert.isTrue(t.defaultLeft[nid] == refLeft);
+            }
+            Assert.thatFloat((float64) t.baseWeights[nid]).isEqualTo((float64) rBW.flatGet(nid));
+            nid = nid + (int64) 1;
+        }
+        return;
+    }
+}

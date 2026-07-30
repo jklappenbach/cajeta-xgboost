@@ -49,6 +49,12 @@ public final class FixtureLoader {
     public #float64[] gradRound(int32 r) { return this.round(this.grad(), r); }
     public #float64[] hessRound(int32 r) { return this.round(this.hess(), r); }
 
+    /** Row `r` of the REAL device grad/hess capture (see {@link #deviceGrad}):
+     *  the gradients the device computes FROM margins[r] — i.e. the input to
+     *  round r+1's tree. */
+    public #float64[] deviceGradRound(int32 r) { return this.round(this.deviceGrad(), r); }
+    public #float64[] deviceHessRound(int32 r) { return this.round(this.deviceHess(), r); }
+
     #float64[] round(Tensor<float64> t, int32 r) {
         int64 n = t.shapeAt(1);
         int64 base = (int64) r * n;
