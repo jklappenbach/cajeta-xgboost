@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Apply the evaluate-agent instrumentation to xgboost v3.1.2 source.
+
+EOL-agnostic replacement (git apply kept tripping over Git-for-Windows CRLF
+materialization on the runner). Same edits as instrument_eval_3.1.2.patch:
+print every tile winner reaching DeviceSplitCandidate::Update (accept/reject
+via before/after loss_chg) and every post-reduce per-node winner.
+
+    python apply_instrumentation.py <xgboost-src-root>
+"""
+import sys
+
+TILE_OLD = """        GradientPairInt64 left = missing_left ? bin + missing : bin;
+        GradientPairInt64 right = parent_sum - left;
+        best_split->Update(gain, missing_left ? kLeftDir : kRightDir, fvalue, fidx, left, right,
+                           false, param, rounding);
+      }"""
+
+TILE_NEW = """        GradientPairInt64 left = missing_left ? bin + missing : bin;
+        GradientPairInt64 right = parent_sum - left;
+        float probe_before = best_split->loss_chg;
+        best_split->Update(gain, missing_left ? kLeftDir : kRightDir, fvalue, fidx, left, right,
+                           false, param, rounding);
+        printf("[tile] nidx=%d fidx=%d tile=%d gidx=%d gain=%.9g ml=%d lh=%lld rh=%lld before=%.9g after=%.9g\\n",
+               nidx, fidx, scan_begin, split_gidx, static_cast<double>(gain),
+               static_cast<int>(missing_left), static_cast<long long>(left.GetQuantisedHess()),
+               static_cast<long long>(right.GetQuantisedHess()), static_cast<double>(probe_before),
+               static_cast<double>(best_split->loss_chg));
+      }"""
+
+NODE_OLD = """  dh::safe_cuda(cub::DeviceSegmentedReduce::Sum(
+      temp.data().get(), temp_storage_bytes, feature_best_splits.data(), out_splits.data(),
+      num_segments, reduce_offset, reduce_offset + 1, ctx->CUDACtx()->Stream()));
+}
+
+void GPUHistEvaluator::CopyToHost"""
+
+NODE_NEW = """  dh::safe_cuda(cub::DeviceSegmentedReduce::Sum(
+      temp.data().get(), temp_storage_bytes, feature_best_splits.data(), out_splits.data(),
+      num_segments, reduce_offset, reduce_offset + 1, ctx->CUDACtx()->Stream()));
+
+  {  // [probe] print each reduced per-node winner
+    auto d_out = out_splits;
+    auto d_in = d_inputs;
+    dh::LaunchN(out_splits.size(), ctx->CUDACtx()->Stream(), [=] __device__(size_t i) {
+      auto const &s = d_out[i];
+      printf("[node] nidx=%d findex=%d loss_chg=%.9g fvalue=%.9g dir=%d lh=%lld rh=%lld\\n",
+             d_in[i].nidx, s.findex, static_cast<double>(s.loss_chg),
+             static_cast<double>(s.fvalue), static_cast<int>(s.dir),
+             static_cast<long long>(s.left_sum.GetQuantisedHess()),
+             static_cast<long long>(s.right_sum.GetQuantisedHess()));
+    });
+  }
+}
+
+void GPUHistEvaluator::CopyToHost"""
+
+
+def main() -> int:
+    path = f"{sys.argv[1]}/src/tree/gpu_hist/evaluate_splits.cu"
+    src = open(path, newline="").read()
+    eol = "\r\n" if "\r\n" in src else "\n"
+    norm = src.replace("\r\n", "\n")
+    for old, new, tag in ((TILE_OLD, TILE_NEW, "tile"), (NODE_OLD, NODE_NEW, "node")):
+        if old not in norm:
+            print(f"NEEDLE MISSING: {tag}", file=sys.stderr)
+            return 1
+        norm = norm.replace(old, new, 1)
+    open(path, "w", newline="").write(norm.replace("\n", eol) if eol == "\r\n" else norm)
+    print(f"instrumented {path} ({tagcount(norm)} probes)")
+    return 0
+
+
+def tagcount(s: str) -> int:
+    return s.count("[tile]") + s.count("[node]")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
