@@ -68,11 +68,38 @@ def edit(path: str, pairs) -> None:
     open(path, "w", newline="").write(norm.replace("\n", eol) if eol == "\r\n" else norm)
 
 
+PRUNE_OLD = """    d_out[idx] = BinarySearchQuery(it, it + in_column.size(), q);
+  });"""
+
+PRUNE_NEW = """    d_out[idx] = BinarySearchQuery(it, it + in_column.size(), q);
+    if (column_id == 0 && (to <= 300 || idx < 8 || (idx & 511) == 0)) {
+      auto e = d_out[idx];
+      printf("[prune] to=%d n=%d idx=%d q=%.9g rmin=%.9g rmax=%.9g wmin=%.9g v=%.9g\\n",
+             (int)to, (int)in_column.size(), (int)idx, (double)q,
+             (double)e.rmin, (double)e.rmax, (double)e.wmin, (double)e.value);
+    }
+  });"""
+
+PRUNE_HOST_OLD = """  auto d_columns_ptr_in = this->columns_ptr_.ConstDeviceSpan();"""
+
+PRUNE_HOST_NEW = """  fprintf(stderr, "[prune-host] col0_in=%d to=%d\\n", (int)this->Column(0).size(), (int)to);
+  auto d_columns_ptr_in = this->columns_ptr_.ConstDeviceSpan();"""
+
+
 def main() -> int:
     root = sys.argv[1]
-    path = f"{root}/src/tree/gpu_hist/evaluate_splits.cu"
-    edit(path, ((TILE_OLD, TILE_NEW, "tile"), (NODE_OLD, NODE_NEW, "node")))
-    print(f"instrumented {path} (2 probes)")
+    mode = sys.argv[2] if len(sys.argv) > 2 else "tiles"
+    if mode == "tiles":
+        path = f"{root}/src/tree/gpu_hist/evaluate_splits.cu"
+        edit(path, ((TILE_OLD, TILE_NEW, "tile"), (NODE_OLD, NODE_NEW, "node")))
+        print(f"instrumented {path} (2 probes)")
+    elif mode == "sketch":
+        path = f"{root}/src/common/quantile.cu"
+        edit(path, ((PRUNE_OLD, PRUNE_NEW, "prune"), (PRUNE_HOST_OLD, PRUNE_HOST_NEW, "prune-host")))
+        print(f"instrumented {path} (sketch probes)")
+    else:
+        print(f"unknown mode {mode}", file=sys.stderr)
+        return 1
     # FindOpenMP's CUDA component fails under the VS generator on the runner;
     # OpenMP is host-side only and the probe pins nthread=1, so let
     # -DUSE_OPENMP=OFF actually stick instead of being FORCEd back on.
