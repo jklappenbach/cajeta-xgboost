@@ -24,7 +24,11 @@ def main() -> int:
     X = np.load(f"{fdir}/X.npy")
     y = np.load(f"{fdir}/y.npy")
     params = json.load(open(f"{fdir}/manifest.json"))["params"]
-    d = xgb.DMatrix(X, label=y)
+    # QuantileDMatrix, exactly as generate.py builds the fixtures — the GPU
+    # sketch path differs between DMatrix and QuantileDMatrix ingestion (a
+    # plain-DMatrix retrain of large_reg mismatches the recorded trees).
+    d = xgb.QuantileDMatrix(X, label=y, missing=np.nan,
+                            max_bin=int(params.get("max_bin", 256)))
     bst = xgb.train(params, d, num_boost_round=3)
 
     print(f"xgboost {xgb.__version__}  device={params.get('device')}")
