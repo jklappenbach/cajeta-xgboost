@@ -225,7 +225,12 @@ __global__ void k_evaluate(const int64_t* hist_g, const int64_t* hist_h,
         __shfl_sync(0xffffffff, (long long) local_sum.h, 0)};
     GradientPairInt64 missing = parent_sum - feature_sum;
 
-    DeviceSplitCandidate best;
+    // Block-shared per-feature candidate, as the reference keeps it — a
+    // per-thread copy would only ever surface lane 0's tiles (first-round
+    // probe bug: every feature reported -FLT_MAX).
+    __shared__ DeviceSplitCandidate best;
+    if (threadIdx.x == 0) { best = DeviceSplitCandidate{}; }
+    __syncwarp();
     SumCallbackOp<GradientPairInt64> prefix_op;
 
     // Numerical (evaluate_splits.cu:113-148).
