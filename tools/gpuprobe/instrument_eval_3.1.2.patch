@@ -1,0 +1,50 @@
+Instrumentation for xgboost v3.1.2 (dcb2f4e32) — gpu-numeric-fidelity 2.2.1.
+
+Prints every tile winner reaching DeviceSplitCandidate::Update (with the
+accept/reject outcome via before/after loss_chg) and every post-reduce
+per-node winner. Applied by the cajeta repo's gpu-probe workflow
+(probe=instrumented-eval) before building xgboost from source on PHOENIX;
+the built xgboost.dll replaces the wheel's, and train_repro.py reruns the
+tiny_reg_mcw10 fixture. Decides why the real binary records feature 4 at
+node 14 while the verbatim kernel transcription (and the port) score
+feature 1 higher from provably identical input.
+
+diff --git a/src/tree/gpu_hist/evaluate_splits.cu b/src/tree/gpu_hist/evaluate_splits.cu
+index e1d6d2e67..c677af12b 100644
+--- a/src/tree/gpu_hist/evaluate_splits.cu
++++ b/src/tree/gpu_hist/evaluate_splits.cu
+@@ -139,8 +139,14 @@ class EvaluateSplitAgent {
+             split_gidx < static_cast<int>(gidx_begin) ? min_fvalue : feature_values[split_gidx];
+         GradientPairInt64 left = missing_left ? bin + missing : bin;
+         GradientPairInt64 right = parent_sum - left;
++        float probe_before = best_split->loss_chg;
+         best_split->Update(gain, missing_left ? kLeftDir : kRightDir, fvalue, fidx, left, right,
+                            false, param, rounding);
++        printf("[tile] nidx=%d fidx=%d tile=%d gidx=%d gain=%.9g ml=%d lh=%lld rh=%lld before=%.9g after=%.9g\n",
++               nidx, fidx, scan_begin, split_gidx, static_cast<double>(gain),
++               static_cast<int>(missing_left), static_cast<long long>(left.GetQuantisedHess()),
++               static_cast<long long>(right.GetQuantisedHess()), static_cast<double>(probe_before),
++               static_cast<double>(best_split->loss_chg));
+       }
+ 
+       __syncwarp();
+@@ -385,6 +391,19 @@ void GPUHistEvaluator::LaunchEvaluateSplits(
+   dh::safe_cuda(cub::DeviceSegmentedReduce::Sum(
+       temp.data().get(), temp_storage_bytes, feature_best_splits.data(), out_splits.data(),
+       num_segments, reduce_offset, reduce_offset + 1, ctx->CUDACtx()->Stream()));
++
++  {  // [probe] print each reduced per-node winner
++    auto d_out = out_splits;
++    auto d_in = d_inputs;
++    dh::LaunchN(out_splits.size(), ctx->CUDACtx()->Stream(), [=] __device__(size_t i) {
++      auto const &s = d_out[i];
++      printf("[node] nidx=%d findex=%d loss_chg=%.9g fvalue=%.9g dir=%d lh=%lld rh=%lld\n",
++             d_in[i].nidx, s.findex, static_cast<double>(s.loss_chg),
++             static_cast<double>(s.fvalue), static_cast<int>(s.dir),
++             static_cast<long long>(s.left_sum.GetQuantisedHess()),
++             static_cast<long long>(s.right_sum.GetQuantisedHess()));
++    });
++  }
+ }
+ 
+ void GPUHistEvaluator::CopyToHost(const std::vector<bst_node_t> &nidx) {
