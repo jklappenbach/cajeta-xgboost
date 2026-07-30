@@ -82,7 +82,8 @@ PRUNE_NEW = """    d_out[idx] = BinarySearchQuery(it, it + in_column.size(), q);
 
 PRUNE_HOST_OLD = """  auto d_columns_ptr_in = this->columns_ptr_.ConstDeviceSpan();"""
 
-PRUNE_HOST_NEW = """  fprintf(stderr, "[prune-host] col0_in=%d to=%d\\n", (int)this->Column(0).size(), (int)to);
+PRUNE_HOST_NEW = """  printf("[prune-host] col0_in=%d to=%d\\n", (int)this->Column(0).size(), (int)to);
+  fflush(stdout);
   auto d_columns_ptr_in = this->columns_ptr_.ConstDeviceSpan();"""
 
 
