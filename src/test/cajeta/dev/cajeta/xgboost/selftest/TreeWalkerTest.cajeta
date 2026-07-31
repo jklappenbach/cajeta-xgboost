@@ -2,7 +2,7 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
-import dev.cajeta.xgboost.predict.Predictor;
+import dev.cajeta.xgboost.predict.TreeWalker;
 
 /**
  * U8.1.1 — the tree-walk predictor bit-identical to XGBoost's inference. Walks the
@@ -12,25 +12,25 @@ import dev.cajeta.xgboost.predict.Predictor;
  * For `reg:squarederror` the link is the identity, so the margin sum must equal both
  * `margins.npy` (last round) and `preds.npy` bit-for-bit — no transcendental.
  */
-public class PredictorTest {
+public class TreeWalkerTest {
 
     public PredictorTest() { return; }
 
     @Test
     public void regMarginBitIdenticalToReference() {
-        PredictorTest.checkMargin("tiny_reg", (float32) 0.5, true);
+        TreeWalkerTest.checkMargin("tiny_reg", (float32) 0.5, true);
     }
 
     @Test
     public void regMissingMarginBitIdenticalToReference() {
-        PredictorTest.checkMargin("tiny_reg_missing", (float32) 0.5, true);   // NaN → default
+        TreeWalkerTest.checkMargin("tiny_reg_missing", (float32) 0.5, true);   // NaN → default
     }
 
     @Test
     public void binaryRawMarginBitIdenticalToReference() {
         // base = logit(0.5) = 0; the raw margin (pre-sigmoid) is expf-free → bit-exact.
         // Final probability = sigmoid(margin) hits expf (U12), so check margin only.
-        PredictorTest.checkMargin("tiny_binary", (float32) 0.0, false);
+        TreeWalkerTest.checkMargin("tiny_binary", (float32) 0.0, false);
     }
 
     static void checkMargin(String fixture, float32 base, boolean checkPreds) {
@@ -82,7 +82,7 @@ public class PredictorTest {
             float32 mrg = base;
             t = (int64) 0;
             while (t < rounds) {
-                mrg = mrg + Predictor.leaf(lc, rc, si, sc, dl, t * cap, xrow);
+                mrg = mrg + TreeWalker.leaf(lc, rc, si, sc, dl, t * cap, xrow);
                 t = t + (int64) 1;
             }
             Assert.thatFloat((float64) mrg).isEqualTo(margins.flatGet(lastOff + r));

@@ -15,7 +15,7 @@ import dev.cajeta.xgboost.booster.Model;
  * for multiclass) is applied by the caller — the `expf`-bearing links are the U12
  * transcendental-fidelity item; the raw margin here is `expf`-free and bit-exact.
  */
-public final class Predictor {
+public final class TreeWalker {
 
     /**
      * Walk one tree (node arrays, tree base at `off`, local node ids) on a row's
@@ -34,7 +34,7 @@ public final class Predictor {
             int64 g = off + local;
             float32 v = (float32) xrow[si[g]];
             boolean goLeft;
-            if (Predictor.isNaN(v)) { goLeft = dl[g]; }   // missing → default direction
+            if (TreeWalker.isNaN(v)) { goLeft = dl[g]; }   // missing → default direction
             else { goLeft = v < sc[g]; }
             local = goLeft ? lc[g] : rc[g];
         }
@@ -54,7 +54,7 @@ public final class Predictor {
             float32 mrg = m.baseMargin;
             int64 t = (int64) 0;
             while (t < m.rounds) {
-                mrg = mrg + Predictor.leaf(m.leftChildren, m.rightChildren, m.splitIndices,
+                mrg = mrg + TreeWalker.leaf(m.leftChildren, m.rightChildren, m.splitIndices,
                                            m.splitConditions, m.defaultLeft, t * m.cap, xrow);
                 t = t + (int64) 1;
             }

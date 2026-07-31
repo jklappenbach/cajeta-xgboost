@@ -5,7 +5,7 @@ import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.booster.ModelIO;
-import dev.cajeta.xgboost.predict.Predictor;
+import dev.cajeta.xgboost.predict.TreeWalker;
 
 /**
  * U8.1.2 — serialize → load → predict bit-identical (§5.2). Trains the `tiny_reg`
@@ -46,8 +46,8 @@ public class SerializationTest {
 
         float32[] o1 = heap float32[n];
         float32[] o2 = heap float32[n];
-        Predictor.marginSingle(m,  x, n, nf, o1);
-        Predictor.marginSingle(m2, x, n, nf, o2);
+        TreeWalker.marginSingle(m,  x, n, nf, o1);
+        TreeWalker.marginSingle(m2, x, n, nf, o2);
 
         int64 r = (int64) 0;
         while (r < n) {

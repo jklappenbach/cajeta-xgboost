@@ -3,7 +3,7 @@ package dev.cajeta.xgboost.api;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.booster.Model;
-import dev.cajeta.xgboost.predict.Predictor;
+import dev.cajeta.xgboost.predict.TreeWalker;
 import dev.cajeta.xgboost.sketch.Sketch;
 import dev.cajeta.xgboost.sketch.Binner;
 
@@ -99,7 +99,7 @@ public final class GBDT {
      */
     public static #float32[] predict(Model m, Tensor<float64> x, int64 n, int64 nf) {
         float32[] out = heap float32[n];
-        Predictor.marginSingle(m, x, n, nf, out);
+        TreeWalker.marginSingle(m, x, n, nf, out);
         return #out;
     }
 }
