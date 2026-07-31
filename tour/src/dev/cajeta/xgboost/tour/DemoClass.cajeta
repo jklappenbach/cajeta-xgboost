@@ -1,0 +1,55 @@
+package dev.cajeta.xgboost.tour;
+
+// Base class for every demo in the cajeta-xgboost tour. Each demo extends
+// DemoClass and overrides execute(); Tour.main builds one instance of each
+// and walks the list — adding a demo means a new file plus one
+// `demos.add(heap NewDemo());` line.
+//
+// Demos PRINT what they demonstrate and CHECK it: the tour doubles as a
+// smoke test and exits non-zero the moment a demonstrated claim stops
+// being true. That matters more here than in most tours — this library's
+// whole thesis is bit-exactness, and a claim about bits is either checked
+// or worthless.
+//
+// (Cajeta has no `abstract` keyword yet, so execute() lands as an empty
+// concrete method every subclass overrides.)
+public class DemoClass {
+
+    public static int32 checks = 0;
+    public static int32 failures = 0;
+
+    public void execute() {
+    }
+
+    public void check(boolean ok, String what) {
+        DemoClass.checks = DemoClass.checks + 1;
+        if (ok) {
+            System.stdout.println("   ok: " + what);
+        } else {
+            DemoClass.failures = DemoClass.failures + 1;
+            System.stdout.println(" FAIL: " + what);
+        }
+    }
+
+    public void section(String title) {
+        System.stdout.println("");
+        System.stdout.println("== " + title + " ==");
+    }
+
+    /** Bit-exact float32 comparison — the only equality this library respects. */
+    public static boolean sameBits(float32 a, float32 b) {
+        return Cajeta.f32ToBits(a) == Cajeta.f32ToBits(b);
+    }
+
+    /** Bit-exact comparison of two float32 vectors. */
+    public static boolean sameBitsAll(float32[] a, float32[] b, int64 n) {
+        int64 i = (int64) 0;
+        while (i < n) {
+            if (Cajeta.f32ToBits(a[i]) != Cajeta.f32ToBits(b[i])) {
+                return false;
+            }
+            i = i + (int64) 1;
+        }
+        return true;
+    }
+}

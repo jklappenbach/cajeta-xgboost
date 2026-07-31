@@ -1,0 +1,200 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Sketch;
+import dev.cajeta.xgboost.sketch.Binner;
+import dev.cajeta.xgboost.objective.SquaredError;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.SplitFinder;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+import dev.cajeta.xgboost.tree.Tree;
+import dev.cajeta.xgboost.tree.NodeStats;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+
+// Under the hood — one boosting round, by hand, through the pieces
+// `Booster.train` calls. This is where the library's thesis lives: the
+// histogram is accumulated in INT64 FIXED POINT, not float, so summation
+// is associative and the result cannot depend on thread order — which is
+// what makes CPU and GPU produce identical trees.
+//
+//   SquaredError.gradHess     per-row (grad, hess) from the current margins
+//   GradientQuantiser.build   picks the fixed-point scale from that round's
+//                             gradient magnitudes; fixedGrad/floatGrad convert
+//   Histogram.buildAll        sum quantized pairs into per-bin buckets
+//   Histogram.subtract        a sibling's histogram = parent - built child
+//                             (exact in fixed point — the GPU's trick)
+//   SplitFinder.findBest      the tiled argmax over boundaries -> Split
+//   SplitFinder.calcGain /
+//     leafWeight              XGBoost's CalcGain / CalcWeight formulas
+//   TreeBuilder.growTree      the whole tree, as a standalone Tree
+//   NodeStats.over            the float64 (G, H) reduction for a node
+//   Booster.train             the loop itself, with per-round margin history
+public class InternalsDemo extends DemoClass {
+
+    public void execute() {
+        this.section("9. Under the hood — one round through the fixed-point machinery");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+
+        // Prep (PrepDemo's path, compactly).
+        int64 maxBin = (int64) 32;
+        int64[] cutPtrsA = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cuts(x, n, nf, maxBin, cutPtrsA);
+        int64 total = cutPtrsA[nf];
+        float64[] cutVals = heap float64[total];
+        int64 c = (int64) 0;
+        while (c < total) { cutVals[c] = (float64) cuts[c]; c = c + (int64) 1; }
+        int64[] cvShape = heap int64[1]; cvShape[0] = total;
+        Tensor<float64> cutValuesT = Tensor.of<float64>(cutVals, cvShape);
+        int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;
+        Tensor<int64> cutPtrsT = Tensor.of<int64>(cutPtrsA, cpShape);
+        int32[] binsA = Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
+        int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
+        Tensor<int32> binsT = Tensor.of<int32>(binsA, bShape);
+
+        // (1) Round 1's gradients: every margin starts at the base score.
+        float32 base = SquaredError.baseMargin((float64) 0.5);
+        float32[] margin = heap float32[n];
+        int64 i = (int64) 0;
+        while (i < n) { margin[i] = base; i = i + (int64) 1; }
+        float64[] grad = heap float64[n];
+        float64[] hess = heap float64[n];
+        SquaredError.gradHess(margin, y, n, grad, hess);
+        this.check(hess[0] == (float64) 1.0,
+            "squared error's hessian is 1 for every row");
+
+        // (2) The node's float64 (G, H) reduction — what the root's weight
+        //     and gain are computed from.
+        NodeStats root = NodeStats.over(grad, hess, n);
+        System.stdout.println("   root sums: G = " + root.g + ", H = " + root.h);
+        this.check(root.h == (float64) n,
+            "H over all rows == n (hessian 1 per row)");
+
+        // (3) The quantiser: a per-round scale chosen from the gradient
+        //     magnitudes, so the fixed-point histogram cannot overflow.
+        GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
+        int64 qg = q.fixedGrad(grad[0]);
+        float64 backAgain = q.floatGrad(qg);
+        System.stdout.println("   quantiser: grad[0] " + grad[0] + " -> fixed "
+            + qg + " -> " + backAgain);
+        this.check(backAgain > grad[0] - (float64) 0.01
+            && backAgain < grad[0] + (float64) 0.01,
+            "fixedGrad/floatGrad round-trip within the chosen scale");
+
+        // (4) The histogram: int64 buckets per global bin. Integer addition
+        //     is associative, so ANY accumulation order gives these bits.
+        Histogram hist = Histogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
+        System.stdout.println("   histogram: " + hist.nbins + " bins over "
+            + hist.nf + " features; totalH(fixed) = " + hist.totalH);
+        this.check(hist.nbins == total && hist.nf == nf,
+            "one bucket per global bin, framed by cutPtrs");
+        int64 featureSumH = hist.featureSumH(cutPtrsT, Data.SQFT());
+        this.check(featureSumH > (int64) 0,
+            "sqft_living's bins carry the rows that have that feature");
+
+        // (5) The subtraction trick: build ONE child, get its sibling by
+        //     subtracting from the parent. Exact in fixed point — this is
+        //     the halving that makes GPU histogram building affordable.
+        int64 half = n / (int64) 2;
+        int64[] leftRows = heap int64[half];
+        int64 r2 = (int64) 0;
+        while (r2 < half) { leftRows[r2] = r2; r2 = r2 + (int64) 1; }
+        Histogram leftH = Histogram.buildRows(binsT, cutPtrsT, q, grad, hess,
+                                              leftRows, half);
+        Histogram rightH = Histogram.subtract(hist, leftH);
+        int64[] rightRows = heap int64[n - half];
+        int64 r3 = half;
+        while (r3 < n) { rightRows[r3 - half] = r3; r3 = r3 + (int64) 1; }
+        Histogram rightDirect = Histogram.buildRows(binsT, cutPtrsT, q, grad, hess,
+                                                    rightRows, n - half);
+        boolean identical = true;
+        int64 b = (int64) 0;
+        while (b < hist.nbins) {
+            if (rightH.g[b] != rightDirect.g[b] || rightH.h[b] != rightDirect.h[b]) {
+                identical = false;
+            }
+            b = b + (int64) 1;
+        }
+        this.check(identical,
+            "parent - left == right, bin for bin (the subtraction trick is EXACT)");
+
+        // (6) The split search: the tiled argmax over every boundary.
+        Split best = SplitFinder.findBest(hist, cutPtrsT, cutValuesT, q,
+                                          (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        this.check(best.valid, "the root found a valid split");
+        System.stdout.println("   best root split: " + Data.featureName(best.findex)
+            + " < " + (float64) best.fvalue + ", gain " + (float64) best.gain
+            + ", missing goes " + (best.defaultLeft ? "left" : "right"));
+        this.check(best.gain > (float32) 0.0,
+            "the chosen split has positive gain");
+        this.check(best.leftH + best.rightH <= hist.totalH,
+            "the children's hessian mass comes out of the parent's");
+
+        // (7) The formulas themselves, on the root's own sums.
+        float32 rootGain = SplitFinder.calcGain(q, hist.totalG, hist.totalH,
+                                                (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        float32 rootWeight = SplitFinder.leafWeight(q, hist.totalG, hist.totalH,
+                                                    (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        System.stdout.println("   root: CalcGain = " + (float64) rootGain
+            + ", CalcWeight = " + (float64) rootWeight);
+        this.check(rootGain > (float32) 0.0,
+            "CalcGain(G,H) = G^2/(H+lambda) — the parent's own gain");
+        // Every margin starts at 0.5 while prices are in the hundreds, so
+        // grad = margin - label is very negative, G < 0, and the leaf
+        // weight -G/(H+lambda) is positive: the first tree lifts every
+        // prediction toward the label scale.
+        this.check(rootWeight > (float32) 0.0,
+            "CalcWeight = -G/(H+lambda) > 0 here: round 1 lifts margins toward price");
+
+        // (8) A whole tree, standalone — the Tree object rather than the
+        //     forest slice the booster keeps.
+        Tree t = TreeBuilder.growTree(binsT, cutPtrsT, cutValuesT, grad, hess, n,
+                                      (int64) 3, (int64) 0,
+                                      (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                      (float64) 1.0, (float64) 0.3);
+        System.stdout.println("   grown tree: " + t.nodeCount + " nodes, root splits "
+            + Data.featureName(t.splitIndices[0]));
+        this.check(t.nodeCount > (int64) 1, "growTree produced a real tree");
+        this.check(t.splitIndices[0] == best.findex,
+            "the tree's root split agrees with findBest on the same histogram");
+        this.check(TreeBuilder.capacity((int64) 3) == (int64) 16,
+            "capacity(maxDepth) sizes the backing arrays: 2^(d+1)");
+
+        // (9) The loop: Booster.train, with the per-round margin history the
+        //     boosting update is made of. History row r holds every row's
+        //     cumulative margin after round r — the last slice IS the
+        //     prediction, which is exactly what GBDT.predict recomputes.
+        int64 rounds = (int64) 4;
+        float32[] history = heap float32[rounds * n];
+        Model m = Booster.train(binsT, cutPtrsT, cutValuesT, y, n, rounds,
+                                (int64) 3, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5, history);
+        this.check(m.rounds == rounds, "the booster grew one tree per round");
+        float64 err0 = InternalsDemo.mae(history, (int64) 0, y, n);
+        float64 errLast = InternalsDemo.mae(history, rounds - (int64) 1, y, n);
+        System.stdout.println("   margin history MAE: after round 1 = " + err0
+            + ", after round " + rounds + " = " + errLast);
+        this.check(errLast < err0,
+            "each round's margins move closer to the labels — boosting, observed");
+    }
+
+    /** Mean |margin - label| for the history slice of round `r`. */
+    static float64 mae(float32[] history, int64 r, float64[] y, int64 n) {
+        float64 sum = (float64) 0.0;
+        int64 i = (int64) 0;
+        while (i < n) {
+            float64 d = (float64) history[r * n + i] - y[i];
+            if (d < (float64) 0.0) { d = - d; }
+            sum = sum + d;
+            i = i + (int64) 1;
+        }
+        return sum / (float64) n;
+    }
+}

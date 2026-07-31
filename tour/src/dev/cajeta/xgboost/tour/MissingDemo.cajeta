@@ -1,0 +1,163 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.predict.TreeWalker;
+
+// Missing values — the headline of the v1 predict scope, on real data.
+//
+// The tour's lot_sqft column is unrecorded on every 17th listing (NaN).
+// Nothing special happens at training time: the sketch skips NaNs, the
+// binner marks them -1, and the split finder learns a DEFAULT DIRECTION
+// per node — `defaultLeft` — by trying the missing mass on each side and
+// keeping the better gain. At predict time a missing feature takes that
+// stored direction instead of comparing against the threshold.
+//
+// This demo proves the routing behaviorally: take a row, blank its lot
+// size, and watch the prediction follow the node's recorded default.
+//
+//   TreeWalker.marginSingle(model, x, n, nf, out)   the whole forest walk
+//                                                   (what GBDT.predict uses)
+//   TreeWalker.leaf(lc, rc, si, sc, dl, isLeaf, ...) one tree, one row —
+//                                                   the primitive underneath
+public class MissingDemo extends DemoClass {
+
+    public void execute() {
+        this.section("5. Missing values — NaN takes the node's default direction");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+        Model m = TrainDemo.fitted(x, y);
+
+        // The data really does carry missing values — training saw them.
+        int64 missingRows = (int64) 0;
+        int64 i = (int64) 0;
+        while (i < n) {
+            if (Data.isMissing(x.flatGet(i * nf + Data.LOT()))) {
+                missingRows = missingRows + (int64) 1;
+            }
+            i = i + (int64) 1;
+        }
+        System.stdout.println("   lot_sqft unrecorded on " + missingRows
+            + " of " + n + " listings");
+        this.check(missingRows > (int64) 20,
+            "the model was trained WITH missing values present");
+
+        // Every node carries a direction for missing — including nodes that
+        // split on other features (a row can be missing anything).
+        int64 defaultLeftCount = (int64) 0;
+        int64 internal = (int64) 0;
+        int64 k = (int64) 0;
+        while (k < m.nodeCount[0]) {
+            if (!m.isLeaf[k]) {
+                internal = internal + (int64) 1;
+                if (m.defaultLeft[k]) { defaultLeftCount = defaultLeftCount + (int64) 1; }
+            }
+            k = k + (int64) 1;
+        }
+        System.stdout.println("   tree 0: " + defaultLeftCount + " of " + internal
+            + " internal nodes route missing LEFT");
+        this.check(internal > (int64) 0,
+            "every internal node stores a default direction");
+
+        // The behavioral proof. Take each recorded listing, blank its lot
+        // size, and predict again. Where a node on that row's path splits
+        // on lot_sqft AND the default direction differs from where the
+        // real value would have gone, the prediction MOVES — that movement
+        // is the routing, observed rather than asserted.
+        int64 moved = (int64) 0;
+        int64 probeRow = (int64) 0 - (int64) 1;
+        int64 row = (int64) 0;
+        while (row < n) {
+            if (!Data.lotMissingAt(row)) {
+                Tensor<float64> asIsR = MissingDemo.oneRow(x, row, nf, false);
+                Tensor<float64> blankR = MissingDemo.oneRow(x, row, nf, true);
+                float32[] a = GBDT.predict(m, asIsR, (int64) 1, nf);
+                float32[] bl = GBDT.predict(m, blankR, (int64) 1, nf);
+                if (!DemoClass.sameBits(a[0], bl[0])) {
+                    moved = moved + (int64) 1;
+                    if (probeRow < (int64) 0) { probeRow = row; }
+                }
+            }
+            row = row + (int64) 1;
+        }
+        System.stdout.println("   blanking lot_sqft changes the prediction on "
+            + moved + " listings");
+        this.check(moved > (int64) 0,
+            "a missing value is ROUTED, not ignored — predictions actually move");
+
+        Tensor<float64> asIs = MissingDemo.oneRow(x, probeRow, nf, false);
+        Tensor<float64> blanked = MissingDemo.oneRow(x, probeRow, nf, true);
+        float32[] prAsIs = GBDT.predict(m, asIs, (int64) 1, nf);
+        float32[] prBlank = GBDT.predict(m, blanked, (int64) 1, nf);
+        System.stdout.println("   listing " + probeRow + ": with lot_sqft -> "
+            + (float64) prAsIs[0] + ", blanked -> " + (float64) prBlank[0]);
+        this.check(!DemoClass.sameBits(prAsIs[0], prBlank[0]),
+            "the probe listing's prediction follows the default direction instead");
+
+        // Whichever way it moved, it moved DELIBERATELY: re-walk tree 0 by
+        // hand for the blanked row, following defaultLeft at every node
+        // whose feature is missing, and confirm the walker agrees.
+        float32 handWalked = MissingDemo.walkTree0(m, blanked, nf);
+        float32[] one = heap float32[1];
+        TreeWalker.marginSingle(m, blanked, (int64) 1, nf, one);
+        System.stdout.println("   hand-walked tree 0 leaf = " + (float64) handWalked
+            + "; full-forest margin = " + (float64) one[0]);
+        this.check(DemoClass.sameBits(one[0], prBlank[0]),
+            "TreeWalker.marginSingle is exactly what GBDT.predict returns");
+
+        // And the primitive under it: ONE tree, ONE row, explicit arrays and
+        // a tree base offset (`t * cap`). This is the loop body marginSingle
+        // runs per tree — and it detects leaves by leftChild == -1, which is
+        // why the flat arrays need no separate leaf flag to be walkable.
+        float64[] xrow = heap float64[nf];
+        int64 j = (int64) 0;
+        while (j < nf) {
+            xrow[j] = blanked.flatGet(j);
+            j = j + (int64) 1;
+        }
+        float32 viaLeaf = TreeWalker.leaf(m.leftChildren, m.rightChildren,
+                                          m.splitIndices, m.splitConditions,
+                                          m.defaultLeft, (int64) 0, xrow);
+        this.check(DemoClass.sameBits(viaLeaf, handWalked),
+            "TreeWalker.leaf(tree 0) matches the hand walk, missing routing included");
+    }
+
+    /** A [1, nf] design matrix from row `r`, optionally blanking lot_sqft. */
+    static #Tensor<float64> oneRow(Tensor<float64> x, int64 r, int64 nf, boolean blankLot) {
+        float64[] row = heap float64[nf];
+        int64 f = (int64) 0;
+        while (f < nf) {
+            row[f] = x.flatGet(r * nf + f);
+            f = f + (int64) 1;
+        }
+        if (blankLot) {
+            row[Data.LOT()] = Data.missing();
+        }
+        int64[] shape = heap int64[2];
+        shape[0] = (int64) 1;
+        shape[1] = nf;
+        return Tensor.of<float64>(row, shape);
+    }
+
+    /** Walk tree 0 for row 0 of `x`, taking defaultLeft wherever the value is missing. */
+    static float32 walkTree0(Model m, Tensor<float64> x, int64 nf) {
+        int64 nid = (int64) 0;
+        while (!m.isLeaf[nid]) {
+            int64 f = m.splitIndices[nid];
+            float64 v = x.flatGet(f);
+            boolean goLeft = false;
+            if (Data.isMissing(v)) {
+                goLeft = m.defaultLeft[nid];
+            } else {
+                goLeft = (float32) v < m.splitConditions[nid];
+            }
+            if (goLeft) { nid = m.leftChildren[nid]; }
+            else { nid = m.rightChildren[nid]; }
+        }
+        return m.splitConditions[nid];
+    }
+}

@@ -1,0 +1,146 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Sketch;
+import dev.cajeta.xgboost.sketch.Binner;
+
+// Data preparation — the QuantileDMatrix-equivalent path, run by hand.
+//
+// `GBDT.fit` does this internally on every call, but doing it yourself is
+// the point of QuantileDMatrix: BIN ONCE, TRAIN MANY. The cut points and
+// the bin matrix depend only on (x, maxBin) — not on labels, not on any
+// hyper-parameter — so a sweep over rounds/depth/eta reuses one binning.
+//
+//   Sketch.cuts(x, n, nf, maxBin, cutPtrs)  -> concatenated cut values,
+//        bit-exact to QuantileDMatrix(numpy).get_quantile_cut() on
+//        xgboost 3.1.2, with cutPtrs[f]..cutPtrs[f+1] delimiting feature f
+//   Sketch.cutsNoPrune(...)                 -> the same sketch without the
+//        final prune step: the contrast that shows what pruning to maxBin
+//        actually costs
+//   Binner.bin(x, cutPtrs, cutValues, n, nf) -> [n*nf] local bin indices,
+//        -1 for missing
+//   Binner.searchBin(cutValues, b0, b1, v)   -> the single-value lookup the
+//        matrix build is made of
+//
+// maxBin is the resolution knob: more bins = finer thresholds = a larger
+// histogram to scan per node.
+public class PrepDemo extends DemoClass {
+
+    public void execute() {
+        this.section("2. Data prep — quantile cuts and binning (bin once, train many)");
+
+        Tensor<float64> x = Data.x();
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+
+        // A modest maxBin so the printout is readable; 256 is the default.
+        int64 maxBin = (int64) 16;
+        int64[] cutPtrs = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cuts(x, n, nf, maxBin, cutPtrs);
+
+        // The layout: one contiguous run of cut values per feature, framed
+        // by min/max sentinels, with cutPtrs as the index.
+        int64 f = (int64) 0;
+        while (f < nf) {
+            int64 b0 = cutPtrs[f];
+            int64 b1 = cutPtrs[f + (int64) 1];
+            System.stdout.println("   " + Data.featureName(f) + ": bins " + b0
+                + ".." + b1 + " (" + (b1 - b0) + "), first cut "
+                + (float64) cuts[b0] + ", last " + (float64) cuts[b1 - (int64) 1]);
+            f = f + (int64) 1;
+        }
+        this.check(cutPtrs[0] == (int64) 0 && cutPtrs[nf] > (int64) 0,
+            "cutPtrs frames each feature's cut run");
+        this.check(cutPtrs[nf] - cutPtrs[(int64) 0] <= nf * (maxBin + (int64) 1),
+            "no feature exceeds maxBin+1 cut points");
+
+        // Cut values are strictly increasing within a feature — the
+        // invariant that makes the binary search below well-defined.
+        boolean ordered = true;
+        f = (int64) 0;
+        while (f < nf) {
+            int64 c = cutPtrs[f] + (int64) 1;
+            while (c < cutPtrs[f + (int64) 1]) {
+                if (!(cuts[c] > cuts[c - (int64) 1])) { ordered = false; }
+                c = c + (int64) 1;
+            }
+            f = f + (int64) 1;
+        }
+        this.check(ordered, "cuts are strictly increasing within every feature");
+
+        // maxBin is the resolution knob, and it is visible right here: ask
+        // for more bins, get more (and finer) thresholds to split on — at
+        // the cost of a longer histogram to scan per node.
+        int64[] coarsePtrs = heap int64[nf + (int64) 1];
+        float32[] coarse = Sketch.cuts(x, n, nf, (int64) 4, coarsePtrs);
+        int64[] finePtrs = heap int64[nf + (int64) 1];
+        float32[] fine = Sketch.cuts(x, n, nf, (int64) 64, finePtrs);
+        System.stdout.println("   total cut points: maxBin 4 -> " + coarsePtrs[nf]
+            + ", maxBin " + maxBin + " -> " + cutPtrs[nf]
+            + ", maxBin 64 -> " + finePtrs[nf]);
+        this.check(coarsePtrs[nf] < cutPtrs[nf] && cutPtrs[nf] < finePtrs[nf],
+            "maxBin buys resolution: more bins, more candidate thresholds");
+
+        // cutsNoPrune is the same sketch WITHOUT the final prune-to-maxBin
+        // step — the contrast that shows what pruning removes (nothing at
+        // all when the sketch never exceeded the limit, as here).
+        int64[] rawPtrs = heap int64[nf + (int64) 1];
+        float32[] raw = Sketch.cutsNoPrune(x, n, nf, maxBin, rawPtrs);
+        System.stdout.println("   at maxBin " + maxBin + ": pruned " + cutPtrs[nf]
+            + " cut points, unpruned " + rawPtrs[nf]);
+        this.check(rawPtrs[nf] >= cutPtrs[nf],
+            "pruning to maxBin never grows the cut set");
+
+        // Bin the matrix. This is the artifact you keep: reuse it across a
+        // hyper-parameter sweep and you re-sketch nothing.
+        //
+        // Tensor.of ADOPTS its backing array, so read every scalar you still
+        // need out of cutPtrs BEFORE handing it over.
+        int64 total = cutPtrs[nf];
+        int64 sq = Data.SQFT();
+        int64 sqB0 = cutPtrs[sq];
+        int64 sqB1 = cutPtrs[sq + (int64) 1];
+        Tensor<float64> cutValsT = PrepDemo.asF64Tensor(cuts, total);
+        Tensor<int64> cutPtrsT = PrepDemo.asI64Tensor(cutPtrs, nf + (int64) 1);
+        int32[] bins = Binner.bin(x, cutPtrsT, cutValsT, n, nf);
+        this.check((int64) bins.count() == n * nf,
+            "the bin matrix is one int32 per (row, feature)");
+
+        // Missing values bin to -1 — the marker the split finder routes on
+        // (MissingDemo shows the routing itself).
+        int64 lot = Data.LOT();
+        int32 binForMissingRow = bins[(int64) 0 * nf + lot];      // row 0: lot unrecorded
+        int32 binForPresentRow = bins[(int64) 1 * nf + lot];
+        this.check(Data.lotMissingAt((int64) 0) && binForMissingRow == (int32) -1,
+            "a missing lot_sqft bins to -1, not to a real bin");
+        this.check(binForPresentRow >= (int32) 0,
+            "a recorded lot_sqft bins into its feature's range");
+
+        // searchBin is the per-value primitive: the same upper-bound lookup
+        // the matrix build runs, callable on one value.
+        float32 probe = (float32) x.flatGet((int64) 3 * nf + sq);
+        int32 direct = Binner.searchBin(cutValsT, sqB0, sqB1, probe);
+        this.check(direct == bins[(int64) 3 * nf + sq],
+            "searchBin(one value) agrees with bin(whole matrix)");
+        System.stdout.println("   row 3 sqft_living=" + (float64) probe
+            + " -> local bin " + direct);
+    }
+
+    static #Tensor<int64> asI64Tensor(int64[] v, int64 len) {
+        int64[] shape = heap int64[1];
+        shape[0] = len;
+        return Tensor.of<int64>(v, shape);
+    }
+
+    static #Tensor<float64> asF64Tensor(float32[] v, int64 len) {
+        float64[] w = heap float64[len];
+        int64 i = (int64) 0;
+        while (i < len) {
+            w[i] = (float64) v[i];
+            i = i + (int64) 1;
+        }
+        int64[] shape = heap int64[1];
+        shape[0] = len;
+        return Tensor.of<float64>(w, shape);
+    }
+}

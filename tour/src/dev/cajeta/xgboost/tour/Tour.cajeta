@@ -1,272 +1,68 @@
 package dev.cajeta.xgboost.tour;
 
-import cajeta.math.Tensor;
-import dev.cajeta.ml.KFold;
-import dev.cajeta.ml.Split;
+import cajeta.collection.ArrayList;
 import dev.cajeta.xgboost.XGBoost;
-import dev.cajeta.xgboost.api.GBDT;
-import dev.cajeta.xgboost.api.Params;
-import dev.cajeta.xgboost.api.XGBRegressor;
-import dev.cajeta.xgboost.booster.Model;
-import dev.cajeta.xgboost.booster.ModelIO;
-import dev.cajeta.xgboost.fastmath.FastMath;
 
 /**
- * The cajeta-xgboost tour — a runnable walk through the full public surface.
+ * The cajeta-xgboost tour — a runnable walk through the full public
+ * surface, one self-checking demo per topic:
  *
- *     cajeta tour          # via the manifest task
+ *   ParamsDemo      the knobs, the defaults, the determinism contract
+ *   PrepDemo        quantile cuts + binning (bin once, train many)
+ *   TrainDemo       fit, bit-identical refits, the transparent Model
+ *   MissingDemo     NaN routed by each node's learned default direction
+ *   ImportanceDemo  get_score parity — and the D2 gap, shown not hidden
+ *   ObjectivesDemo  the gradients underneath — and the D1 gap
+ *   PersistDemo     serialize to a file, reload, predict identically
+ *   InternalsDemo   one round through the int64 fixed-point machinery
+ *   FastMathDemo    modelling the GPU's special-function units
+ *   EstimatorDemo   xgboost as a dev.cajeta.ml Predictor
  *
- * Every section prints what it demonstrates and CHECKS it (the tour doubles as
- * a smoke test: it exits non-zero if any claim it makes stops being true).
- * Narrative companion: docs/Tour.md walks this file section by section.
+ *     ./run-tour.sh          # build the library + ml dep, compile, run
  *
- * The dataset is synthesized deterministically — no RNG, no files — so the
- * tour produces identical bits on every machine, which is rather the point of
- * this library.
+ * Every demo PRINTS what it demonstrates and CHECKS it: the tour exits
+ * non-zero the moment a demonstrated claim stops being true. Narrative
+ * companion: docs/Tour.md.
+ *
+ * The dataset (Data.cajeta) is a deterministic house-price table with
+ * named features and genuinely missing values — no RNG, no files, no
+ * clock — so the tour produces identical bits on every machine, which is
+ * rather the point of this library.
  */
 public final class Tour {
 
-    static int32 failures;
-
-    static void check(boolean ok, String what) {
-        if (ok) {
-            System.stdout.println("   ok: " + what);
-        } else {
-            System.stdout.println(" FAIL: " + what);
-            Tour.failures = Tour.failures + 1;
-        }
-    }
-
-    static void section(String title) {
-        System.stdout.println("");
-        System.stdout.println("== " + title + " ==");
-    }
-
-    /**
-     * A deterministic synthetic regression set: n rows, 4 features on simple
-     * arithmetic grids, target = structured interaction of the features. The
-     * mild nonlinearity (a threshold interaction) gives the trees something
-     * real to split on.
-     */
-    static #Tensor<float64> makeX(int64 n, int64 nf) {
-        float64[] xs = heap float64[n * nf];
-        int64 i = (int64) 0;
-        while (i < n) {
-            float64 a = (float64) (i % (int64) 17) / (float64) 16.0;   // 0..1 sawtooth
-            float64 b = (float64) (i % (int64) 5);                     // 0..4 steps
-            float64 c = (float64) ((i * (int64) 7) % (int64) 23);      // scrambled grid
-            float64 d = (float64) (i / (int64) 50);                    // coarse ramp
-            xs[i * nf + (int64) 0] = a;
-            xs[i * nf + (int64) 1] = b;
-            xs[i * nf + (int64) 2] = c;
-            xs[i * nf + (int64) 3] = d;
-            i = i + (int64) 1;
-        }
-        int64[] shape = heap int64[2];
-        shape[0] = n;
-        shape[1] = nf;
-        return Tensor.of<float64>(xs, shape);
-    }
-
-    static #float64[] makeY(Tensor<float64> x, int64 n, int64 nf) {
-        float64[] y = heap float64[n];
-        int64 i = (int64) 0;
-        while (i < n) {
-            float64 a = x.flatGet(i * nf);
-            float64 b = x.flatGet(i * nf + (int64) 1);
-            float64 c = x.flatGet(i * nf + (int64) 2);
-            // Piecewise interaction: worth several levels of tree.
-            float64 base = (float64) 3.0 * a + (b > (float64) 2.0 ? c * (float64) 0.5 : - c * (float64) 0.25);
-            y[i] = base + (a > (float64) 0.5 ? (float64) 2.0 : (float64) 0.0);
-            i = i + (int64) 1;
-        }
-        return #y;
-    }
-
     public static int32 main() {
         System.stdout.println("cajeta-xgboost tour — library version " + XGBoost.version());
-        Tour.failures = 0;
+        DemoClass.checks = 0;
+        DemoClass.failures = 0;
 
-        int64 n  = (int64) 400;
-        int64 nf = (int64) 4;
-        Tensor<float64> x = Tour.makeX(n, nf);
-        float64[] y = Tour.makeY(x, n, nf);
+        ArrayList<DemoClass> demos = heap ArrayList<DemoClass>();
+        demos.add(heap ParamsDemo());
+        demos.add(heap PrepDemo());
+        demos.add(heap TrainDemo());
+        demos.add(heap MissingDemo());
+        demos.add(heap ImportanceDemo());
+        demos.add(heap ObjectivesDemo());
+        demos.add(heap PersistDemo());
+        demos.add(heap InternalsDemo());
+        demos.add(heap FastMathDemo());
+        demos.add(heap EstimatorDemo());
 
-        // ------------------------------------------------------------------
-        Tour.section("1. Params — XGBoost's knobs, XGBoost's defaults");
-        // Every field maps 1:1 to an XGBoost parameter (the comment in
-        // Params.cajeta names each). The no-arg ctor IS xgboost's defaults:
-        // 10 rounds, max_depth 6, lambda 1, eta 0.3, base_score 0.5, max_bin 256.
-        Params p = heap Params();
-        p.rounds = (int64) 8;
-        p.maxDepth = (int64) 4;
-        p.eta = (float64) 0.3;
-        Tour.check(p.usesStochasticSampling() == false,
-                   "defaults are the deterministic config set");
-
-        // ------------------------------------------------------------------
-        Tour.section("2. GBDT.fit — deterministic training from a raw matrix");
-        // fit() runs the whole bit-exact pipeline: GPU-algorithm quantile
-        // sketch -> cut points -> binning -> the boosting loop with the int64
-        // fixed-point histogram. No hidden state, no RNG.
-        Model m1 = GBDT.fit(x, y, n, nf, p);
-        Model m2 = GBDT.fit(x, y, n, nf, p);
-        Tour.check(m1.rounds == p.rounds, "model carries one tree per round");
-        Tour.check(m1.deterministic, "the mode is RECORDED on the model (auditable)");
-
-        // Determinism is not "close": two fits are bit-identical, tree by tree.
-        float32[] pr1 = GBDT.predict(m1, x, n, nf);
-        float32[] pr2 = GBDT.predict(m2, x, n, nf);
-        boolean identical = true;
-        int64 i = (int64) 0;
+        int32 i = 0;
+        int32 n = (int32) demos.count();
         while (i < n) {
-            if (Cajeta.f32ToBits(pr1[i]) != Cajeta.f32ToBits(pr2[i])) {
-                identical = false;
-            }
-            i = i + (int64) 1;
-        }
-        Tour.check(identical, "two fits -> bit-identical predictions (all " + n + " rows)");
-
-        // ------------------------------------------------------------------
-        Tour.section("3. The determinism CONTRACT — you cannot forfeit it silently");
-        // Stochastic sampling breaks bit-exactness, so fit() REFUSES it; the
-        // non-deterministic mode is a distinctly-named entry point and is
-        // recorded in the model metadata.
-        Params ps = heap Params();
-        ps.subsample = (float64) 0.8;
-        int32 refused = 0;
-        try {
-            Model bad = GBDT.fit(x, y, n, nf, ps);
-        } catch (Exception e) {
-            refused = 1;
-        }
-        Tour.check(refused == 1, "fit() refuses subsample < 1 rather than mislabel the result");
-
-        // ------------------------------------------------------------------
-        Tour.section("4. Predict — the raw margin under the identity link");
-        float32[] preds = GBDT.predict(m1, x, n, nf);
-        // The model learned the threshold structure: rows with a > 0.5 sit ~2.0
-        // above their mirror rows. Spot-check the spread is real.
-        float32 lo = preds[0];
-        float32 hi = preds[0];
-        i = (int64) 1;
-        while (i < n) {
-            if (preds[i] < lo) { lo = preds[i]; }
-            if (preds[i] > hi) { hi = preds[i]; }
-            i = i + (int64) 1;
-        }
-        System.stdout.println("   prediction range: [" + (float64) lo + ", " + (float64) hi + "]");
-        Tour.check(hi - lo > (float32) 2.0, "the trees separated the target structure");
-
-        // ------------------------------------------------------------------
-        Tour.section("5. The Model is transparent — walk tree 0 yourself");
-        // Flat arrays with a per-tree stride (cap): node k of tree r lives at
-        // r*cap + k. Internal nodes carry splitIndices/splitConditions; leaves
-        // carry the leaf value in splitConditions with isLeaf set.
-        System.stdout.println("   tree 0: " + m1.nodeCount[0] + " nodes, stride " + m1.cap);
-        int64 internal = (int64) 0;
-        int64 leaves = (int64) 0;
-        int64 k = (int64) 0;
-        while (k < m1.nodeCount[0]) {
-            if (m1.isLeaf[k]) { leaves = leaves + (int64) 1; }
-            else { internal = internal + (int64) 1; }
-            k = k + (int64) 1;
-        }
-        System.stdout.println("   internal " + internal + " / leaves " + leaves);
-        Tour.check(leaves == internal + (int64) 1, "binary tree invariant: leaves = internal + 1");
-        // Root split, human-readable:
-        if (!m1.isLeaf[0]) {
-            System.stdout.println("   root: feature " + m1.splitIndices[0]
-                + " < " + (float64) m1.splitConditions[0]
-                + "  (missing goes " + (m1.defaultLeft[0] ? "left" : "right") + ")");
+            demos.get(i).execute();
+            i = i + 1;
         }
 
-        // ------------------------------------------------------------------
-        Tour.section("6. Feature importance by split weight — from the open Model");
-        int64[] weight = heap int64[nf];
-        int64 r = (int64) 0;
-        while (r < m1.rounds) {
-            k = (int64) 0;
-            while (k < m1.nodeCount[r]) {
-                int64 node = r * m1.cap + k;
-                if (!m1.isLeaf[node]) {
-                    int64 fdx = m1.splitIndices[node];
-                    weight[fdx] = weight[fdx] + (int64) 1;
-                }
-                k = k + (int64) 1;
-            }
-            r = r + (int64) 1;
-        }
-        int64 f = (int64) 0;
-        int64 used = (int64) 0;
-        while (f < nf) {
-            System.stdout.println("   feature " + f + ": " + weight[f] + " splits");
-            if (weight[f] > (int64) 0) { used = used + (int64) 1; }
-            f = f + (int64) 1;
-        }
-        Tour.check(used >= (int64) 3, "the informative features all earned splits");
-
-        // ------------------------------------------------------------------
-        Tour.section("7. Serialize / deserialize — the round-trip is bit-exact");
-        int8[] buf = ModelIO.serialize(m1);
-        Model back = ModelIO.deserialize(buf);
-        float32[] pr3 = GBDT.predict(back, x, n, nf);
-        boolean same = true;
-        i = (int64) 0;
-        while (i < n) {
-            if (Cajeta.f32ToBits(pr3[i]) != Cajeta.f32ToBits(pr1[i])) { same = false; }
-            i = i + (int64) 1;
-        }
-        System.stdout.println("   serialized " + (int64) buf.count() + " bytes");
-        Tour.check(same, "deserialized model predicts bit-identically");
-        Tour.check(back.deterministic == m1.deterministic, "the audit bit survives the trip");
-
-        // ------------------------------------------------------------------
-        Tour.section("8. FastMath — the device-fidelity layer underneath");
-        // The GPU's SFU ops (MUFU.RCP behind __fdividef, MUFU.EX2 behind device
-        // expf) are silicon lookup tables with no closed form. FastMath models
-        // them: bit-exact when the probed capture tables are loaded (RCP_TABLE /
-        // EX2_TABLE env), correctly-rounded fallbacks otherwise — same API, the
-        // plumbing never changes.
-        System.stdout.println("   rcp table loaded: " + FastMath.hasRcpTable());
-        System.stdout.println("   ex2 table loaded: " + FastMath.hasEx2Table());
-        float32 e1 = FastMath.expf((float32) 1.0);
-        System.stdout.println("   expf(1.0f) = " + (float64) e1);
-        Tour.check(e1 > (float32) 2.718 && e1 < (float32) 2.7183,
-                   "device-model expf agrees with e to float32 tolerance");
-
-        // ------------------------------------------------------------------
-        Tour.section("9. The estimator protocol — xgboost as a dev.cajeta.ml Predictor");
-        // XGBRegressor conforms to the ecosystem estimator protocol
-        // (dev.cajeta.ml Estimator/Predictor), so a boosted model drops into
-        // Split.crossValScore and every ml model-selection utility with no
-        // xgboost-specific glue. The underlying Model stays reachable via
-        // model() for the xgboost surfaces above (ModelIO, importance walks).
-        Params pe = heap Params();
-        pe.rounds = (int64) 8;
-        pe.maxDepth = (int64) 4;
-        XGBRegressor est = heap XGBRegressor(pe);
-        int64[] ysh = heap int64[1];
-        ysh[0] = n;
-        Tensor<float64> yT = Tensor.of<float64>(y, ysh);
-        est.fit(x, yT);
-        Tour.check(est.isFitted(), "fit() marks the estimator fitted");
-        float64 r2 = est.score(x, yT);
-        System.stdout.println("   training R^2 = " + r2);
-        Tour.check(r2 > (float64) 0.9,
-                   "score() is the sklearn R^2 convention; the trees explain the structure");
-        KFold folds = heap KFold((int64) 4, false, (uint64) 0);
-        Tensor<float64> cv = Split.crossValScore(est, x, yT, folds);
-        Tour.check(cv.shapeAt(0) == (int64) 4,
-                   "Split.crossValScore accepts the adapter: one R^2 per fold");
-
-        // ------------------------------------------------------------------
         System.stdout.println("");
-        if (Tour.failures > 0) {
-            System.stdout.println("TOUR FAILED: " + Tour.failures + " check(s)");
+        if (DemoClass.failures > 0) {
+            System.stdout.println("TOUR FAILED: " + DemoClass.failures
+                + " of " + DemoClass.checks + " checks");
             return 1;
         }
-        System.stdout.println("tour complete — every demonstrated claim checked");
+        System.stdout.println("tour complete — " + DemoClass.checks
+            + " demonstrated claims, all checked");
         return 0;
     }
 }

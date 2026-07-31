@@ -1,0 +1,73 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import cajeta.io.file.File;
+import cajeta.io.file.FileReader;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.io.file.Path;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.booster.ModelIO;
+
+// Persistence — train once, score later, which is the whole GBDT
+// deployment story: a training job writes a model file, and some other
+// process (tomorrow, on another machine) loads it and serves predictions.
+//
+//   ModelIO.serialize(model) -> #int8[]     the whole forest, flat
+//   ModelIO.deserialize(bytes) -> #Model
+//
+// The property that matters is that the round trip is BIT-EXACT: the
+// reloaded model must not merely predict "about the same", it must
+// predict the identical float32 bits, or the determinism guarantee stops
+// at the file boundary — exactly where a deployment needs it most.
+public class PersistDemo extends DemoClass {
+
+    public void execute() {
+        this.section("8. Persistence — serialize to a file, reload, predict identically");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+        Model trained = TrainDemo.fitted(x, y);
+        float32[] before = GBDT.predict(trained, x, n, nf);
+
+        // --- the training job's half: serialize and write --------------
+        String path = "tour-model.xgb";
+        Path stale = Path.of(path);
+        if (stale.exists()) {
+            stale.delete();                   // never inherit a previous run
+        }
+        int8[] bytes = ModelIO.serialize(trained);
+        int32 size = (int32) bytes.count();
+        FileWriter w = File.openWrite(path, OpenMode.WRITE);
+        w.write(bytes, size);
+        w.close();                            // flush + release the fd
+        System.stdout.println("   wrote " + path + " (" + size + " bytes, "
+            + trained.rounds + " trees)");
+        this.check(Path.of(path).exists(), "the model file is on disk");
+
+        // --- the serving process's half: read and deserialize ----------
+        FileReader r = File.openRead(path);
+        int8[] buf = heap int8[size];
+        int32 got = r.read(buf, size);
+        r.close();
+        this.check(got == size, "read back every byte that was written");
+
+        Model loaded = ModelIO.deserialize(buf);
+        float32[] after = GBDT.predict(loaded, x, n, nf);
+        this.check(DemoClass.sameBitsAll(before, after, n),
+            "the reloaded model predicts BIT-identically, all " + n + " rows");
+        this.check(loaded.rounds == trained.rounds && loaded.cap == trained.cap,
+            "forest shape survives the trip (rounds and per-tree stride)");
+        this.check(loaded.deterministic == trained.deterministic,
+            "the determinism audit bit survives too — provenance is not lost");
+        this.check(DemoClass.sameBits(loaded.baseMargin, trained.baseMargin),
+            "the base margin round-trips exactly");
+
+        // Cleanup: the tour leaves no droppings.
+        Path.of(path).delete();
+        this.check(!Path.of(path).exists(), "the tour cleaned up its model file");
+    }
+}

@@ -36,11 +36,11 @@ permissions:
   contents: write
 
 env:
-  # Must match a release tag of jklappenbach/cajeta. v0.12.1 carries the
-  # loader-materialization fix (cross-file records; the Frames bridge test)
-  # plus v0.12.0's iface-generic-returns dispatch fix and linalg surface the
-  # dev.cajeta.ml dependency is built against.
-  CAJETA_VERSION: v0.12.1
+  # Must match a release tag of jklappenbach/cajeta. v0.13.0 is the line the
+  # dev.cajeta.ml 0.3.0 dependency is published against; it also carries the
+  # v0.12.1 loader-materialization fix (cross-file records; the Frames bridge
+  # test) and v0.12.0's iface-generic-returns dispatch fix.
+  CAJETA_VERSION: v0.13.0
 
 jobs:
   build-test:
@@ -66,6 +66,15 @@ jobs:
         # path at the dev.cajeta.unit version pinned in cajeta.json.
         timeout-minutes: 30
         run: ./run-tests.sh
+
+      - name: Run the tour (self-checking) + the tour coverage gate
+        # The tour asserts every claim it prints and exits non-zero when one
+        # stops being true; the gate requires every public type to be
+        # exercised by it. Same ml-resolution ladder as the suite — on a bare
+        # runner there is no sibling checkout, so it takes the Olla fetch at
+        # the dev.cajeta.ml version pinned in cajeta.json.
+        timeout-minutes: 30
+        run: ./scripts/ci-checks.sh
 
       - name: Build the release .cja
         id: build

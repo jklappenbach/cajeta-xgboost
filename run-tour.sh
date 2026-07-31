@@ -15,9 +15,16 @@ OLLA_HOME="${OLLA_HOME:-$HOME/.olla}"
 OLLA_URL="${OLLA_URL:-https://olla.cajeta.dev}"
 ML_REPO="${ML_REPO:-$here/../cajeta-ml}"
 ml_cja="${ML_CJA:-}"
+# A sibling checkout is a local-dev convenience, not a requirement: it may be
+# mid-work or need a newer toolchain than this one. Try it, but never let its
+# build failure sink the tour — fall through to the pinned published archive,
+# which is what a real consumer resolves anyway.
 if [[ -z "$ml_cja" && -d "$ML_REPO" ]]; then
-    ( cd "$ML_REPO" && "$CAJETA" build >/dev/null )
-    ml_cja="$(ls -t "$ML_REPO"/build/archive/dev.cajeta.ml-*.cja 2>/dev/null | head -1)"
+    if ( cd "$ML_REPO" && "$CAJETA" build >/dev/null 2>&1 ); then
+        ml_cja="$(ls -t "$ML_REPO"/build/archive/dev.cajeta.ml-*.cja 2>/dev/null | head -1)"
+    else
+        echo ">> sibling cajeta-ml did not build with this toolchain; using the pinned release"
+    fi
 fi
 if [[ -z "$ml_cja" ]]; then
     ML_VER="$(sed -n 's/.*"dev\.cajeta\.ml"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \

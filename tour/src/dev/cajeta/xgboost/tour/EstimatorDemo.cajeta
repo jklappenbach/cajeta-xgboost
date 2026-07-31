@@ -1,0 +1,72 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import dev.cajeta.ml.KFold;
+import dev.cajeta.ml.Split;
+import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.api.XGBRegressor;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.booster.ModelIO;
+
+// The estimator protocol — xgboost as a dev.cajeta.ml Predictor.
+//
+// `XGBRegressor` conforms to the ecosystem estimator protocol
+// (fit / predict / score, sklearn conventions), so a boosted model drops
+// into every ml model-selection utility with no xgboost-specific glue:
+// cross-validation, grid search, pipelines. The adapter is thin on
+// purpose — it holds a `Params` and the trained `Model`, and `model()`
+// hands the Model back so nothing on the xgboost side (ModelIO, the tree
+// walk, importance) becomes unreachable by adopting the protocol.
+public class EstimatorDemo extends DemoClass {
+
+    public void execute() {
+        this.section("11. The estimator protocol — a dev.cajeta.ml Predictor");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        Tensor<float64> yT = Data.yTensor(y);
+
+        Params p = heap Params();
+        p.rounds = (int64) 8;
+        p.maxDepth = (int64) 4;
+        XGBRegressor est = heap XGBRegressor(p);
+        this.check(!est.isFitted(), "a fresh estimator reports itself unfitted");
+
+        est.fit(x, yT);
+        this.check(est.isFitted(), "fit() marks the estimator fitted");
+
+        float64 r2 = est.score(x, yT);
+        System.stdout.println("   training R^2 = " + r2);
+        this.check(r2 > (float64) 0.9,
+            "score() is sklearn's R^2 convention; the trees explain the structure");
+
+        // The protocol's payoff: an ml utility drives the estimator without
+        // knowing what a gradient-boosted tree is.
+        KFold folds = heap KFold((int64) 4, false, (uint64) 0);
+        Tensor<float64> cv = Split.crossValScore(est, x, yT, folds);
+        System.stdout.println("   4-fold CV R^2: " + cv.flatGet((int64) 0)
+            + ", " + cv.flatGet((int64) 1)
+            + ", " + cv.flatGet((int64) 2)
+            + ", " + cv.flatGet((int64) 3));
+        this.check(cv.shapeAt(0) == (int64) 4,
+            "Split.crossValScore accepts the adapter: one R^2 per fold");
+        boolean allReal = true;
+        int64 i = (int64) 0;
+        while (i < (int64) 4) {
+            float64 s = cv.flatGet(i);
+            if (!(s > (float64) 0.0 && s <= (float64) 1.0)) { allReal = false; }
+            i = i + (int64) 1;
+        }
+        this.check(allReal,
+            "every held-out fold scores in (0, 1] — the model generalizes here");
+
+        // Adopting the protocol costs nothing: the xgboost surfaces stay
+        // reachable through model().
+        Model inner = est.model();
+        int8[] bytes = ModelIO.serialize(inner);
+        this.check(inner.rounds == (int64) 8 && (int64) bytes.count() > (int64) 0,
+            "model() hands back the Model — ModelIO and the tree walk still apply");
+        this.check(inner.deterministic,
+            "the adapter trains through GBDT.fit, so the determinism bit holds");
+    }
+}

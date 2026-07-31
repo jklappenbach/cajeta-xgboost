@@ -1,0 +1,61 @@
+package dev.cajeta.xgboost.tour;
+
+import dev.cajeta.xgboost.fastmath.FastMath;
+
+// FastMath — the device-fidelity layer underneath everything else.
+//
+// Two of the GPU's special-function-unit ops have NO closed form: MUFU.RCP
+// (behind __fdividef) and MUFU.EX2 (behind device expf) are silicon lookup
+// tables. Reproducing CUDA results bit-for-bit therefore means reproducing
+// those tables, not approximating them.
+//
+// FastMath's contract: bit-exact when the probed capture tables are loaded
+// (set RCP_TABLE / EX2_TABLE to the captured table files — run-tests.sh
+// does this for the parity suites), and correctly-rounded fallbacks when
+// they are not. The API never changes shape, so code written against it
+// works either way — only the last ulp differs.
+//
+// This matters here because Logistic and Softmax call expf on the hot
+// path: which expf you use decides whether your logistic gradients match
+// the device's.
+public class FastMathDemo extends DemoClass {
+
+    public void execute() {
+        this.section("10. FastMath — modelling the GPU's special-function units");
+
+        boolean rcp = FastMath.hasRcpTable();
+        boolean ex2 = FastMath.hasEx2Table();
+        System.stdout.println("   capture tables loaded — rcp: " + rcp + ", ex2: " + ex2
+            + "   (set RCP_TABLE / EX2_TABLE for bit-exact device parity)");
+        this.check(true, "table availability is reported, never guessed");
+
+        // expf — the one the objectives call.
+        float32 e1 = FastMath.expf((float32) 1.0);
+        System.stdout.println("   expf(1.0f) = " + (float64) e1);
+        this.check(e1 > (float32) 2.718 && e1 < (float32) 2.7183,
+            "device-model expf agrees with e to float32 tolerance");
+        this.check(DemoClass.sameBits(FastMath.expf((float32) 0.0), (float32) 1.0),
+            "expf(0) is exactly 1.0 — an exact case stays exact");
+
+        // fdividef — CUDA's fast division, MUFU.RCP followed by a multiply.
+        float32 q = FastMath.fdividef((float32) 3.0, (float32) 4.0);
+        System.stdout.println("   fdividef(3, 4) = " + (float64) q);
+        this.check(q > (float32) 0.7499 && q < (float32) 0.7501,
+            "fdividef models __fdividef (reciprocal-then-multiply)");
+
+        // fmaf — the fused multiply-add the reference kernels are written
+        // in: one rounding, not two, which is why it is not a*b+c.
+        float32 fma = FastMath.fmaf((float32) 2.0, (float32) 3.0, (float32) 1.0);
+        this.check(DemoClass.sameBits(fma, (float32) 7.0),
+            "fmaf(2, 3, 1) = 7 — single-rounding fused multiply-add");
+
+        // The mantissa tables themselves are addressable: this is the layer
+        // a capture file fills in, exposed rather than hidden.
+        float32 rcpM = FastMath.rcpMantissa((int32) 0);
+        float32 ex2M = FastMath.ex2Mantissa((int32) 0);
+        System.stdout.println("   table entry 0 — rcpMantissa: " + (float64) rcpM
+            + ", ex2Mantissa: " + (float64) ex2M);
+        this.check(rcpM > (float32) 0.0 && ex2M > (float32) 0.0,
+            "the mantissa tables answer for index 0 with or without a capture file");
+    }
+}

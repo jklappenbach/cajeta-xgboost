@@ -1,0 +1,139 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.booster.Model;
+
+// Training and the model it produces.
+//
+// `GBDT.fit` runs the whole pipeline PrepDemo walked by hand — sketch →
+// cuts → bins — and then the boosting loop over an int64 fixed-point
+// histogram. There is no hidden state, no RNG, and no clock anywhere in
+// it, which buys the property this demo actually checks: two fits of the
+// same data produce BIT-IDENTICAL predictions, not merely close ones.
+//
+// The Model is transparent: flat arrays with a per-tree stride, walkable
+// with the same indexing the library itself uses. Node k of tree r lives
+// at r*cap + k; internal nodes carry splitIndices/splitConditions, leaves
+// carry their value in splitConditions with isLeaf set.
+public class TrainDemo extends DemoClass {
+
+    /** The tour's shared training configuration. */
+    public static #Params params() {
+        Params p = heap Params();
+        p.rounds = (int64) 8;
+        p.maxDepth = (int64) 4;
+        p.eta = (float64) 0.3;
+        return #p;
+    }
+
+    /** The tour's shared trained model — the other demos start here. */
+    public static #Model fitted(Tensor<float64> x, float64[] y) {
+        Params p = TrainDemo.params();
+        return GBDT.fit(x, y, Data.rows(), Data.features(), p);
+    }
+
+    public void execute() {
+        this.section("3. Training — one call, and the same bits every time");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+
+        Model m1 = TrainDemo.fitted(x, y);
+        Model m2 = TrainDemo.fitted(x, y);
+        this.check(m1.rounds == (int64) 8, "one tree per boosting round");
+        this.check(m1.deterministic, "the model records the mode it was trained in");
+
+        float32[] p1 = GBDT.predict(m1, x, n, nf);
+        float32[] p2 = GBDT.predict(m2, x, n, nf);
+        this.check(DemoClass.sameBitsAll(p1, p2, n),
+            "two independent fits -> bit-identical predictions, all " + n + " rows");
+
+        // The model learned the structure the data was built with: houses
+        // over 2000 sqft carry a ~$40k premium, so predictions separate.
+        float64 belowAvg = TrainDemo.meanWhere(p1, x, n, nf, false);
+        float64 aboveAvg = TrainDemo.meanWhere(p1, x, n, nf, true);
+        System.stdout.println("   mean predicted price_k: <=2000 sqft "
+            + belowAvg + ", >2000 sqft " + aboveAvg);
+        this.check(aboveAvg - belowAvg > (float64) 40.0,
+            "the trees found the >2000 sqft premium (plus the sqft slope)");
+
+        // Predictions track the labels: a plain correlation-free check that
+        // the fit is real — mean absolute error well under the label spread.
+        float64 mae = (float64) 0.0;
+        int64 i = (int64) 0;
+        while (i < n) {
+            float64 d = (float64) p1[i] - y[i];
+            if (d < (float64) 0.0) { d = - d; }
+            mae = mae + d;
+            i = i + (int64) 1;
+        }
+        mae = mae / (float64) n;
+        System.stdout.println("   mean absolute error: " + mae + " ($k)");
+        this.check(mae < (float64) 30.0,
+            "8 shallow rounds at eta 0.3 already track the price surface");
+
+        this.section("4. The Model is transparent — walk tree 0 yourself");
+        System.stdout.println("   tree 0: " + m1.nodeCount[0] + " nodes, stride "
+            + m1.cap + " (node k of tree r at r*cap + k)");
+        int64 internal = (int64) 0;
+        int64 leaves = (int64) 0;
+        int64 k = (int64) 0;
+        while (k < m1.nodeCount[0]) {
+            if (m1.isLeaf[k]) { leaves = leaves + (int64) 1; }
+            else { internal = internal + (int64) 1; }
+            k = k + (int64) 1;
+        }
+        System.stdout.println("   internal " + internal + " / leaves " + leaves);
+        this.check(leaves == internal + (int64) 1,
+            "binary tree invariant: leaves = internal + 1");
+
+        // The root split, in the data's own vocabulary.
+        this.check(!m1.isLeaf[0], "tree 0 actually split (the root is not a leaf)");
+        int64 rootF = m1.splitIndices[0];
+        System.stdout.println("   root: " + Data.featureName(rootF) + " < "
+            + (float64) m1.splitConditions[0]
+            + "   (missing goes " + (m1.defaultLeft[0] ? "left" : "right") + ")");
+        this.check(rootF == Data.SQFT() || rootF == Data.BEDROOMS()
+            || rootF == Data.AGE() || rootF == Data.LOT(),
+            "the root splits on one of the four named features");
+
+        // Every leaf's value is reachable — this IS the prediction, summed
+        // over trees and added to the base margin.
+        float32 firstLeaf = (float32) 0.0;
+        boolean found = false;
+        k = (int64) 0;
+        while (k < m1.nodeCount[0]) {
+            if (m1.isLeaf[k] && !found) {
+                firstLeaf = m1.splitConditions[k];
+                found = true;
+            }
+            k = k + (int64) 1;
+        }
+        System.stdout.println("   base margin " + (float64) m1.baseMargin
+            + ", tree 0's first leaf contributes " + (float64) firstLeaf);
+        this.check(found, "leaf values live in splitConditions where isLeaf is set");
+    }
+
+    /** Mean prediction over rows above (or at/below) the 2000 sqft threshold. */
+    static float64 meanWhere(float32[] pred, Tensor<float64> x, int64 n, int64 nf,
+                             boolean above) {
+        float64 sum = (float64) 0.0;
+        int64 count = (int64) 0;
+        int64 i = (int64) 0;
+        while (i < n) {
+            float64 sqft = x.flatGet(i * nf + Data.SQFT());
+            boolean isAbove = sqft > (float64) 2000.0;
+            if (isAbove == above) {
+                sum = sum + (float64) pred[i];
+                count = count + (int64) 1;
+            }
+            i = i + (int64) 1;
+        }
+        if (count == (int64) 0) { return (float64) 0.0; }
+        return sum / (float64) count;
+    }
+}

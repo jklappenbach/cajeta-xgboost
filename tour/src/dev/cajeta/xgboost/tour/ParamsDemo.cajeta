@@ -1,0 +1,117 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import cajeta.error.RecoverableException;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.booster.Model;
+
+// Params — XGBoost's knobs, XGBoost's defaults, and the one contract this
+// library adds on top: you cannot forfeit bit-exactness by accident.
+//
+// Every field maps 1:1 to an XGBoost parameter. The no-arg ctor IS
+// xgboost's default set, which is also the DETERMINISTIC config set:
+// 10 rounds, max_depth 6, lambda 1, alpha 0, gamma 0, min_child_weight 1,
+// eta 0.3, base_score 0.5, max_bin 256, subsample 1, colsample_bytree 1.
+//
+// The two sampling knobs (subsample, colsample_bytree) are the only way
+// out of that set — they need XGBoost's RNG, whose parity this library
+// does not reproduce. So `GBDT.fit` REFUSES them and names the escape
+// hatch in the message, and `fitNonDeterministic` — the labeled hatch —
+// refuses too, because the sampling engine is a later unit. Refusing is
+// the point: a silently-all-rows fit mislabeled as sampled would be worse
+// than an error.
+public class ParamsDemo extends DemoClass {
+
+    public void execute() {
+        this.section("1. Params — the knobs, the defaults, and the determinism contract");
+
+        // The full knob table, set to a small deliberate configuration.
+        Params p = heap Params();
+        p.rounds = (int64) 8;             // num_boost_round
+        p.maxDepth = (int64) 4;           // max_depth
+        p.maxLeaves = (int64) 0;          // max_leaves: 0 = unbounded (depthwise)
+        p.eta = (float64) 0.3;            // learning_rate
+        p.lambda = (float64) 1.0;         // reg_lambda — L2 on leaf weights
+        p.alpha = (float64) 0.0;          // reg_alpha  — L1 on leaf weights
+        p.gamma = (float64) 0.0;          // min_split_loss — gain floor per split
+        p.minChildWeight = (float64) 1.0; // min_child_weight — hessian floor per child
+        p.baseScore = (float64) 0.5;      // base_score — the initial margin
+        p.maxBin = (int64) 256;           // max_bin — quantile resolution (PrepDemo)
+        System.stdout.println("   rounds=" + p.rounds + " maxDepth=" + p.maxDepth
+            + " eta=" + p.eta + " lambda=" + p.lambda + " maxBin=" + p.maxBin);
+        this.check(!p.usesStochasticSampling(),
+            "the defaults are the deterministic config set");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+
+        // Regularization is a real knob, not decoration: a heavy L2 pulls
+        // every leaf weight toward zero, so the same data trains to a
+        // visibly flatter model.
+        Params reg = heap Params();
+        reg.rounds = (int64) 8;
+        reg.maxDepth = (int64) 4;
+        reg.lambda = (float64) 5000.0;
+        Model plain = GBDT.fit(x, y, n, nf, p);
+        Model damped = GBDT.fit(x, y, n, nf, reg);
+        float32[] prPlain = GBDT.predict(plain, x, n, nf);
+        float32[] prDamped = GBDT.predict(damped, x, n, nf);
+        float64 spreadPlain = ParamsDemo.spread(prPlain, n);
+        float64 spreadDamped = ParamsDemo.spread(prDamped, n);
+        System.stdout.println("   prediction spread: lambda=1 -> " + spreadPlain
+            + ",  lambda=5000 -> " + spreadDamped);
+        this.check(spreadDamped < spreadPlain,
+            "reg_lambda shrinks the leaf weights (a flatter model)");
+
+        // The refusal, caught SPECIFICALLY and read: the library tells the
+        // caller what to do instead, and that message is the demo.
+        Params sampled = heap Params();
+        sampled.subsample = (float64) 0.8;
+        this.check(sampled.usesStochasticSampling(),
+            "subsample < 1 leaves the deterministic set");
+        boolean refused = false;
+        try {
+            Model never = GBDT.fit(x, y, n, nf, sampled);
+        } catch (RecoverableException e) {
+            refused = true;
+            System.stdout.println("   fit() refused: " + e.message);
+        }
+        this.check(refused,
+            "fit() refuses to mislabel a sampled run as deterministic");
+
+        // The labeled escape hatch exists — and is honest about its own
+        // state: the mode is real, the sampling engine is not implemented,
+        // so it refuses rather than silently training on all rows.
+        boolean hatchRefused = false;
+        try {
+            Model never2 = GBDT.fitNonDeterministic(x, y, n, nf, sampled);
+        } catch (RecoverableException e) {
+            hatchRefused = true;
+            System.stdout.println("   fitNonDeterministic(): " + e.message);
+        }
+        this.check(hatchRefused,
+            "the labeled hatch refuses too — RNG parity is a later unit");
+
+        // Without sampling, the hatch trains normally; the only difference
+        // is the audit bit it stamps on the model.
+        Model labeled = GBDT.fitNonDeterministic(x, y, n, nf, p);
+        this.check(plain.deterministic && !labeled.deterministic,
+            "the mode is RECORDED on the model — auditable after the fact");
+    }
+
+    /** max - min of a prediction vector. */
+    static float64 spread(float32[] v, int64 n) {
+        float32 lo = v[0];
+        float32 hi = v[0];
+        int64 i = (int64) 1;
+        while (i < n) {
+            if (v[i] < lo) { lo = v[i]; }
+            if (v[i] > hi) { hi = v[i]; }
+            i = i + (int64) 1;
+        }
+        return (float64) (hi - lo);
+    }
+}

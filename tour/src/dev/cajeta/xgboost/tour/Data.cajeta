@@ -1,0 +1,125 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+
+// The tour's dataset — a small house-price table with NAMED features, so
+// every downstream printout ("sqft_living: 47 splits", "root splits on
+// age_years < 12") says something a human can check against intuition.
+//
+//   0 sqft_living   800..3200 sq ft
+//   1 bedrooms      1..5
+//   2 age_years     0..59
+//   3 lot_sqft      2000..10000 — and MISSING (NaN) on ~6% of rows, the way
+//                   real listings drop lot size on condos
+//
+//   price_k = 60 + 0.12*sqft + 15*bedrooms - 0.8*age + 0.004*lot
+//             (+40 premium over 2000 sqft)
+//
+// The price depends on the TRUE lot size even on the listings whose lot
+// size went unrecorded — which is what makes the missing column worth
+// splitting on, and therefore what makes the learned default direction
+// observable (MissingDemo). Missing data that no one would ever split on
+// teaches nothing about missing-value handling.
+//
+// Every value is derived arithmetically from the row index: no RNG, no
+// files, no clock — the table is bit-identical on every machine, which is
+// the precondition for a tour that asserts on bits. Realistic SHAPE does
+// not require randomness; it requires meaningful names, scales, an
+// interaction worth splitting on, and honest missing values.
+public final class Data {
+
+    public static int64 rows() { return (int64) 400; }
+    public static int64 features() { return (int64) 4; }
+
+    public static int64 SQFT() { return (int64) 0; }
+    public static int64 BEDROOMS() { return (int64) 1; }
+    public static int64 AGE() { return (int64) 2; }
+    public static int64 LOT() { return (int64) 3; }
+
+    public static String featureName(int64 f) {
+        if (f == (int64) 0) { return "sqft_living"; }
+        if (f == (int64) 1) { return "bedrooms"; }
+        if (f == (int64) 2) { return "age_years"; }
+        if (f == (int64) 3) { return "lot_sqft"; }
+        return "f" + f;
+    }
+
+    /** IEEE-754 quiet NaN — the missing-value marker the library routes on. */
+    public static float64 missing() {
+        return Cajeta.bitsToF64((int64) 0x7FF8000000000000);
+    }
+
+    public static boolean isMissing(float64 v) {
+        return (Cajeta.f64ToBits(v) & (int64) 0x7FFFFFFFFFFFFFFF)
+             > (int64) 0x7FF0000000000000;
+    }
+
+    /** True for the rows whose lot size is unrecorded (every 17th listing). */
+    public static boolean lotMissingAt(int64 row) {
+        return (row % (int64) 17) == (int64) 0;
+    }
+
+    /** The lot size that actually exists — recorded or not. */
+    public static float64 trueLot(int64 row) {
+        return (float64) ((int64) 2000 + (row * (int64) 91) % (int64) 8000);
+    }
+
+    /** The design matrix, [n, nf] row-major. */
+    public static #Tensor<float64> x() {
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+        float64[] xs = heap float64[n * nf];
+        int64 i = (int64) 0;
+        while (i < n) {
+            float64 sqft = (float64) ((int64) 800 + (i * (int64) 37) % (int64) 2400);
+            float64 beds = (float64) ((int64) 1 + i % (int64) 5);
+            float64 age  = (float64) ((i * (int64) 13) % (int64) 60);
+            xs[i * nf + (int64) 0] = sqft;
+            xs[i * nf + (int64) 1] = beds;
+            xs[i * nf + (int64) 2] = age;
+            // The lot is always there in reality; the LISTING sometimes
+            // omits it. Only the observation is missing, never the effect.
+            if (Data.lotMissingAt(i)) {
+                xs[i * nf + (int64) 3] = Data.missing();
+            } else {
+                xs[i * nf + (int64) 3] = Data.trueLot(i);
+            }
+            i = i + (int64) 1;
+        }
+        int64[] shape = heap int64[2];
+        shape[0] = n;
+        shape[1] = nf;
+        return Tensor.of<float64>(xs, shape);
+    }
+
+    /** The label: sale price in $thousands, with a premium above 2000 sqft. */
+    public static #float64[] y(Tensor<float64> x) {
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+        float64[] y = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            float64 sqft = x.flatGet(i * nf + (int64) 0);
+            float64 beds = x.flatGet(i * nf + (int64) 1);
+            float64 age  = x.flatGet(i * nf + (int64) 2);
+            float64 price = (float64) 60.0
+                + (float64) 0.12 * sqft
+                + (float64) 15.0 * beds
+                - (float64) 0.8 * age
+                + (float64) 0.004 * Data.trueLot(i);   // priced even when unrecorded
+            if (sqft > (float64) 2000.0) {
+                price = price + (float64) 40.0;        // the interaction to learn
+            }
+            y[i] = price;
+            i = i + (int64) 1;
+        }
+        return #y;
+    }
+
+    /** The label as a [n] tensor — the shape the ml estimator protocol takes. */
+    public static #Tensor<float64> yTensor(float64[] y) {
+        int64[] shape = heap int64[1];
+        shape[0] = Data.rows();
+        return Tensor.of<float64>(y, shape);
+    }
+}

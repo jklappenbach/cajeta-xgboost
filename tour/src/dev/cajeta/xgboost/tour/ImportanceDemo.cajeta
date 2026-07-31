@@ -1,0 +1,166 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.predict.Importance;
+
+// Feature importance — which columns the forest actually used.
+//
+// `predict.Importance` reproduces XGBoost's `get_score` totals, summing
+// over every split node of every tree:
+//
+//   weight      += 1              how often the feature was split on
+//   total_gain  += loss_change    how much objective it bought
+//   total_cover += sum_hessian    how much data those splits governed
+//
+// LIBRARY GAP (cajeta-xgboost plan D2): `Importance.addTree` needs
+// per-node `lossChanges` and `sumHessian` tensors, and a trained `Model`
+// stores neither (nor `Tensor<int32>` children — it keeps `int64[]`). So
+// gain and cover are reachable today only from arrays you hold yourself,
+// as below. When D2 lands (Model grows the two per-node vectors, or
+// Importance gains a Model-consuming overload) this demo collapses to:
+//
+//     float64[] gain = heap float64[nf];
+//     Importance.forModel(m, weight, gain, cover);
+//
+// Until then this demo does both halves honestly: it drives the real API
+// on a tree whose stats we DO have, and it computes weight straight off
+// the Model — then checks the two agree, which is what makes the gap a
+// gap and not a mystery.
+public class ImportanceDemo extends DemoClass {
+
+    public void execute() {
+        this.section("6. Feature importance — get_score parity, and the D2 gap");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        int64 nf = Data.features();
+        Model m = TrainDemo.fitted(x, y);
+
+        // --- what you can do with a Model today: weight importance -------
+        float64[] weight = heap float64[nf];
+        int64 r = (int64) 0;
+        while (r < m.rounds) {
+            int64 k = (int64) 0;
+            while (k < m.nodeCount[r]) {
+                int64 node = r * m.cap + k;
+                if (!m.isLeaf[node]) {
+                    int64 f = m.splitIndices[node];
+                    weight[f] = weight[f] + (float64) 1.0;
+                }
+                k = k + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        int64 used = (int64) 0;
+        int64 f = (int64) 0;
+        while (f < nf) {
+            System.stdout.println("   " + Data.featureName(f) + ": "
+                + weight[f] + " splits");
+            if (weight[f] > (float64) 0.0) { used = used + (int64) 1; }
+            f = f + (int64) 1;
+        }
+        this.check(used >= (int64) 3,
+            "the informative columns all earned splits");
+        this.check(weight[Data.SQFT()] > (float64) 0.0,
+            "sqft_living — the strongest signal — was split on");
+
+        // --- the real Importance API, on stats we hold ourselves ---------
+        // A three-node fixture: root splits on sqft_living (gain 40, cover
+        // 120), its left child splits on age_years (gain 10, cover 50).
+        // Exactly the shape addTree consumes.
+        int64 nodes = (int64) 5;
+        int32[] lcA = heap int32[nodes];
+        int32[] siA = heap int32[nodes];
+        float32[] lossA = heap float32[nodes];
+        float64[] hessA = heap float64[nodes];
+        // node 0: split on sqft, children 1/2
+        lcA[0] = (int32) 1;  siA[0] = (int32) Data.SQFT();
+        lossA[0] = (float32) 40.0;  hessA[0] = (float64) 120.0;
+        // node 1: split on age, children 3/4
+        lcA[1] = (int32) 3;  siA[1] = (int32) Data.AGE();
+        lossA[1] = (float32) 10.0;  hessA[1] = (float64) 50.0;
+        // nodes 2,3,4: leaves (leftChild -1)
+        lcA[2] = (int32) 0 - (int32) 1;  lcA[3] = (int32) 0 - (int32) 1;
+        lcA[4] = (int32) 0 - (int32) 1;
+
+        Tensor<int32> lc = ImportanceDemo.i32t(lcA, nodes);
+        Tensor<int32> si = ImportanceDemo.i32t(siA, nodes);
+        Tensor<float32> loss = ImportanceDemo.f32t(lossA, nodes);
+        Tensor<float64> hess = ImportanceDemo.f64t(hessA, nodes);
+
+        float64[] w2 = heap float64[nf];
+        float64[] gain = heap float64[nf];
+        float64[] cover = heap float64[nf];
+        Importance.addTree(lc, si, loss, hess, nodes, w2, gain, cover);
+
+        System.stdout.println("   fixture tree — sqft_living: weight "
+            + w2[Data.SQFT()] + ", total_gain " + gain[Data.SQFT()]
+            + ", total_cover " + cover[Data.SQFT()]);
+        System.stdout.println("   fixture tree — age_years:   weight "
+            + w2[Data.AGE()] + ", total_gain " + gain[Data.AGE()]
+            + ", total_cover " + cover[Data.AGE()]);
+        this.check(w2[Data.SQFT()] == (float64) 1.0
+            && w2[Data.AGE()] == (float64) 1.0
+            && w2[Data.BEDROOMS()] == (float64) 0.0,
+            "weight counts split nodes per feature (leaves contribute nothing)");
+        this.check(gain[Data.SQFT()] == (float64) 40.0
+            && cover[Data.SQFT()] == (float64) 120.0,
+            "total_gain / total_cover accumulate the node's loss change and hessian");
+
+        // The bridge that makes the gap legible: run the SAME weight count
+        // through addTree on a Model-derived tree (children only — the
+        // stats it also wants are the ones the Model lacks), and check it
+        // reproduces the hand walk above for tree 0.
+        int64 cap = m.cap;
+        int64 count0 = m.nodeCount[0];
+        int32[] lc0 = heap int32[count0];
+        int32[] si0 = heap int32[count0];
+        float32[] loss0 = heap float32[count0];   // D2: not stored on Model — zeros
+        float64[] hess0 = heap float64[count0];   // D2: not stored on Model — zeros
+        int64 k2 = (int64) 0;
+        while (k2 < count0) {
+            lc0[k2] = m.isLeaf[k2] ? (int32) 0 - (int32) 1 : (int32) m.leftChildren[k2];
+            si0[k2] = (int32) m.splitIndices[k2];
+            k2 = k2 + (int64) 1;
+        }
+        float64[] w3 = heap float64[nf];
+        float64[] g3 = heap float64[nf];
+        float64[] c3 = heap float64[nf];
+        Importance.addTree(ImportanceDemo.i32t(lc0, count0),
+                           ImportanceDemo.i32t(si0, count0),
+                           ImportanceDemo.f32t(loss0, count0),
+                           ImportanceDemo.f64t(hess0, count0),
+                           count0, w3, g3, c3);
+        float64 handTree0 = (float64) 0.0;
+        int64 k3 = (int64) 0;
+        while (k3 < count0) {
+            if (!m.isLeaf[k3] && m.splitIndices[k3] == Data.SQFT()) {
+                handTree0 = handTree0 + (float64) 1.0;
+            }
+            k3 = k3 + (int64) 1;
+        }
+        this.check(w3[Data.SQFT()] == handTree0,
+            "Importance's weight over tree 0 == the hand walk's count");
+        this.check(g3[Data.SQFT()] == (float64) 0.0,
+            "gain/cover come back ZERO from a Model — the D2 gap, shown not hidden");
+    }
+
+    static #Tensor<int32> i32t(int32[] v, int64 len) {
+        int64[] shape = heap int64[1];
+        shape[0] = len;
+        return Tensor.of<int32>(v, shape);
+    }
+
+    static #Tensor<float32> f32t(float32[] v, int64 len) {
+        int64[] shape = heap int64[1];
+        shape[0] = len;
+        return Tensor.of<float32>(v, shape);
+    }
+
+    static #Tensor<float64> f64t(float64[] v, int64 len) {
+        int64[] shape = heap int64[1];
+        shape[0] = len;
+        return Tensor.of<float64>(v, shape);
+    }
+}

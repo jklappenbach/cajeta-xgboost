@@ -1,0 +1,113 @@
+package dev.cajeta.xgboost.tour;
+
+import dev.cajeta.xgboost.objective.SquaredError;
+import dev.cajeta.xgboost.objective.Logistic;
+import dev.cajeta.xgboost.objective.Softmax;
+
+// Objectives — what the booster is actually minimizing.
+//
+// An objective is two functions of (margin, label): the first-order
+// gradient and the second-order hessian. That is the entire contract; the
+// tree builder consumes grad/hess and never knows which loss produced
+// them. All three shipped objectives are bit-faithful ports of XGBoost's
+// device kernels, down to the epsilon and the operation order.
+//
+//   SquaredError  reg:squarederror — grad = margin - label, hess = 1
+//   Logistic      binary:logistic  — grad = sigmoid(m) - label,
+//                                    hess = max(p(1-p), eps)
+//   Softmax       multi:softmax    — per-class p_k from a shift-invariant
+//                                    softmax; grad = p - [k==label]
+//
+// LIBRARY GAP (cajeta-xgboost plan D1): only SquaredError is reachable
+// from a fit entry point — `Booster.train` hardcodes it, and `TreeWalker`
+// walks a single output group. So `Logistic` and `Softmax` are complete,
+// tested, GPU-parity objectives with no public training path yet, and the
+// spec's binary/multiclass demo cannot be written. What CAN be shown —
+// and is, below — is the math itself, which is the part a learner needs
+// to recognize. When D1 lands the demo grows a fit:
+//
+//     Params p = heap Params();
+//     p.objective = Objective.MULTI_SOFTMAX;  p.numClass = 3;
+//     Model m = GBDT.fit(x, classLabels, n, nf, p);
+public class ObjectivesDemo extends DemoClass {
+
+    public void execute() {
+        this.section("7. Objectives — the gradients underneath (and the D1 gap)");
+
+        // --- reg:squarederror — the one wired to training ----------------
+        // Residual gradient, constant hessian: the reason a squared-error
+        // tree's leaf value is just a (regularized) mean residual.
+        float64 g = SquaredError.grad((float32) 12.0, (float64) 10.0);
+        float64 h = SquaredError.hess((float32) 12.0, (float64) 10.0);
+        System.stdout.println("   squarederror: margin 12 vs label 10 -> grad "
+            + g + ", hess " + h);
+        this.check(g == (float64) 2.0 && h == (float64) 1.0,
+            "squared error: grad = margin - label, hess = 1");
+        this.check(SquaredError.baseMargin((float64) 0.5) == (float32) 0.5,
+            "its base margin is base_score under the identity link");
+
+        // The vector form is what the booster calls once per round.
+        float32[] margins = heap float32[3];
+        margins[0] = (float32) 1.0;
+        margins[1] = (float32) 2.0;
+        margins[2] = (float32) 3.0;
+        float64[] labels = heap float64[3];
+        labels[0] = (float64) 1.0;
+        labels[1] = (float64) 0.0;
+        labels[2] = (float64) 5.0;
+        float64[] gs = heap float64[3];
+        float64[] hs = heap float64[3];
+        SquaredError.gradHess(margins, labels, (int64) 3, gs, hs);
+        this.check(gs[0] == (float64) 0.0 && gs[1] == (float64) 2.0
+            && gs[2] == (float64) 0.0 - (float64) 2.0,
+            "gradHess fills the per-row vectors the tree builder consumes");
+
+        // --- binary:logistic — complete, but unreachable from fit (D1) ---
+        // sigmoid is the link: margin 0 -> p 0.5, and the hessian peaks
+        // there (p(1-p) = 0.25), which is why confident rows stop moving.
+        float32 p0 = Logistic.sigmoid((float32) 0.0);
+        float32 pPos = Logistic.sigmoid((float32) 2.0);
+        float32 pNeg = Logistic.sigmoid((float32) 0.0 - (float32) 2.0);
+        System.stdout.println("   logistic: sigmoid(0)=" + (float64) p0
+            + ", sigmoid(2)=" + (float64) pPos
+            + ", sigmoid(-2)=" + (float64) pNeg);
+        this.check(p0 > (float32) 0.4999 && p0 < (float32) 0.5001,
+            "sigmoid(0) = 0.5 — the decision boundary");
+        this.check(pPos > (float32) 0.88 && pNeg < (float32) 0.12,
+            "the link is symmetric about 0");
+        float64 lg = Logistic.grad((float32) 0.0, (float64) 1.0);
+        float64 lh = Logistic.hess((float32) 0.0, (float64) 1.0);
+        System.stdout.println("   logistic: at margin 0 with label 1 -> grad "
+            + lg + ", hess " + lh);
+        this.check(lg < (float64) 0.0 - (float64) 0.49 && lg > (float64) 0.0 - (float64) 0.51,
+            "grad = p - label = -0.5: push the margin up toward the positive class");
+        this.check(lh > (float64) 0.24 && lh < (float64) 0.26,
+            "hess = p(1-p) = 0.25, its maximum at the boundary");
+
+        // --- multi:softmax — likewise complete, likewise unreachable -----
+        // Three classes, one row, all margins equal: probabilities are 1/3
+        // each, so the true class gets grad 1/3 - 1 and the others 1/3.
+        int64 K = (int64) 3;
+        float32[] mm = heap float32[K];
+        mm[0] = (float32) 0.0;
+        mm[1] = (float32) 0.0;
+        mm[2] = (float32) 0.0;
+        float64[] cls = heap float64[1];
+        cls[0] = (float64) 1.0;                 // the true class is 1
+        float64[] mg = heap float64[K];
+        float64[] mh = heap float64[K];
+        Softmax.gradHess(mm, cls, (int64) 1, K, mg, mh);
+        System.stdout.println("   softmax (3 classes, flat margins, true=1): grad ["
+            + mg[0] + ", " + mg[1] + ", " + mg[2] + "]");
+        this.check(mg[1] < (float64) 0.0 && mg[0] > (float64) 0.0 && mg[2] > (float64) 0.0,
+            "the true class is pushed up, every other class down");
+        float64 sum = mg[0] + mg[1] + mg[2];
+        this.check(sum > (float64) 0.0 - (float64) 0.001 && sum < (float64) 0.001,
+            "the per-row gradients sum to zero — softmax is shift-invariant");
+        this.check(Softmax.baseMargin() == (float32) 0.0,
+            "softmax initializes every class margin at 0");
+
+        System.stdout.println("   NOTE: Logistic/Softmax have no public fit path yet"
+            + " (cajeta-xgboost plan D1) — the math is here, the training wiring is not.");
+    }
+}
