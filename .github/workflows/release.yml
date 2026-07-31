@@ -36,11 +36,11 @@ permissions:
   contents: write
 
 env:
-  # Must match a release tag of jklappenbach/cajeta. v0.12.0 carries the
-  # iface-generic-returns dispatch fix that the XGBRegressor Predictor
-  # conformer exercises, plus the cajeta.math.linalg surface the
+  # Must match a release tag of jklappenbach/cajeta. v0.12.1 carries the
+  # loader-materialization fix (cross-file records; the Frames bridge test)
+  # plus v0.12.0's iface-generic-returns dispatch fix and linalg surface the
   # dev.cajeta.ml dependency is built against.
-  CAJETA_VERSION: v0.12.0
+  CAJETA_VERSION: v0.12.1
 
 jobs:
   build-test:

@@ -36,7 +36,7 @@
         // Metrics/Split machinery the adapter and its tests lean on;
         // run-tests.sh resolves it (sibling checkout → store → Olla).
         "dependencies": {
-            "dev.cajeta.ml": "0.1.0"
+            "dev.cajeta.ml": "0.2.0"
         },
 
         // The suite is driven by cajeta-unit's reflective @Test discovery;

@@ -2,6 +2,10 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
+import cajeta.nucleo.column.Column;
+import cajeta.nucleo.frame.Table;
+import dev.cajeta.ml.Design;
+import dev.cajeta.ml.Frames;
 import dev.cajeta.ml.KFold;
 import dev.cajeta.ml.Metrics;
 import dev.cajeta.ml.MlException;
@@ -11,6 +15,13 @@ import dev.cajeta.xgboost.api.GBDT;
 import dev.cajeta.xgboost.api.Params;
 import dev.cajeta.xgboost.api.XGBRegressor;
 import dev.cajeta.xgboost.booster.Model;
+
+/** Frame-bridge fixture schema (`Frames.design` cross-library proof). */
+record RegRow {
+    float64 f0;
+    float64 f1;
+    float64 yv;
+}
 
 /**
  * U13 — the `dev.cajeta.ml.Predictor` adapter over GBDT (plan 13.1).
@@ -201,6 +212,51 @@ public class AdapterTest {
             i = i + (int64) 1;
         }
         Assert.isTrue(concrete.score(x, y) == viaIface.score(x, y));
+    }
+
+    @Test
+    public void fromDesignMatchesTensorFit() {
+        // table-fit plan 4.1.5 — the cross-library proof: a Table<R> flows
+        // through dev.cajeta.ml's Frames bridge into the xgboost adapter,
+        // and the result is bit-identical to fitting the same data as
+        // hand-built tensors. Two libraries, one protocol, no glue.
+        int64 n = (int64) 30;
+        float64[] f0 = heap float64[n];
+        float64[] f1 = heap float64[n];
+        float64[] yv = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            f0[i] = (float64) i;
+            f1[i] = (float64) ((i * (int64) 3) % (int64) 7);
+            yv[i] = (float64) 0.5 * f0[i] - f1[i] + (float64) 2.0;
+            i = i + (int64) 1;
+        }
+        Table<RegRow> t = heap Table<RegRow>(
+            Column.of<float64>(f0), Column.of<float64>(f1),
+            Column.of<float64>(yv));
+
+        // The two lines.
+        Design d = Frames.design<RegRow>(t, "yv");
+        Params pa = AdapterTest.tinyRegParams();
+        XGBRegressor viaFrame = heap XGBRegressor(pa);
+        viaFrame.fit(d.x, d.y);
+
+        // The same fit from the adapter's own synthetic tensors (identical
+        // values by construction — synthX/synthY use the same formulas).
+        Params pb = AdapterTest.tinyRegParams();
+        XGBRegressor viaTensor = heap XGBRegressor(pb);
+        Tensor<float64> hx = AdapterTest.synthX();
+        Tensor<float64> hy = AdapterTest.synthY();
+        viaTensor.fit(hx, hy);
+
+        Tensor<float64> pf = viaFrame.predict(d.x);
+        Tensor<float64> pt = viaTensor.predict(hx);
+        Assert.equals(pf.shapeAt(0), pt.shapeAt(0));
+        i = (int64) 0;
+        while (i < n) {
+            Assert.isTrue(pf.get1(i) == pt.get1(i));
+            i = i + (int64) 1;
+        }
     }
 
     @Test
