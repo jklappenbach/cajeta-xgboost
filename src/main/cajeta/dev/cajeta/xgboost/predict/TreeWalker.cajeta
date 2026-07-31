@@ -42,6 +42,37 @@ public final class TreeWalker {
     }
 
     /**
+     * Raw margins for a K-group model, row-major `[n*K]` (row `i`, class `k` at
+     * `i*K + k`). Tree `t` contributes to class `t % K` — the round-major layout
+     * the booster writes — so one pass over the forest fills every group.
+     *
+     * For `K == 1` this is exactly {@link #marginSingle}; the split exists
+     * because the single-group case is the hot path and deserves no indexing
+     * arithmetic it doesn't need.
+     */
+    public static void marginMulti(Model m, Tensor<float64> x, int64 n, int64 nf,
+                                   float32[] out) {
+        int64 K = m.numClass < (int64) 1 ? (int64) 1 : m.numClass;
+        float64[] xrow = heap float64[nf];
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 j = (int64) 0;
+            while (j < nf) { xrow[j] = x.flatGet(r * nf + j); j = j + (int64) 1; }
+            int64 k = (int64) 0;
+            while (k < K) { out[r * K + k] = m.baseMargin; k = k + (int64) 1; }
+            int64 t = (int64) 0;
+            while (t < m.rounds) {                       // m.rounds is the TREE count
+                int64 cls = t % K;
+                out[r * K + cls] = out[r * K + cls]
+                    + TreeWalker.leaf(m.leftChildren, m.rightChildren, m.splitIndices,
+                                      m.splitConditions, m.defaultLeft, t * m.cap, xrow);
+                t = t + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+    }
+
+    /**
      * Raw output margin per row for a single-group model (regression / binary):
      * `baseMargin + Σ_t leaf(tree t)`, float32, tree order. `out` has length `n`.
      */

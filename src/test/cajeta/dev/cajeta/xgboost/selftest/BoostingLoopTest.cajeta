@@ -3,6 +3,7 @@ package dev.cajeta.xgboost.selftest;
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.booster.Model;
 
 /**
@@ -39,7 +40,7 @@ public class BoostingLoopTest {
                                 (int64) 4, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5,
-                                marginHistory);
+                                Objective.SQUARED_ERROR, (int64) 1, marginHistory);
         Assert.that(m.rounds).isEqualTo(rounds);
 
         Tensor<float64> refMargins = f.margins();   // [rounds, n]

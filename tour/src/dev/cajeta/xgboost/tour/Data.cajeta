@@ -116,6 +116,45 @@ public final class Data {
         return #y;
     }
 
+    /**
+     * A BINARY label from the same table: is this listing expensive (price
+     * above $400k)? Real classification targets are usually a threshold on
+     * something continuous you already have.
+     */
+    public static #float64[] expensiveLabels(float64[] price) {
+        int64 n = Data.rows();
+        float64[] y = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            y[i] = price[i] > (float64) 400.0 ? (float64) 1.0 : (float64) 0.0;
+            i = i + (int64) 1;
+        }
+        return #y;
+    }
+
+    /** Class count for the price-tier label. */
+    public static int64 tiers() { return (int64) 3; }
+
+    /** A 3-CLASS label: budget (0) / mid (1) / luxury (2), by price band. */
+    public static #float64[] tierLabels(float64[] price) {
+        int64 n = Data.rows();
+        float64[] y = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            if (price[i] < (float64) 300.0) { y[i] = (float64) 0.0; }
+            else if (price[i] < (float64) 450.0) { y[i] = (float64) 1.0; }
+            else { y[i] = (float64) 2.0; }
+            i = i + (int64) 1;
+        }
+        return #y;
+    }
+
+    public static String tierName(int64 k) {
+        if (k == (int64) 0) { return "budget"; }
+        if (k == (int64) 1) { return "mid"; }
+        return "luxury";
+    }
+
     /** The label as a [n] tensor — the shape the ml estimator protocol takes. */
     public static #Tensor<float64> yTensor(float64[] y) {
         int64[] shape = heap int64[1];

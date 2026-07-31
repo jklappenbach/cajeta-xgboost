@@ -9,7 +9,7 @@ The tour lives in `tour/src/dev/cajeta/xgboost/tour/`, one self-checking demo
 per topic, registered in `Tour.cajeta`. It is **self-checking**: every claim it
 prints is asserted, and it exits non-zero if any stops being true — so it
 doubles as a public-surface smoke test. `scripts/check-library-tour-coverage.sh`
-holds it to the whole surface (22/22 public types today) and runs in CI.
+holds it to the whole surface (23/23 public types today) and runs in CI.
 
 The dataset (`Data.cajeta`) is a house-price table with **named features** —
 `sqft_living`, `bedrooms`, `age_years`, `lot_sqft` — derived arithmetically from
@@ -38,15 +38,16 @@ What each demo demonstrates:
    recorded `lot_sqft` moves the prediction on 241 listings, and a hand walk
    that follows `defaultLeft` reproduces `TreeWalker.leaf` and
    `TreeWalker.marginSingle` exactly.
-5. **`ImportanceDemo`** — `predict.Importance` reproducing `get_score`
-   (weight / total_gain / total_cover), plus the honest edge: gain and cover
-   come back **zero** from a trained `Model`, because `Model` stores no
-   per-node loss change or hessian (plan **D2**).
-6. **`ObjectivesDemo`** — the gradients themselves: `SquaredError`,
-   `Logistic` (sigmoid, `p−label`, `p(1−p)`), `Softmax` (shift-invariant,
-   gradients summing to zero). Logistic and Softmax are complete and
-   GPU-faithful but have **no public fit path** yet (plan **D1**), so the
-   multiclass training demo is the one thing this tour cannot honestly show.
+5. **`ImportanceDemo`** — `Importance.forModel(model, nf, weight, gain, cover)`
+   reproducing `get_score` straight off a trained model, cross-checked against a
+   hand walk for `weight`; plus `addTree`, the per-tree primitive underneath.
+6. **`ObjectivesDemo`** — the three tasks the same table supports: the
+   gradients themselves (`SquaredError`, `Logistic`, `Softmax`), then a real
+   `binary:logistic` fit (probabilities strictly inside (0,1), ~99.8% training
+   accuracy, and the link-free `margin > 0 ⇔ p > 0.5` decision) and a real
+   `multi:softmax` fit (3 price tiers, 12 rounds × 3 classes = 36 trees
+   round-major, rows summing to 1, a bit-identical refit). Set
+   `Params.objective` (+ `numClass`) and `GBDT.fit` does the rest.
 7. **`PersistDemo`** — `ModelIO.serialize` → a real file → read back →
    `deserialize` → bit-identical predictions, audit bit intact. Train once,
    score later, which is the deployment story.
@@ -65,14 +66,18 @@ What each demo demonstrates:
     `Split.crossValScore` like any other ecosystem estimator, with `model()`
     keeping `ModelIO` and the tree walk reachable.
 
-## Known gaps the tour points at
+## Objectives and importance (previously plan gaps D1/D2 — both closed)
 
-Both are library gaps tracked in the plan, and the tour names them where a
-learner would otherwise be confused:
+- **D1 — objective-parameterized training.** `Params.objective` selects the
+  loss and `Params.numClass` the group count; `Booster.train` grows K trees per
+  round over K gradient slices (round-major, class of tree `j` is `j % K`), and
+  `GBDT.predictProba` / `predictClass` apply the inverse link. The regression
+  path is unchanged and still bit-exact — the parity fixtures pin it.
+- **D2 — importance from a Model.** `TreeBuilder` records per-node
+  `lossChanges`/`sumHessian` during growth (neither is recoverable from a
+  finished tree), they ride through `Booster` → `Model` → `ModelIO`, and
+  `Importance.forModel` sums `get_score`'s three totals.
 
-- **D1** — no public binary/multiclass training path: `Booster.train` hardcodes
-  `SquaredError` and `TreeWalker` walks a single output group, so `Logistic`
-  and `Softmax` are unreachable from `fit`.
-- **D2** — `Importance.addTree` cannot consume a trained `Model` (it needs
-  per-node `lossChanges`/`sumHessian` tensors the `Model` does not store), so
-  gain/cover importance is reachable only from arrays you hold yourself.
+What remains open is *parity*, not reachability: full bit-exact agreement with
+XGBoost's multiclass output is still gated on the two U12 transcendental items
+(`expf`, and a GPU split-selection near-tie), per plan unit 7.3.1.

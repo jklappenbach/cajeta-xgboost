@@ -1,5 +1,7 @@
 package dev.cajeta.xgboost.api;
 
+import dev.cajeta.xgboost.objective.Objective;
+
 /**
  * Training hyperparameters for {@link GBDT} (spec §1.7, §3, §7.2). Field names and
  * defaults mirror XGBoost's, and the defaults are exactly the **deterministic**
@@ -10,6 +12,8 @@ package dev.cajeta.xgboost.api;
  * deterministic entry point ({@link GBDT#fit}) rejects it (§1.7.1).
  */
 public final class Params {
+    public Objective objective;      // which loss to minimize (default squarederror)
+    public int64   numClass;         // multi:softmax class count (K); 1 otherwise
     public int64   rounds;           // num_boost_round
     public int64   maxDepth;         // max_depth
     public int64   maxLeaves;        // max_leaves (0 = unbounded)
@@ -25,6 +29,8 @@ public final class Params {
 
     /** XGBoost defaults — the deterministic, bit-exact config set (§6.4). */
     public Params() {
+        this.objective = Objective.SQUARED_ERROR;
+        this.numClass = (int64) 1;
         this.rounds = (int64) 10;
         this.maxDepth = (int64) 6;
         this.maxLeaves = (int64) 0;
@@ -45,6 +51,17 @@ public final class Params {
      * deterministic config set. Row/column subsampling depend on XGBoost's RNG,
      * whose parity is not yet reproduced, so these are non-deterministic (§1.7).
      */
+    /**
+     * Output groups grown per boosting round: K for `multi:softmax`, 1 for the
+     * single-margin objectives. A round grows exactly this many trees.
+     */
+    public int64 outputGroups() {
+        if (this.objective == Objective.SOFTMAX) {
+            return this.numClass;
+        }
+        return (int64) 1;
+    }
+
     public boolean usesStochasticSampling() {
         return this.subsample < (float64) 1.0 || this.colsampleByTree < (float64) 1.0;
     }

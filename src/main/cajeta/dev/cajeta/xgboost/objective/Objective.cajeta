@@ -1,0 +1,21 @@
+package dev.cajeta.xgboost.objective;
+
+/**
+ * Which loss the booster minimizes — XGBoost's `objective` parameter.
+ *
+ *   SQUARED_ERROR  `reg:squarederror` — one output group, identity link
+ *   LOGISTIC       `binary:logistic`  — one output group, sigmoid link
+ *   SOFTMAX        `multi:softmax`    — K output groups, softmax link
+ *
+ * The objective decides three things and nothing else: the initial margin
+ * ({@link SquaredError#baseMargin} and friends), the per-row gradient pair,
+ * and the number of output groups grown per boosting round. Everything
+ * downstream — the quantile sketch, the fixed-point histogram, the split
+ * search, the tree layout — is objective-agnostic, which is why a K-class
+ * model is just K trees per round over K gradient slices.
+ */
+public enum Objective {
+    SQUARED_ERROR,
+    LOGISTIC,
+    SOFTMAX
+}

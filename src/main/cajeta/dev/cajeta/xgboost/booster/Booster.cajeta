@@ -2,6 +2,9 @@ package dev.cajeta.xgboost.booster;
 
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.objective.SquaredError;
+import dev.cajeta.xgboost.objective.Logistic;
+import dev.cajeta.xgboost.objective.Softmax;
+import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.TreeBuilder;
 
 /**
@@ -22,6 +25,31 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
  */
 public final class Booster {
 
+    /** The margin every row starts at, under the objective's link. */
+    static float32 baseMarginOf(Objective o, float64 baseScore) {
+        if (o == Objective.LOGISTIC) {
+            return Logistic.baseMargin(baseScore);
+        }
+        if (o == Objective.SOFTMAX) {
+            return Softmax.baseMargin();
+        }
+        return SquaredError.baseMargin(baseScore);
+    }
+
+    /** Per-(row, class) gradient pair for the objective. */
+    static void gradHessOf(Objective o, float32[] margin, float64[] label,
+                           int64 n, int64 K, float64[] grad, float64[] hess) {
+        if (o == Objective.LOGISTIC) {
+            Logistic.gradHess(margin, label, n, grad, hess);
+            return;
+        }
+        if (o == Objective.SOFTMAX) {
+            Softmax.gradHess(margin, label, n, K, grad, hess);
+            return;
+        }
+        SquaredError.gradHess(margin, label, n, grad, hess);
+    }
+
     /**
      * Train a `rounds`-tree regression forest over the binned matrix.
      *
@@ -36,74 +64,102 @@ public final class Booster {
                                int64 maxDepth, int64 maxLeaves,
                                float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
                                float64 eta, float64 baseScore,
+                               Objective objective, int64 numClass,
                                float32[] marginHistory) {
         int64 cap = TreeBuilder.capacity(maxDepth);
+        // Output groups per round. K trees are grown per round, one per class,
+        // each over ITS OWN gradient slice — the objective is the only thing
+        // that differs between a regression fit and a K-class fit; the sketch,
+        // the fixed-point histogram and the split search never learn about it.
+        int64 K = (objective == Objective.SOFTMAX) ? numClass : (int64) 1;
+        if (K < (int64) 1) { K = (int64) 1; }
+        int64 trees = rounds * K;
 
-        int64[] nodeCount = heap int64[rounds];
-        int64[]   fSI = heap int64[rounds * cap];
-        float32[] fSC = heap float32[rounds * cap];
-        boolean[] fDL = heap boolean[rounds * cap];
-        int64[]   fLC = heap int64[rounds * cap];
-        int64[]   fRC = heap int64[rounds * cap];
-        float32[] fBW = heap float32[rounds * cap];
-        boolean[] fLF = heap boolean[rounds * cap];
-        float32[] fLCH = heap float32[rounds * cap];   // per-node split gain
-        float64[] fSH  = heap float64[rounds * cap];   // per-node hessian cover
+        int64[] nodeCount = heap int64[trees];
+        int64[]   fSI = heap int64[trees * cap];
+        float32[] fSC = heap float32[trees * cap];
+        boolean[] fDL = heap boolean[trees * cap];
+        int64[]   fLC = heap int64[trees * cap];
+        int64[]   fRC = heap int64[trees * cap];
+        float32[] fBW = heap float32[trees * cap];
+        boolean[] fLF = heap boolean[trees * cap];
+        float32[] fLCH = heap float32[trees * cap];   // per-node split gain
+        float64[] fSH  = heap float64[trees * cap];   // per-node hessian cover
 
-        float32 base = SquaredError.baseMargin(baseScore);
-        float32[] margin = heap float32[n];
+        float32 base = Booster.baseMarginOf(objective, baseScore);
+        float32[] margin = heap float32[n * K];
         int64 i = (int64) 0;
-        while (i < n) { margin[i] = base; i = i + (int64) 1; }
+        while (i < n * K) { margin[i] = base; i = i + (int64) 1; }
 
-        float64[] grad = heap float64[n];
-        float64[] hess = heap float64[n];
+        float64[] grad = heap float64[n * K];
+        float64[] hess = heap float64[n * K];
+        float64[] gradK = heap float64[n];   // one class's slice
+        float64[] hessK = heap float64[n];
         int64[] leafOf = heap int64[n];
 
         int64 r = (int64) 0;
         while (r < rounds) {
-            // (1) Per-row gradient from the current margins (float32).
-            SquaredError.gradHess(margin, label, n, grad, hess);
+            // (1) Per-row (per-class) gradient pair from the current margins.
+            Booster.gradHessOf(objective, margin, label, n, K, grad, hess);
+            int64 g = (int64) 0;
+            while (g < K) {
+                // This class's gradient slice: row-major [n*K], class g at
+                // stride K. For K == 1 this is a straight copy of grad/hess,
+                // so the single-group path stays value-identical.
+                int64 ii = (int64) 0;
+                while (ii < n) {
+                    gradK[ii] = grad[ii * K + g];
+                    hessK[ii] = hess[ii * K + g];
+                    ii = ii + (int64) 1;
+                }
 
-            // (2) Grow this round's tree into scratch arrays; capture leafOf.
-            int64[]   si = heap int64[cap];
-            float32[] sc = heap float32[cap];
-            boolean[] dl = heap boolean[cap];
-            int64[]   lc = heap int64[cap];
-            int64[]   rc = heap int64[cap];
-            float32[] bw = heap float32[cap];
-            boolean[] lf = heap boolean[cap];
-            float64[] nodeStats = heap float64[cap * (int64) 2];
-            int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n,
-                                        maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
-                                        eta, si, sc, dl, lc, rc, bw, lf, nodeStats, leafOf);
-            nodeCount[r] = nc;
+                // (2) Grow this class's tree into scratch arrays; capture leafOf.
+                int64[]   si = heap int64[cap];
+                float32[] sc = heap float32[cap];
+                boolean[] dl = heap boolean[cap];
+                int64[]   lc = heap int64[cap];
+                int64[]   rc = heap int64[cap];
+                float32[] bw = heap float32[cap];
+                boolean[] lf = heap boolean[cap];
+                float64[] nodeStats = heap float64[cap * (int64) 2];
+                int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, gradK, hessK, n,
+                                            maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
+                                            eta, si, sc, dl, lc, rc, bw, lf, nodeStats, leafOf);
+                // Tree index is round-major: r*K + g, so class g's trees are
+                // every K-th tree — XGBoost's own layout.
+                int64 t = r * K + g;
+                nodeCount[t] = nc;
 
-            // (3) Persist the tree into the forest slice r*cap.
-            int64 off = r * cap;
-            int64 k = (int64) 0;
-            while (k < cap) {
-                fSI[off + k] = si[k]; fSC[off + k] = sc[k]; fDL[off + k] = dl[k];
-                fLC[off + k] = lc[k]; fRC[off + k] = rc[k]; fBW[off + k] = bw[k];
-                fLF[off + k] = lf[k];
-                fLCH[off + k] = (float32) nodeStats[k]; fSH[off + k] = nodeStats[cap + k];
-                k = k + (int64) 1;
-            }
+                // (3) Persist the tree into the forest slice t*cap.
+                int64 off = t * cap;
+                int64 k = (int64) 0;
+                while (k < cap) {
+                    fSI[off + k] = si[k]; fSC[off + k] = sc[k]; fDL[off + k] = dl[k];
+                    fLC[off + k] = lc[k]; fRC[off + k] = rc[k]; fBW[off + k] = bw[k];
+                    fLF[off + k] = lf[k];
+                    fLCH[off + k] = (float32) nodeStats[k]; fSH[off + k] = nodeStats[cap + k];
+                    k = k + (int64) 1;
+                }
 
-            // (4) Accumulate each row's leaf value into its margin (float32), and
-            //     record the cumulative margin for this round.
-            int64 hoff = r * n;
-            i = (int64) 0;
-            while (i < n) {
-                float32 leafVal = bw[leafOf[i]];   // leafOf[i] is a leaf → shrunk value
-                margin[i] = margin[i] + leafVal;
-                marginHistory[hoff + i] = margin[i];
-                i = i + (int64) 1;
+                // (4) Accumulate each row's leaf value into THIS CLASS's margin,
+                //     and record the cumulative margin for this round.
+                int64 hoff = r * n * K;
+                i = (int64) 0;
+                while (i < n) {
+                    float32 leafVal = bw[leafOf[i]];   // leafOf[i] is a leaf → shrunk value
+                    margin[i * K + g] = margin[i * K + g] + leafVal;
+                    marginHistory[hoff + i * K + g] = margin[i * K + g];
+                    i = i + (int64) 1;
+                }
+                g = g + (int64) 1;
             }
             r = r + (int64) 1;
         }
 
-        return heap Model(rounds, cap, base, #nodeCount,
-                          #fSI, #fSC, #fDL, #fLC, #fRC, #fBW, #fLF,
-                          #fLCH, #fSH);
+        Model m = heap Model(trees, cap, base, #nodeCount,
+                             #fSI, #fSC, #fDL, #fLC, #fRC, #fBW, #fLF,
+                             #fLCH, #fSH);
+        m.numClass = K;
+        return #m;
     }
 }

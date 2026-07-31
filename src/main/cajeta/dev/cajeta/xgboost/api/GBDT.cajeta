@@ -2,6 +2,10 @@ package dev.cajeta.xgboost.api;
 
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.objective.Objective;
+import dev.cajeta.xgboost.objective.Logistic;
+import dev.cajeta.xgboost.objective.Softmax;
+import dev.cajeta.xgboost.fastmath.FastMath;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.predict.TreeWalker;
 import dev.cajeta.xgboost.sketch.Sketch;
@@ -51,6 +55,10 @@ public final class GBDT {
 
     static #Model fitMode(Tensor<float64> x, float64[] label, int64 n, int64 nf, Params p,
                           boolean deterministic) {
+        if (p.objective == Objective.SOFTMAX && p.numClass < (int64) 2) {
+            throw heap cajeta.error.RecoverableException(
+                "GBDT.fit: multi:softmax needs numClass >= 2 (set Params.numClass)");
+        }
         if (deterministic && p.usesStochasticSampling()) {
             throw heap cajeta.error.RecoverableException(
                 "GBDT.fit: subsample/colsample_bytree < 1 is a non-deterministic mode; use GBDT.fitNonDeterministic");
@@ -83,11 +91,13 @@ public final class GBDT {
         Tensor<int32> binsT = Tensor.of<int32>(binsA, bShape);
 
         // Boosting loop over the binned matrix.
-        float32[] marginHistory = heap float32[p.rounds * n];
+        int64 K = p.outputGroups();
+        float32[] marginHistory = heap float32[p.rounds * n * K];
         Model m = Booster.train(binsT, cutPtrsT, cutValuesT, label, n, p.rounds,
                                 p.maxDepth, p.maxLeaves,
                                 p.lambda, p.alpha, p.gamma, p.minChildWeight,
-                                p.eta, p.baseScore, marginHistory);
+                                p.eta, p.baseScore, p.objective, p.numClass,
+                                marginHistory);
         m.deterministic = deterministic;
         return #m;
     }
@@ -100,6 +110,99 @@ public final class GBDT {
     public static #float32[] predict(Model m, Tensor<float64> x, int64 n, int64 nf) {
         float32[] out = heap float32[n];
         TreeWalker.marginSingle(m, x, n, nf, out);
+        return #out;
+    }
+
+    /**
+     * Class probabilities under the objective's inverse link — the
+     * `binary:logistic` / `multi:softprob` output.
+     *
+     * Returns `[n]` for a binary model (`P(y = 1)`) and `[n*K]` row-major for a
+     * K-class model (row `i`, class `k` at `i*K + k`, each row summing to 1).
+     * Raw margins are what the trees produce; the link is what turns them into
+     * probabilities, and applying it is the difference between a score and a
+     * calibrated answer.
+     */
+    public static #float32[] predictProba(Model m, Tensor<float64> x, int64 n, int64 nf) {
+        int64 K = m.numClass < (int64) 1 ? (int64) 1 : m.numClass;
+        if (K == (int64) 1) {
+            float32[] margins = heap float32[n];
+            TreeWalker.marginSingle(m, x, n, nf, margins);
+            float32[] out = heap float32[n];
+            int64 i = (int64) 0;
+            while (i < n) {
+                out[i] = Logistic.sigmoid(margins[i]);
+                i = i + (int64) 1;
+            }
+            return #out;
+        }
+        float32[] margins = heap float32[n * K];
+        TreeWalker.marginMulti(m, x, n, nf, margins);
+        float32[] out = heap float32[n * K];
+        int64 r = (int64) 0;
+        while (r < n) {
+            // Softmax, shift-invariant: subtract the row max before exp so a
+            // large margin cannot overflow float32.
+            int64 base = r * K;
+            float32 wmax = margins[base];
+            int64 k = (int64) 1;
+            while (k < K) {
+                if (margins[base + k] > wmax) { wmax = margins[base + k]; }
+                k = k + (int64) 1;
+            }
+            float64 wsum = (float64) 0.0;
+            k = (int64) 0;
+            while (k < K) {
+                float32 e = FastMath.expf(margins[base + k] - wmax);
+                out[base + k] = e;
+                wsum = wsum + (float64) e;
+                k = k + (int64) 1;
+            }
+            k = (int64) 0;
+            while (k < K) {
+                out[base + k] = out[base + k] / (float32) wsum;
+                k = k + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        return #out;
+    }
+
+    /**
+     * The predicted class per row — `multi:softmax`'s output, and the
+     * 0.5-threshold decision for a binary model. Returns `[n]`.
+     */
+    public static #int64[] predictClass(Model m, Tensor<float64> x, int64 n, int64 nf) {
+        int64 K = m.numClass < (int64) 1 ? (int64) 1 : m.numClass;
+        int64[] out = heap int64[n];
+        if (K == (int64) 1) {
+            float32[] margins = heap float32[n];
+            TreeWalker.marginSingle(m, x, n, nf, margins);
+            int64 i = (int64) 0;
+            while (i < n) {
+                // margin > 0 <=> sigmoid(margin) > 0.5; no link needed to decide.
+                out[i] = margins[i] > (float32) 0.0 ? (int64) 1 : (int64) 0;
+                i = i + (int64) 1;
+            }
+            return #out;
+        }
+        float32[] margins = heap float32[n * K];
+        TreeWalker.marginMulti(m, x, n, nf, margins);
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 base = r * K;
+            int64 best = (int64) 0;
+            float32 bestM = margins[base];
+            int64 k = (int64) 1;
+            while (k < K) {
+                if (margins[base + k] > bestM) { bestM = margins[base + k]; best = k; }
+                k = k + (int64) 1;
+            }
+            // argmax of the margins is argmax of the probabilities — softmax is
+            // monotone — so the class decision needs no exp at all.
+            out[r] = best;
+            r = r + (int64) 1;
+        }
         return #out;
     }
 }

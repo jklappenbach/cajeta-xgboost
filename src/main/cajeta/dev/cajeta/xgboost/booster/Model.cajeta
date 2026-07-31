@@ -26,6 +26,10 @@ public final class Model {
     public int64 cap;                 // per-tree stride (node ids 0..nodeCount[r])
     public float32 baseMargin;        // base_score under the link
     public boolean deterministic;     // trained under the bit-exact config? (§1.7.3)
+    // Output groups per round (K for multi:softmax, 1 otherwise). `rounds` is the
+    // TREE count, so with K groups tree j belongs to class j % K and a boosting
+    // round is K consecutive trees — XGBoost's own flat, round-major layout.
+    public int64 numClass;
     public int64[] nodeCount;         // [rounds] node count of each tree
     public int64[] splitIndices;      // [rounds*cap] split feature (internal)
     public float32[] splitConditions; // threshold (internal) / leaf value (leaf)
@@ -51,6 +55,7 @@ public final class Model {
         this.cap = cap;
         this.baseMargin = baseMargin;
         this.deterministic = true;
+        this.numClass = (int64) 1;
         this.nodeCount #= nodeCount;
         this.splitIndices #= si;
         this.splitConditions #= sc;

@@ -12,6 +12,7 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
 import dev.cajeta.xgboost.tree.Tree;
 import dev.cajeta.xgboost.tree.NodeStats;
 import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.booster.Model;
 
 // Under the hood — one boosting round, by hand, through the pieces
@@ -175,7 +176,7 @@ public class InternalsDemo extends DemoClass {
         Model m = Booster.train(binsT, cutPtrsT, cutValuesT, y, n, rounds,
                                 (int64) 3, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
-                                (float64) 0.3, (float64) 0.5, history);
+                                (float64) 0.3, (float64) 0.5, Objective.SQUARED_ERROR, (int64) 1, history);
         this.check(m.rounds == rounds, "the booster grew one tree per round");
         float64 err0 = InternalsDemo.mae(history, (int64) 0, y, n);
         float64 errLast = InternalsDemo.mae(history, rounds - (int64) 1, y, n);
