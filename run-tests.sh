@@ -62,13 +62,51 @@ fi
 [[ -f "$unit_cja" ]] || { echo "could not resolve a dev.cajeta.unit archive" >&2; exit 1; }
 echo ">> cajeta-unit: $unit_cja"
 
+# dev.cajeta.ml resolution — same ladder as cajeta-unit. The library proper
+# depends on it (the XGBRegressor Predictor conformer, settings.dependencies),
+# so it is threaded through BOTH the library and the test classpaths:
+#   1. $ML_CJA      — explicit archive path, used verbatim
+#   2. $ML_REPO     — sibling checkout (default ../cajeta-ml): build and use it
+#   3. $OLLA_HOME   — installed dev.cajeta.ml at the cajeta.json pin
+#   4. Olla registry — sha256-verified fetch, cached under build/.ml-cache
+ML_REPO="${ML_REPO:-$here/../cajeta-ml}"
+ml_cja="${ML_CJA:-}"
+if [[ -z "$ml_cja" && -d "$ML_REPO" ]]; then
+    echo ">> building cajeta-ml from checkout ($ML_REPO)"
+    ( cd "$ML_REPO" && "$CAJETA" build >/dev/null )
+    ml_cja="$(ls -t "$ML_REPO"/build/archive/dev.cajeta.ml-*.cja 2>/dev/null | head -1)"
+fi
+if [[ -z "$ml_cja" ]]; then
+    ML_VER="$(sed -n 's/.*"dev\.cajeta\.ml"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$here/cajeta.json" | head -1)"
+    [[ -n "$ML_VER" ]] || { echo "no dev.cajeta.ml pin in cajeta.json" >&2; exit 1; }
+    store_ml="$OLLA_HOME/dev.cajeta.ml/$ML_VER/dev.cajeta.ml-$ML_VER.cja"
+    cache_ml="$here/build/.ml-cache/dev.cajeta.ml-$ML_VER.cja"
+    if [[ -f "$store_ml" ]]; then ml_cja="$store_ml"
+    elif [[ -f "$cache_ml" ]]; then ml_cja="$cache_ml"
+    else
+        echo ">> fetching dev.cajeta.ml $ML_VER from $OLLA_URL"
+        meta="$(curl -fsS "$OLLA_URL/v2/resolve?name=dev.cajeta.ml&version=$ML_VER")"
+        sha="$(printf '%s' "$meta" | sed -n 's/.*"sha256":"sha256:\([0-9a-f]*\)".*/\1/p')"
+        [[ -n "$sha" ]] || { echo "/v2/resolve gave no sha256" >&2; exit 1; }
+        mkdir -p "$(dirname "$cache_ml")"
+        curl -fsS -o "$cache_ml" "$OLLA_URL/v2/blob/$sha"
+        got="$(sha256_of "$cache_ml")"
+        [[ "$got" == "$sha" ]] || { rm -f "$cache_ml"; echo "sha256 mismatch fetching ml" >&2; exit 1; }
+        ml_cja="$cache_ml"
+    fi
+fi
+[[ -f "$ml_cja" ]] || { echo "could not resolve a dev.cajeta.ml archive" >&2; exit 1; }
+echo ">> cajeta-ml: $ml_cja"
+
 echo ">> building xgboost library .cja"
 "$CAJETA" --emit=cja -o "$out/xgboost.cja" \
+    --classpath="$ml_cja" \
     dev.cajeta.xgboost.XGBoost.run "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the test binary"
 "$CAJETA" --emit=exe --profile=test \
-    --classpath="$out/xgboost.cja,$unit_cja" \
+    --classpath="$out/xgboost.cja,$unit_cja,$ml_cja" \
     -o "$out/xgboosttests" \
     dev.cajeta.xgboost.selftest.TestMain.run "$here/src/test/cajeta" "$out" >/dev/null
 

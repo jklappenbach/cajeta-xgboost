@@ -1,9 +1,12 @@
 package dev.cajeta.xgboost.tour;
 
 import cajeta.math.Tensor;
+import dev.cajeta.ml.KFold;
+import dev.cajeta.ml.Split;
 import dev.cajeta.xgboost.XGBoost;
 import dev.cajeta.xgboost.api.GBDT;
 import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.api.XGBRegressor;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.booster.ModelIO;
 import dev.cajeta.xgboost.fastmath.FastMath;
@@ -231,6 +234,31 @@ public final class Tour {
         System.stdout.println("   expf(1.0f) = " + (float64) e1);
         Tour.check(e1 > (float32) 2.718 && e1 < (float32) 2.7183,
                    "device-model expf agrees with e to float32 tolerance");
+
+        // ------------------------------------------------------------------
+        Tour.section("9. The estimator protocol — xgboost as a dev.cajeta.ml Predictor");
+        // XGBRegressor conforms to the ecosystem estimator protocol
+        // (dev.cajeta.ml Estimator/Predictor), so a boosted model drops into
+        // Split.crossValScore and every ml model-selection utility with no
+        // xgboost-specific glue. The underlying Model stays reachable via
+        // model() for the xgboost surfaces above (ModelIO, importance walks).
+        Params pe = heap Params();
+        pe.rounds = (int64) 8;
+        pe.maxDepth = (int64) 4;
+        XGBRegressor est = heap XGBRegressor(pe);
+        int64[] ysh = heap int64[1];
+        ysh[0] = n;
+        Tensor<float64> yT = Tensor.of<float64>(y, ysh);
+        est.fit(x, yT);
+        Tour.check(est.isFitted(), "fit() marks the estimator fitted");
+        float64 r2 = est.score(x, yT);
+        System.stdout.println("   training R^2 = " + r2);
+        Tour.check(r2 > (float64) 0.9,
+                   "score() is the sklearn R^2 convention; the trees explain the structure");
+        KFold folds = heap KFold((int64) 4, false, (uint64) 0);
+        Tensor<float64> cv = Split.crossValScore(est, x, yT, folds);
+        Tour.check(cv.shapeAt(0) == (int64) 4,
+                   "Split.crossValScore accepts the adapter: one R^2 per fold");
 
         // ------------------------------------------------------------------
         System.stdout.println("");

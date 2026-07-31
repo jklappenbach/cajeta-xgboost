@@ -30,6 +30,10 @@ What each section demonstrates:
    after, audit bit intact.
 8. **FastMath** — the device-fidelity layer: whether the probed SFU
    capture tables are loaded, and the device-model `expf` in action.
+9. **The estimator protocol** — `XGBRegressor`, the
+   `dev.cajeta.ml.Predictor` conformer: `fit`/`score` over the same data,
+   then the payoff — the boosted model handed to `Split.crossValScore`
+   like any other ecosystem estimator, no xgboost-specific glue.
 
 The dataset is synthesized arithmetically (no RNG, no files), so the tour
 prints identical bits on every machine — which is the library's whole

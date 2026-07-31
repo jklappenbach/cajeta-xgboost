@@ -97,3 +97,36 @@ the `deterministic` audit bit survives.
 arithmetic — including the device-transcendental model for `expf` (see
 [Determinism.md](Determinism.md)) — and are exercised by the parity suite;
 their public `fit` wiring follows the remaining parity units.
+
+## `XGBRegressor` — the ecosystem estimator protocol
+
+`dev.cajeta.xgboost.api.XGBRegressor` conforms to `dev.cajeta.ml`'s
+`Predictor` (the ecosystem estimator protocol), so a boosted model slots
+into `Split.crossValScore`, and any utility that takes a `Predictor`,
+unchanged:
+
+```cajeta
+Params p = heap Params();
+p.rounds = (int64) 8;
+XGBRegressor est = heap XGBRegressor(p);   // hyperparams snapshot at construction
+est.fit(x, y);                             // y is a (n,) float64 Tensor
+Tensor<float64> pred = est.predict(x);     // (n,) float64
+float64 r2 = est.score(xTest, yTest);      // sklearn R² convention
+Tensor<float64> cv = Split.crossValScore(est, x, y, heap KFold((int64) 5, false, (uint64) 0));
+```
+
+Notes:
+
+- **Fidelity is bit-preserving** — `predict` widens the f32 margins to
+  float64 (exact), so adapter predictions are bit-identical to the direct
+  `GBDT.fit`/`GBDT.predict` pipeline under the same `Params`.
+- **The determinism contract is inherited** — `fit` drives `GBDT.fit`, so
+  a stochastic-sampling config is refused, never silently mislabeled.
+- **The xgboost surfaces stay reachable** — `est.model()` returns the
+  fitted `Model` for `ModelIO`, importance walks, and tree inspection.
+- **`crossValScore` refits the instance per fold** (the protocol has no
+  `clone`); its state afterward is the last fold's fit.
+
+The dependency is declared in `cajeta.json` (`dev.cajeta.ml`); the runner
+scripts resolve it like `dev.cajeta.unit` — sibling checkout, then the
+olla store, then a sha256-verified registry fetch.

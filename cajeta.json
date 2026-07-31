@@ -31,7 +31,13 @@
 
         // The core stdlib (cajeta.lang, cajeta.math, cajeta.nucleo, …) is
         // built into the toolchain — not declared, not fetched.
-        "dependencies": {},
+        // dev.cajeta.ml supplies the ecosystem estimator protocol
+        // (Estimator/Predictor) that XGBRegressor conforms to, plus the
+        // Metrics/Split machinery the adapter and its tests lean on;
+        // run-tests.sh resolves it (sibling checkout → store → Olla).
+        "dependencies": {
+            "dev.cajeta.ml": "0.1.0"
+        },
 
         // The suite is driven by cajeta-unit's reflective @Test discovery;
         // run-tests.sh resolves the archive (sibling checkout, then store,

@@ -1,0 +1,114 @@
+package dev.cajeta.xgboost.api;
+
+import cajeta.math.Tensor;
+import dev.cajeta.ml.Metrics;
+import dev.cajeta.ml.MlException;
+import dev.cajeta.ml.Predictor;
+import dev.cajeta.xgboost.booster.Model;
+
+/**
+ * The `dev.cajeta.ml.Predictor` conformer over {@link GBDT} (plan U13): xgboost
+ * regression as an ecosystem estimator, so a boosted model slots into
+ * `Split.crossValScore` and every ml model-selection utility unchanged.
+ *
+ * Thin by design — hyperparameters arrive as a {@link Params} (copied at
+ * construction, per the protocol's constructor-arguments convention), `fit`
+ * drives the deterministic {@link GBDT#fit} pipeline, and `predict` widens the
+ * f32 margins to the protocol's `(n,)` float64 tensor (widening is exact, so
+ * fidelity to the direct pipeline is bit-preserving). The deterministic
+ * contract is inherited: a stochastic-sampling config is refused by
+ * {@link GBDT#fit} itself.
+ *
+ * `crossValScore` refits the same instance per fold (the protocol has no
+ * `clone`); each `fit` replaces the fitted model wholesale. The underlying
+ * {@link Model} stays reachable via {@link #model} for xgboost-specific
+ * surfaces (serialization, feature importance).
+ */
+public final class XGBRegressor implements Predictor {
+
+    private Params params;
+    private Model model;
+    private int64 nFeatures;
+    private boolean fitted;
+
+    /** Snapshot `p`'s hyperparameters; later mutation of `p` has no effect. */
+    public XGBRegressor(Params p) {
+        Params own = heap Params();
+        own.rounds = p.rounds;
+        own.maxDepth = p.maxDepth;
+        own.maxLeaves = p.maxLeaves;
+        own.lambda = p.lambda;
+        own.alpha = p.alpha;
+        own.gamma = p.gamma;
+        own.minChildWeight = p.minChildWeight;
+        own.eta = p.eta;
+        own.baseScore = p.baseScore;
+        own.maxBin = p.maxBin;
+        own.subsample = p.subsample;
+        own.colsampleByTree = p.colsampleByTree;
+        this.params #= own;
+        this.nFeatures = (int64) 0;
+        this.fitted = false;
+        return;
+    }
+
+    public void fit(Tensor<float64> x, Tensor<float64> y) {
+        if (x.ndim() != 2) {
+            throw heap MlException("XGBRegressor.fit: x must be 2-D (n, p)");
+        }
+        int64 n = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        if (y.ndim() != 1 || y.shapeAt(0) != n) {
+            throw heap MlException("XGBRegressor.fit: y must be (n,) matching x rows");
+        }
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            label[i] = y.get1(i);
+            i = i + (int64) 1;
+        }
+        Model m = GBDT.fit(x, label, n, nf, this.params);
+        this.model #= m;
+        this.nFeatures = nf;
+        this.fitted = true;
+        return;
+    }
+
+    public boolean isFitted() {
+        return this.fitted;
+    }
+
+    public #Tensor<float64> predict(Tensor<float64> x) {
+        if (!this.fitted) {
+            throw heap MlException("XGBRegressor.predict: fit first");
+        }
+        if (x.ndim() != 2 || x.shapeAt(1) != this.nFeatures) {
+            throw heap MlException("XGBRegressor.predict: x must be (n, p) with p matching the fit");
+        }
+        int64 n = x.shapeAt(0);
+        float32[] raw = GBDT.predict(this.model, x, n, this.nFeatures);
+        float64[] wide = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            wide[i] = (float64) raw[i];
+            i = i + (int64) 1;
+        }
+        int64[] sh = heap int64[1];
+        sh[0] = n;
+        return Tensor.of<float64>(wide, sh);
+    }
+
+    /** R² on held-out data (the sklearn regressor `score` convention). */
+    public float64 score(Tensor<float64> x, Tensor<float64> y) {
+        Tensor<float64> p = this.predict(x);
+        return Metrics.r2(y, p);
+    }
+
+    /** The fitted {@link Model} — xgboost-specific surfaces (ModelIO, Importance). */
+    public Model model() {
+        if (!this.fitted) {
+            throw heap MlException("XGBRegressor.model: fit first");
+        }
+        return this.model;
+    }
+}
