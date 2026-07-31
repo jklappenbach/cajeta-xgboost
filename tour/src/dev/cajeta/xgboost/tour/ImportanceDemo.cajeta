@@ -13,31 +13,49 @@ import dev.cajeta.xgboost.predict.Importance;
 //   total_gain  += loss_change    how much objective it bought
 //   total_cover += sum_hessian    how much data those splits governed
 //
-// LIBRARY GAP (cajeta-xgboost plan D2): `Importance.addTree` needs
-// per-node `lossChanges` and `sumHessian` tensors, and a trained `Model`
-// stores neither (nor `Tensor<int32>` children — it keeps `int64[]`). So
-// gain and cover are reachable today only from arrays you hold yourself,
-// as below. When D2 lands (Model grows the two per-node vectors, or
-// Importance gains a Model-consuming overload) this demo collapses to:
+// `Importance.forModel(model, nf, weight, gain, cover)` is the entry point
+// a user actually has after `GBDT.fit`. It works because the tree builder
+// RECORDS `lossChanges` and `sumHessian` per node during growth: neither
+// is recoverable from a finished tree, so a model that did not carry them
+// could only ever report `weight`. (That was plan gap D2, closed by
+// threading both through TreeBuilder -> Booster -> Model -> ModelIO.)
 //
-//     float64[] gain = heap float64[nf];
-//     Importance.forModel(m, weight, gain, cover);
-//
-// Until then this demo does both halves honestly: it drives the real API
-// on a tree whose stats we DO have, and it computes weight straight off
-// the Model — then checks the two agree, which is what makes the gap a
-// gap and not a mystery.
+// `Importance.addTree` remains the per-tree primitive underneath, for
+// callers holding their own node arrays.
 public class ImportanceDemo extends DemoClass {
 
     public void execute() {
-        this.section("6. Feature importance — get_score parity, and the D2 gap");
+        this.section("6. Feature importance — get_score parity from a trained Model");
 
         Tensor<float64> x = Data.x();
         float64[] y = Data.y(x);
         int64 nf = Data.features();
         Model m = TrainDemo.fitted(x, y);
 
-        // --- what you can do with a Model today: weight importance -------
+        // --- the whole forest, one call ---------------------------------
+        float64[] mWeight = heap float64[nf];
+        float64[] mGain = heap float64[nf];
+        float64[] mCover = heap float64[nf];
+        Importance.forModel(m, nf, mWeight, mGain, mCover);
+        int64 f2 = (int64) 0;
+        while (f2 < nf) {
+            System.stdout.println("   " + Data.featureName(f2)
+                + ": weight " + mWeight[f2]
+                + ", total_gain " + mGain[f2]
+                + ", total_cover " + mCover[f2]);
+            f2 = f2 + (int64) 1;
+        }
+        this.check(mGain[Data.SQFT()] > (float64) 0.0
+            && mCover[Data.SQFT()] > (float64) 0.0,
+            "forModel returns REAL gain and cover from a trained model");
+        this.check(mCover[Data.SQFT()] > mCover[Data.LOT()],
+            "sqft_living's splits govern more data than lot_sqft's");
+        // Cover is a hessian sum; for squared error the hessian is 1 per row,
+        // so a root split's cover is exactly the training row count.
+        this.check(mCover[Data.SQFT()] >= (float64) Data.rows(),
+            "cover accumulates hessian mass (>= n, since the root split alone sees every row)");
+
+        // --- the same weight, walked by hand, as a cross-check -----------
         float64[] weight = heap float64[nf];
         int64 r = (int64) 0;
         while (r < m.rounds) {
@@ -62,6 +80,8 @@ public class ImportanceDemo extends DemoClass {
         }
         this.check(used >= (int64) 3,
             "the informative columns all earned splits");
+        this.check(weight[Data.SQFT()] == mWeight[Data.SQFT()],
+            "the hand walk and Importance.forModel agree on weight");
         this.check(weight[Data.SQFT()] > (float64) 0.0,
             "sqft_living — the strongest signal — was split on");
 
@@ -108,21 +128,27 @@ public class ImportanceDemo extends DemoClass {
             && cover[Data.SQFT()] == (float64) 120.0,
             "total_gain / total_cover accumulate the node's loss change and hessian");
 
-        // The bridge that makes the gap legible: run the SAME weight count
-        // through addTree on a Model-derived tree (children only — the
-        // stats it also wants are the ones the Model lacks), and check it
-        // reproduces the hand walk above for tree 0.
+        // The primitive, driven from the Model's own tree 0: children and
+        // split features converted to the tensor shape addTree takes, and
+        // the recorded per-node stats handed straight over. Checks it
+        // reproduces the hand walk above.
         int64 cap = m.cap;
         int64 count0 = m.nodeCount[0];
         int32[] lc0 = heap int32[count0];
         int32[] si0 = heap int32[count0];
-        float32[] loss0 = heap float32[count0];   // D2: not stored on Model — zeros
-        float64[] hess0 = heap float64[count0];   // D2: not stored on Model — zeros
+        float32[] loss0 = heap float32[count0];
+        float64[] hess0 = heap float64[count0];
         int64 k2 = (int64) 0;
         while (k2 < count0) {
             lc0[k2] = m.isLeaf[k2] ? (int32) 0 - (int32) 1 : (int32) m.leftChildren[k2];
             si0[k2] = (int32) m.splitIndices[k2];
             k2 = k2 + (int64) 1;
+        }
+        int64 kk = (int64) 0;
+        while (kk < count0) {
+            loss0[kk] = m.lossChanges[kk];      // the model carries them now
+            hess0[kk] = m.sumHessian[kk];
+            kk = kk + (int64) 1;
         }
         float64[] w3 = heap float64[nf];
         float64[] g3 = heap float64[nf];
@@ -142,8 +168,8 @@ public class ImportanceDemo extends DemoClass {
         }
         this.check(w3[Data.SQFT()] == handTree0,
             "Importance's weight over tree 0 == the hand walk's count");
-        this.check(g3[Data.SQFT()] == (float64) 0.0,
-            "gain/cover come back ZERO from a Model — the D2 gap, shown not hidden");
+        this.check(g3[Data.SQFT()] > (float64) 0.0,
+            "addTree over tree 0's model-carried stats gives real gain too");
     }
 
     static #Tensor<int32> i32t(int32[] v, int64 len) {

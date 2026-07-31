@@ -22,9 +22,12 @@ public final class Tree {
     public int64[] rightChildren;     // -1 for leaves
     public float32[] baseWeights;     // CalcWeight of each node's sum
     public boolean[] isLeaf;
+    public float32[] lossChanges;     // split gain improvement (internal); 0 on leaves
+    public float64[] sumHessian;      // hessian coverage of every node
 
     Tree(int64 nodeCount, int64[] si, float32[] sc, boolean[] dl,
-         int64[] lc, int64[] rc, float32[] bw, boolean[] leaf) {
+         int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
+         float32[] lossChg, float64[] sumHess) {
         this.nodeCount = nodeCount;
         this.splitIndices #= si;
         this.splitConditions #= sc;
@@ -33,5 +36,7 @@ public final class Tree {
         this.rightChildren #= rc;
         this.baseWeights #= bw;
         this.isLeaf #= leaf;
+        this.lossChanges #= lossChg;
+        this.sumHessian #= sumHess;
     }
 }

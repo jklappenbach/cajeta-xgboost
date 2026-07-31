@@ -59,11 +59,21 @@ public final class TreeBuilder {
         int64[] rc = heap int64[cap];
         float32[] bw = heap float32[cap];
         boolean[] leaf = heap boolean[cap];
+        float64[] nodeStats = heap float64[cap * (int64) 2];
         int64[] leafOf = heap int64[n];   // scratch (row → leaf nid); discarded here
         int64 nodeCount = TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n,
                                            maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
-                                           eta, si, sc, dl, lc, rc, bw, leaf, leafOf);
-        return heap Tree(nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf);
+                                           eta, si, sc, dl, lc, rc, bw, leaf, nodeStats, leafOf);
+        float32[] lossChg = heap float32[cap];
+        float64[] sumHess = heap float64[cap];
+        int64 k = (int64) 0;
+        while (k < cap) {
+            lossChg[k] = (float32) nodeStats[k];
+            sumHess[k] = nodeStats[cap + k];
+            k = k + (int64) 1;
+        }
+        return heap Tree(nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf,
+                         #lossChg, #sumHess);
     }
 
     /**
@@ -79,6 +89,7 @@ public final class TreeBuilder {
                              float64 eta,
                              int64[] si, float32[] sc, boolean[] dl,
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
+                             float64[] nodeStats,
                              int64[] leafOf) {
         GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
@@ -136,13 +147,24 @@ public final class TreeBuilder {
             // Raw node weight (XGBoost's base_weight — no shrinkage).
             float32 rawW = SplitFinder.leafWeight(q, hist.totalG, hist.totalH, lambda, alpha, minChildWeight);
 
+            // Per-node importance statistics (spec §5.3), packed into one array
+            // as [0, cap) = loss change, [cap, 2*cap) = hessian cover. They are
+            // recorded here because neither is recoverable from a finished tree,
+            // so without them `predict.Importance` can only ever report `weight`
+            // from a trained Model. One packed array rather than two parameters:
+            // grow() is already at the argument count where the backend miscompiles
+            // (cajeta INDEX: codegen-many-param-f32-truncate).
+            nodeStats[cap + nid] = q.floatHess(hist.totalH);
+
             Split s = SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
 
             boolean canSplit = false;
+            float32 splitLoss = (float32) 0.0;   // recorded on the node if it splits
             if (s.valid) {
                 float32 parentGain = SplitFinder.calcGain(q, hist.totalG, hist.totalH,
                                                           lambda, alpha, minChildWeight);
                 float32 lossChg = s.gain - parentGain;
+                splitLoss = lossChg;
                 boolean hessOk = s.leftH != (int64) 0 && s.rightH != (int64) 0;
                 boolean leavesOk = maxLeaves <= (int64) 0 || numLeaves < maxLeaves;
                 canSplit = lossChg > TreeBuilder.kRtEps()
@@ -159,6 +181,7 @@ public final class TreeBuilder {
 
                 leaf[nid] = false;
                 bw[nid] = rawW;              // internal node stores the raw base_weight
+                nodeStats[nid] = (float64) splitLoss;   // the gain this split bought
                 si[nid] = s.findex;
                 sc[nid] = s.fvalue;
                 dl[nid] = s.defaultLeft;

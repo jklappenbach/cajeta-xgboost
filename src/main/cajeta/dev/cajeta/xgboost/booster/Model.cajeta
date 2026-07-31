@@ -34,10 +34,19 @@ public final class Model {
     public int64[] rightChildren;     // -1 for leaves
     public float32[] baseWeights;     // raw CalcWeight (internal) / leaf value (leaf)
     public boolean[] isLeaf;
+    // Per-node importance statistics (spec §5.3), the inputs `get_score`'s
+    // total_gain / total_cover are summed from. Recorded during growth because
+    // they are NOT recoverable from the stored tree afterwards: the split's
+    // gain improvement and the node's hessian coverage leave no trace in the
+    // thresholds or weights. Without them `predict.Importance` could only ever
+    // report `weight` from a trained Model.
+    public float32[] lossChanges;     // [rounds*cap] split gain improvement; 0 on leaves
+    public float64[] sumHessian;      // [rounds*cap] hessian coverage of each node
 
     Model(int64 rounds, int64 cap, float32 baseMargin, int64[] nodeCount,
           int64[] si, float32[] sc, boolean[] dl,
-          int64[] lc, int64[] rc, float32[] bw, boolean[] leaf) {
+          int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
+          float32[] lossChg, float64[] sumHess) {
         this.rounds = rounds;
         this.cap = cap;
         this.baseMargin = baseMargin;
@@ -50,5 +59,7 @@ public final class Model {
         this.rightChildren #= rc;
         this.baseWeights #= bw;
         this.isLeaf #= leaf;
+        this.lossChanges #= lossChg;
+        this.sumHessian #= sumHess;
     }
 }

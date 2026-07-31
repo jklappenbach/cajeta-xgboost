@@ -2,7 +2,7 @@ package dev.cajeta.xgboost.booster;
 
 /**
  * Model (de)serialization (spec §5.2). A {@link Model} is a header (`rounds`,
- * `cap`, `baseMargin`, `deterministic`) plus `nodeCount[rounds]` and seven flat
+ * `cap`, `baseMargin`, `deterministic`) plus `nodeCount[rounds]` and nine flat
  * `[rounds*cap]` node arrays; this writes them as a self-describing little-endian
  * buffer (one 8-byte word per scalar — float32 fields via their bit pattern) and
  * reads them back into an identical Model. Round-trip is bit-exact by construction
@@ -12,7 +12,7 @@ package dev.cajeta.xgboost.booster;
 public final class ModelIO {
 
     static int64 words(int64 rounds, int64 cap) {
-        return (int64) 4 + rounds + (int64) 7 * rounds * cap;   // header + nodeCount + 7 arrays
+        return (int64) 4 + rounds + (int64) 9 * rounds * cap;   // header + nodeCount + 9 arrays
     }
 
     public static #int8[] serialize(Model m) {
@@ -41,6 +41,10 @@ public final class ModelIO {
         while (i < A) { Cajeta.storeU64(buf, off, (int64) Cajeta.f32ToBits(m.baseWeights[i])); off = off + (int64) 8; i = i + (int64) 1; }
         i = (int64) 0;
         while (i < A) { Cajeta.storeU64(buf, off, m.isLeaf[i] ? (int64) 1 : (int64) 0); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, (int64) Cajeta.f32ToBits(m.lossChanges[i])); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { Cajeta.storeU64(buf, off, Cajeta.f64ToBits(m.sumHessian[i])); off = off + (int64) 8; i = i + (int64) 1; }
         return #buf;
     }
 
@@ -58,6 +62,8 @@ public final class ModelIO {
         int64[]   rc = heap int64[A];
         float32[] bw = heap float32[A];
         boolean[] leaf = heap boolean[A];
+        float32[] lch = heap float32[A];
+        float64[] sh = heap float64[A];
         int64 off = (int64) 32;
         int64 i = (int64) 0;
         while (i < R) { nodeCount[i] = Cajeta.loadU64(buf, off); off = off + (int64) 8; i = i + (int64) 1; }
@@ -75,7 +81,11 @@ public final class ModelIO {
         while (i < A) { bw[i] = Cajeta.bitsToF32((int32) Cajeta.loadU64(buf, off)); off = off + (int64) 8; i = i + (int64) 1; }
         i = (int64) 0;
         while (i < A) { leaf[i] = Cajeta.loadU64(buf, off) == (int64) 1; off = off + (int64) 8; i = i + (int64) 1; }
-        Model m = heap Model(R, C, base, #nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf);
+        i = (int64) 0;
+        while (i < A) { lch[i] = Cajeta.bitsToF32((int32) Cajeta.loadU64(buf, off)); off = off + (int64) 8; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < A) { sh[i] = Cajeta.bitsToF64(Cajeta.loadU64(buf, off)); off = off + (int64) 8; i = i + (int64) 1; }
+        Model m = heap Model(R, C, base, #nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf, #lch, #sh);
         m.deterministic = deterministic;
         return #m;
     }

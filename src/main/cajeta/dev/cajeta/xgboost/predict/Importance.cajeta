@@ -1,6 +1,7 @@
 package dev.cajeta.xgboost.predict;
 
 import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Model;
 
 /**
  * Feature importance (spec §5.3), reproducing XGBoost's `get_score` totals. Over
@@ -14,6 +15,43 @@ import cajeta.math.Tensor;
  * then node order, so the result is bit-identical to `get_score(total_gain/…)`.
  */
 public final class Importance {
+
+    /**
+     * `get_score` totals for a whole trained {@link Model} — the entry point a
+     * user actually has after `GBDT.fit`.
+     *
+     * Walks every split node of every tree, accumulating `weight` (split count),
+     * `total_gain` (the node's loss change) and `total_cover` (its hessian
+     * coverage) per feature. The three output arrays are indexed by feature and
+     * must be `nf` long; they are ADDED to, so a caller may accumulate across
+     * models by reusing them.
+     *
+     * The gain/cover inputs come from `Model.lossChanges` / `Model.sumHessian`,
+     * which the tree builder records during growth — they cannot be recovered
+     * from a finished tree, which is why importance beyond `weight` needs the
+     * model to have carried them from the start.
+     */
+    public static void forModel(Model m, int64 nf,
+                                float64[] weight, float64[] totalGain,
+                                float64[] totalCover) {
+        int64 r = (int64) 0;
+        while (r < m.rounds) {
+            int64 k = (int64) 0;
+            while (k < m.nodeCount[r]) {
+                int64 node = r * m.cap + k;
+                if (!m.isLeaf[node]) {                       // split node
+                    int64 fdx = m.splitIndices[node];
+                    if (fdx >= (int64) 0 && fdx < nf) {
+                        weight[fdx] = weight[fdx] + (float64) 1.0;
+                        totalGain[fdx] = totalGain[fdx] + (float64) m.lossChanges[node];
+                        totalCover[fdx] = totalCover[fdx] + m.sumHessian[node];
+                    }
+                }
+                k = k + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+    }
 
     /** Accumulate one tree's split-node contributions into the per-feature totals. */
     public static void addTree(Tensor<int32> leftChildren, Tensor<int32> splitIndices,

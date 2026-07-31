@@ -47,6 +47,8 @@ public final class Booster {
         int64[]   fRC = heap int64[rounds * cap];
         float32[] fBW = heap float32[rounds * cap];
         boolean[] fLF = heap boolean[rounds * cap];
+        float32[] fLCH = heap float32[rounds * cap];   // per-node split gain
+        float64[] fSH  = heap float64[rounds * cap];   // per-node hessian cover
 
         float32 base = SquaredError.baseMargin(baseScore);
         float32[] margin = heap float32[n];
@@ -70,9 +72,10 @@ public final class Booster {
             int64[]   rc = heap int64[cap];
             float32[] bw = heap float32[cap];
             boolean[] lf = heap boolean[cap];
+            float64[] nodeStats = heap float64[cap * (int64) 2];
             int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n,
                                         maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
-                                        eta, si, sc, dl, lc, rc, bw, lf, leafOf);
+                                        eta, si, sc, dl, lc, rc, bw, lf, nodeStats, leafOf);
             nodeCount[r] = nc;
 
             // (3) Persist the tree into the forest slice r*cap.
@@ -82,6 +85,7 @@ public final class Booster {
                 fSI[off + k] = si[k]; fSC[off + k] = sc[k]; fDL[off + k] = dl[k];
                 fLC[off + k] = lc[k]; fRC[off + k] = rc[k]; fBW[off + k] = bw[k];
                 fLF[off + k] = lf[k];
+                fLCH[off + k] = (float32) nodeStats[k]; fSH[off + k] = nodeStats[cap + k];
                 k = k + (int64) 1;
             }
 
@@ -99,6 +103,7 @@ public final class Booster {
         }
 
         return heap Model(rounds, cap, base, #nodeCount,
-                          #fSI, #fSC, #fDL, #fLC, #fRC, #fBW, #fLF);
+                          #fSI, #fSC, #fDL, #fLC, #fRC, #fBW, #fLF,
+                          #fLCH, #fSH);
     }
 }
