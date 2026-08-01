@@ -14,7 +14,7 @@ public class ScaffoldTest {
 
     @Test
     public void libraryLinksAndVersionMatches() {
-        Assert.equals("0.1.0", XGBoost.version());
+        Assert.equals("0.2.0", XGBoost.version());
         return;
     }
 }

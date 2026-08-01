@@ -11,7 +11,7 @@ the same model"; it is **the same bits** as the NVIDIA reference.
 It is a library (`.cja`), resolved from Olla:
 
 ```jsonc
-"dependencies": { "dev.cajeta.xgboost": "0.1.0" }
+"dependencies": { "dev.cajeta.xgboost": "0.2.0" }
 ```
 
 ## Quickstart

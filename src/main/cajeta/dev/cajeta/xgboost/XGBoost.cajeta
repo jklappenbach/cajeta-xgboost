@@ -11,7 +11,7 @@ package dev.cajeta.xgboost;
  */
 public final class XGBoost {
     /** The library version (`VERSION`). */
-    public static #String version() { return "0.1.0"; }
+    public static #String version() { return "0.2.0"; }
 
     /** `--emit=cja` entry. */
     public static int32 run() { return 0; }

@@ -17,7 +17,7 @@
 
     "details": {
         "name":               "dev.cajeta.xgboost",
-        "version":            "0.1.0",
+        "version":            "0.2.0",
         "description":        "cajeta-xgboost — bit-exact-to-NVIDIA GBDT training and prediction",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
