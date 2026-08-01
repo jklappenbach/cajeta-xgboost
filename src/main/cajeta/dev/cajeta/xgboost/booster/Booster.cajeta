@@ -121,10 +121,11 @@ public final class Booster {
                 int64[]   rc = heap int64[cap];
                 float32[] bw = heap float32[cap];
                 boolean[] lf = heap boolean[cap];
-                float64[] nodeStats = heap float64[cap * (int64) 2];
+                float32[] lch = heap float32[cap];
+                float64[] shs = heap float64[cap];
                 int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, gradK, hessK, n,
                                             maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
-                                            eta, si, sc, dl, lc, rc, bw, lf, nodeStats, leafOf);
+                                            eta, si, sc, dl, lc, rc, bw, lf, lch, shs, leafOf);
                 // Tree index is round-major: r*K + g, so class g's trees are
                 // every K-th tree — XGBoost's own layout.
                 int64 t = r * K + g;
@@ -137,7 +138,7 @@ public final class Booster {
                     fSI[off + k] = si[k]; fSC[off + k] = sc[k]; fDL[off + k] = dl[k];
                     fLC[off + k] = lc[k]; fRC[off + k] = rc[k]; fBW[off + k] = bw[k];
                     fLF[off + k] = lf[k];
-                    fLCH[off + k] = (float32) nodeStats[k]; fSH[off + k] = nodeStats[cap + k];
+                    fLCH[off + k] = lch[k]; fSH[off + k] = shs[k];
                     k = k + (int64) 1;
                 }
 
