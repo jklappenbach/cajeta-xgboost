@@ -40,7 +40,7 @@ env:
   # dev.cajeta.ml 0.3.0 dependency is published against; it also carries the
   # v0.12.1 loader-materialization fix (cross-file records; the Frames bridge
   # test) and v0.12.0's iface-generic-returns dispatch fix.
-  CAJETA_VERSION: v0.13.0
+  CAJETA_VERSION: v0.15.0
 
 jobs:
   build-test:
