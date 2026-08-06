@@ -1,0 +1,99 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+
+/**
+ * U12.1.1 — the GPU histogram is bit-identical to the CPU one on a fixture.
+ * The kernel runs on whatever backend `cajeta.xpu` selects (CUDA → HIP →
+ * Vulkan → CPU emulation), so this same test IS the cross-backend identity
+ * probe: Vulkan on the Strix Halo dev box, CUDA on phoenix-wsl, CPU
+ * emulation on hosted CI — one assertion, §8.2/§8.3 evidence everywhere it
+ * runs. Integer-only accumulation (host quantization + split-word u32
+ * atomics with carry) is what makes the claim backend-independent.
+ */
+public class GpuHistogramTest {
+
+    public GpuHistogramTest() { return; }
+
+    static void assertSame(Histogram cpu, Histogram gpu) {
+        Assert.equals(gpu.nbins, cpu.nbins);
+        Assert.equals(gpu.nf, cpu.nf);
+        Assert.equals(gpu.totalG, cpu.totalG);
+        Assert.equals(gpu.totalH, cpu.totalH);
+        int64 b = (int64) 0;
+        while (b < cpu.nbins) {
+            Assert.equals(gpu.g[b], cpu.g[b]);
+            Assert.equals(gpu.h[b], cpu.h[b]);
+            b = b + (int64) 1;
+        }
+        return;
+    }
+
+    // Root histogram over all rows, tiny_reg (5 features, 200 rows).
+    @Test
+    public void rootHistogramBitIdenticalToCpu() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        float64[] g = f.gradRound((int32) 0);
+        float64[] h = f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+
+        Histogram cpu = Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Histogram gpu = GpuHistogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        assertSame(cpu, gpu);
+        return;
+    }
+
+    // A partitioned build (position-based, like every non-root node), on the
+    // missing-value fixture so the bin == -1 skip path is exercised too.
+    @Test
+    public void partitionedHistogramBitIdenticalToCpu() {
+        FixtureLoader f = FixtureLoader.open("tiny_reg_missing");
+        float64[] g = f.gradRound((int32) 0);
+        float64[] h = f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+
+        // A deterministic 2-way partition: rows alternate between nodes 1/2.
+        int64[] position = heap int64[n];
+        int64 r = (int64) 0;
+        while (r < n) {
+            position[r] = (int64) 1 + r % (int64) 2;
+            r = r + (int64) 1;
+        }
+
+        Histogram cpu1 = Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+                                            position, (int64) 1, n);
+        Histogram gpu1 = GpuHistogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+                                               position, (int64) 1, n);
+        assertSame(cpu1, gpu1);
+
+        Histogram cpu2 = Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+                                            position, (int64) 2, n);
+        Histogram gpu2 = GpuHistogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+                                               position, (int64) 2, n);
+        assertSame(cpu2, gpu2);
+        return;
+    }
+
+    // Negative quantized gradients cross the u32 word boundary constantly;
+    // large_reg (20k×50, 5% missing, 256 bins/feature) hammers the
+    // split-word carry path at real bin occupancy.
+    @Test
+    public void largeRootHistogramBitIdenticalToCpu() {
+        FixtureLoader f = FixtureLoader.open("large_reg");
+        float64[] g = f.gradRound((int32) 0);
+        float64[] h = f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+
+        Histogram cpu = Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Histogram gpu = GpuHistogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        assertSame(cpu, gpu);
+        return;
+    }
+}

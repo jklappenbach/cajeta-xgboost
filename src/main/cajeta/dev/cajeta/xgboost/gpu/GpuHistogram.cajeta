@@ -1,0 +1,156 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.math.Tensor;
+import cajeta.xpu.KernelBuffer;
+import cajeta.xpu.KernelStream;
+import cajeta.xpu.KernelThread;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+
+/**
+ * The GPU gradient histogram (plan U12, spec §8.1): the same int64
+ * fixed-point per-(feature, global-bin) sums as {@link Histogram}, built by
+ * a `cajeta.xpu` kernel — one thread per (row, feature) cell, scattering
+ * the row's quantized gpair into its bin with integer atomics.
+ *
+ * **Why this is bit-identical on every backend.** Quantization happens on
+ * the HOST through the same {@link GradientQuantiser} the CPU builder uses,
+ * so the kernel is integer-only. Integer addition is associative and
+ * commutative, so atomic scatter order — which varies freely between
+ * backends, wave sizes, and runs — cannot change the sums. That is XGBoost's
+ * own determinism argument for its GPU histogram, reproduced.
+ *
+ * **The split-word trick.** `KernelBuffer` atomics are 32-bit
+ * (float32/int32/uint32 — no int64), so each int64 sum is accumulated as two
+ * uint32 words with an explicit carry: add the low word, carry into the high
+ * word on unsigned wraparound, add the high word. Carries are themselves
+ * atomic adds, so the (hi, lo) pair converges to the exact 64-bit two's
+ * complement sum regardless of interleaving — the pre-sm_60 CUDA idiom, and
+ * it needs no Int64Atomics capability anywhere.
+ *
+ * Layout: `hist` is `[4 * nbins]` uint32 — `gb*4 + {0: gLo, 1: gHi, 2: hLo,
+ * 3: hHi}`; `q` is `[4 * n]` uint32 — `r*4 + {qgLo, qgHi, qhLo, qhHi}`.
+ * Missing values (`bin == -1`) are skipped exactly as on the CPU.
+ */
+public final class GpuHistogram {
+
+    @Kernel
+    public static void histScatter(KernelBuffer<uint32> hist,
+                                   KernelBuffer<int32> bins,
+                                   KernelBuffer<int32> cutOff,
+                                   KernelBuffer<uint32> q,
+                                   KernelBuffer<int32> pos,
+                                   int32 nid, uint32 n, uint32 nf) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < n * nf) {
+            uint32 r = i / nf;
+            if (pos[r] == nid) {
+                int32 b = bins[i];
+                if (b >= 0) {
+                    uint32 f = i - r * nf;
+                    uint32 gb = ((uint32) cutOff[f] + (uint32) b) * 4;
+
+                    uint32 gLo = q[r * 4];
+                    uint32 oldG = hist.atomicAdd(gb, gLo);
+                    if (oldG + gLo < gLo) { hist.atomicAdd(gb + 1, 1); }
+                    hist.atomicAdd(gb + 1, q[r * 4 + 1]);
+
+                    uint32 hLo = q[r * 4 + 2];
+                    uint32 oldH = hist.atomicAdd(gb + 2, hLo);
+                    if (oldH + hLo < hLo) { hist.atomicAdd(gb + 3, 1); }
+                    hist.atomicAdd(gb + 3, q[r * 4 + 3]);
+                }
+            }
+        }
+    }
+
+    /**
+     * Build node `nid`'s histogram over the rows `position[r] == nid` — the
+     * GPU analog of {@link Histogram#buildPos}, same result bit for bit.
+     * Node totals are host-side int64 sums in ascending row order, exactly
+     * the CPU builder's order.
+     */
+    public static #Histogram buildPos(Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                      GradientQuantiser quant,
+                                      float64[] grad, float64[] hess,
+                                      int64[] position, int64 nid, int64 n) {
+        int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
+        int64 nbins = cutPtrs.flatGet(nf);
+
+        // Host-side quantization (the CPU builder's own path) + split into
+        // uint32 words; totals accumulate here in CPU row order.
+        uint32[] qWords = heap uint32[n * (int64) 4];
+        int32[] posH = heap int32[n];
+        int64 totG = (int64) 0;
+        int64 totH = (int64) 0;
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 qg = quant.fixedGrad(grad[r]);
+            int64 qh = quant.fixedHess(hess[r]);
+            if (position[r] == nid) {
+                totG = totG + qg;
+                totH = totH + qh;
+            }
+            qWords[r * (int64) 4]             = (uint32) qg;
+            qWords[r * (int64) 4 + (int64) 1] = (uint32) (qg >> (int64) 32);
+            qWords[r * (int64) 4 + (int64) 2] = (uint32) qh;
+            qWords[r * (int64) 4 + (int64) 3] = (uint32) (qh >> (int64) 32);
+            posH[r] = (int32) position[r];
+            r = r + (int64) 1;
+        }
+        int32[] binsH = heap int32[n * nf];
+        int64 c = (int64) 0;
+        while (c < n * nf) {
+            binsH[c] = bins.flatGet(c);
+            c = c + (int64) 1;
+        }
+        int32[] cutOffH = heap int32[nf];
+        int64 f = (int64) 0;
+        while (f < nf) {
+            cutOffH[f] = (int32) cutPtrs.flatGet(f);
+            f = f + (int64) 1;
+        }
+
+        KernelStream s = KernelStream.current();
+        KernelBuffer<uint32> dHist = heap KernelBuffer<uint32>((int64) 4 * nbins);
+        KernelBuffer<int32> dBins = heap KernelBuffer<int32>(n * nf);
+        KernelBuffer<int32> dCut = heap KernelBuffer<int32>(nf);
+        KernelBuffer<uint32> dQ = heap KernelBuffer<uint32>(n * (int64) 4);
+        KernelBuffer<int32> dPos = heap KernelBuffer<int32>(n);
+        uint32[] zeros = heap uint32[(int64) 4 * nbins];
+        dHist.upload(zeros);
+        dBins.upload(binsH);
+        dCut.upload(cutOffH);
+        dQ.upload(qWords);
+        dPos.upload(posH);
+
+        uint32 cells = (uint32) (n * nf);
+        histScatter.launch(s, grid: [(cells + 63) / 64], block: [64])
+            (dHist, dBins, dCut, dQ, dPos, (int32) nid, (uint32) n, (uint32) nf);
+        s.sync();
+
+        uint32[] words = heap uint32[(int64) 4 * nbins];
+        dHist.download(words);
+
+        int64[] gg = heap int64[nbins];
+        int64[] hh = heap int64[nbins];
+        int64 b = (int64) 0;
+        while (b < nbins) {
+            gg[b] = ((int64) words[b * (int64) 4 + (int64) 1] << (int64) 32)
+                  | (int64) words[b * (int64) 4];
+            hh[b] = ((int64) words[b * (int64) 4 + (int64) 3] << (int64) 32)
+                  | (int64) words[b * (int64) 4 + (int64) 2];
+            b = b + (int64) 1;
+        }
+        return heap Histogram(#gg, #hh, nbins, nf, totG, totH);
+    }
+
+    /** Root histogram over all rows — the GPU analog of {@link Histogram#buildAll}. */
+    public static #Histogram buildAll(Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                      GradientQuantiser quant,
+                                      float64[] grad, float64[] hess, int64 n) {
+        int64[] position = heap int64[n];
+        return GpuHistogram.buildPos(bins, cutPtrs, quant, grad, hess,
+                                     position, (int64) 0, n);
+    }
+}

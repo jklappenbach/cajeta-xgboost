@@ -100,12 +100,22 @@ fi
 echo ">> cajeta-ml: $ml_cja"
 
 echo ">> building xgboost library .cja"
-"$CAJETA" --emit=cja -o "$out/xgboost.cja" \
+XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
+"$CAJETA" --emit=cja --xpu-backend="$XPU_BACKENDS" -o "$out/xgboost.cja" \
     --classpath="$ml_cja" \
     dev.cajeta.xgboost.XGBoost.run "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the test binary"
-"$CAJETA" --emit=exe --profile=test \
+# KNOWN DEFECT (cajeta INDEX: amdgpu-kernel-multiarg-miscompile): on a
+# ROCm box the runtime prefers HIP, where the 8-arg histogram kernel
+# miscompiles (deterministic garbage). Until it closes, run with
+# CAJETA_XPU_BACKEND=vulkan on AMD hardware; CUDA and CPU are unaffected.
+# @Kernel device codegen: bundle every backend the toolchain can emit —
+# the runtime picks CUDA -> HIP -> Vulkan -> CPU at first device touch
+# (CAJETA_XPU_BACKEND overrides), so one binary runs the GPU histogram on
+# phoenix-wsl (nvptx), the Strix Halo dev box (amdgpu/vulkan), and hosted
+# CI (cpu emulation) alike.
+"$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKENDS" \
     --classpath="$out/xgboost.cja,$unit_cja,$ml_cja" \
     -o "$out/xgboosttests" \
     dev.cajeta.xgboost.selftest.TestMain.run "$here/src/test/cajeta" "$out" >/dev/null
