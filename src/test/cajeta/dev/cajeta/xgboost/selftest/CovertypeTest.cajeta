@@ -1,0 +1,47 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * U10.1.2 — the REAL benchmark: a 50k×54 covertype subset (UCI forest cover,
+ * 7 classes), trained 3 rounds × K=7 trees against the NVIDIA 3.1.2
+ * reference. Real-data pathologies the synthetics lack: one-hot soil-type
+ * blocks (40 binary columns), integer-valued distances/elevations with heavy
+ * ties, and skewed class frequencies. Every one of the 21 trees and every
+ * per-round `[n*K]` margin must be bit-identical. Was gated on the two
+ * gpu-numeric-fidelity items (`expf`, split-selection near-tie); both closed.
+ */
+public class CovertypeTest {
+
+    public CovertypeTest() { return; }
+
+    @Test
+    public void covertypeModelBitIdenticalToReference() {
+        FixtureLoader f = FixtureLoader.open("covertype");
+        Tensor<float64> yT = f.y();
+        int64 n = yT.shapeAt(0);
+        int64 K = (int64) 7;
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        int64 rounds = (int64) 3;
+        float32[] marginHistory = heap float32[rounds * n * K];
+        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                (int64) 6, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5, Objective.SOFTMAX, K,
+                                marginHistory);
+
+        String treeDiff = ParityRunner.compareTrees(m, f, rounds * K);
+        Assert.that(treeDiff).isEqualTo("");
+        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(),
+                                                        rounds, n * K);
+        Assert.that(marginDiff).isEqualTo("");
+        return;
+    }
+}

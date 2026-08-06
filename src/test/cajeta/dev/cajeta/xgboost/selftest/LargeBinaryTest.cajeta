@@ -2,15 +2,19 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.Tree;
 import dev.cajeta.xgboost.tree.TreeBuilder;
 
 /**
- * U10.1.1 (binary at scale) — the round-0 binary tree for `large_binary` (20k×50,
- * depth 6). Round-0 gradients (`0.5 − y`, hess `0.25`) are expf-free, so the tree is
- * bit-exact independent of the U12 `expf` link; full-model binary parity (rounds 1+)
- * stays U12-gated. This exercises the builder on binary gradients at real depth and
- * bin occupancy — bit-exact at scale (all nodes, splits included).
+ * U10.1.1 (binary at scale) — `large_binary` (20k×50, depth 6). The round-0
+ * tree exercises the builder on binary gradients (`0.5 − y`, hess `0.25`,
+ * expf-free) at real depth and bin occupancy. The full-model test covers
+ * rounds 1+ — unblocked by gpu-numeric-fidelity U1 (`FastMath.expf`, the
+ * device `MUFU.EX2` model): every tree and every per-round margin
+ * bit-identical to the NVIDIA reference through the sigmoid link.
  *
  * The `large_binary` labels are exactly balanced (y = logits > median), so
  * `Σ grad = Σ(0.5 − y) = 0` exactly, and `CalcWeight = −Σgrad/(Σhess+λ)` must yield
@@ -36,6 +40,32 @@ public class LargeBinaryTest {
 
         String diff = ParityRunner.compareTree(t, f, (int32) 0);
         Assert.that(diff).isEqualTo("");
+        return;
+    }
+
+    // 10.1.1 (binary, rounds 1+) — the full 3-round binary model through the
+    // sigmoid link, bit-identical per tree/node and per-round margin.
+    @Test
+    public void fullBinaryModelBitIdenticalAtScale() {
+        FixtureLoader f = FixtureLoader.open("large_binary");
+        Tensor<float64> yT = f.y();
+        int64 n = yT.shapeAt(0);
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        int64 rounds = (int64) 3;
+        float32[] marginHistory = heap float32[rounds * n];
+        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                (int64) 6, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5, Objective.LOGISTIC, (int64) 1,
+                                marginHistory);
+
+        String treeDiff = ParityRunner.compareTrees(m, f, rounds);
+        Assert.that(treeDiff).isEqualTo("");
+        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
+        Assert.that(marginDiff).isEqualTo("");
         return;
     }
 }

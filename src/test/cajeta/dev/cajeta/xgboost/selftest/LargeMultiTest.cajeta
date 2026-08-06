@@ -1,0 +1,49 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * U10.1.1 (multiclass at scale) — the full 3-round K=4 `multi:softprob` model
+ * for `large_multi` (20k×50, 5% missing, depth 6): 12 trees (round-major,
+ * class of tree j = j % K) and every per-round `[n*K]` margin bit-identical
+ * to the NVIDIA 3.1.2 reference. Unblocked by gpu-numeric-fidelity U1
+ * (`FastMath.expf` — softmax rounds 1+ evaluate `expf` at nonzero margins)
+ * and U2 (device per-feature argmax semantics in `SplitFinder`).
+ */
+public class LargeMultiTest {
+
+    public LargeMultiTest() { return; }
+
+    @Test
+    public void fullMulticlassModelBitIdenticalAtScale() {
+        FixtureLoader f = FixtureLoader.open("large_multi");
+        Tensor<float64> yT = f.y();
+        int64 n = yT.shapeAt(0);
+        int64 K = (int64) 4;
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+
+        int64 rounds = (int64) 3;
+        float32[] marginHistory = heap float32[rounds * n * K];
+        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                (int64) 6, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5, Objective.SOFTMAX, K,
+                                marginHistory);
+
+        // Trees are flat round-major r*K + g — compare all rounds*K of them.
+        String treeDiff = ParityRunner.compareTrees(m, f, rounds * K);
+        Assert.that(treeDiff).isEqualTo("");
+        // margins.npy is [rounds, n, K] row-major == the history's
+        // r*(n*K) + i*K + g layout, so compare with n*K per round.
+        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(),
+                                                        rounds, n * K);
+        Assert.that(marginDiff).isEqualTo("");
+        return;
+    }
+}

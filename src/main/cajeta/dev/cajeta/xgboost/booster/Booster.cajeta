@@ -31,7 +31,7 @@ public final class Booster {
             return Logistic.baseMargin(baseScore);
         }
         if (o == Objective.SOFTMAX) {
-            return Softmax.baseMargin();
+            return Softmax.baseMargin(baseScore);
         }
         return SquaredError.baseMargin(baseScore);
     }

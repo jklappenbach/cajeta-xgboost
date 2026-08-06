@@ -13,10 +13,9 @@ import dev.cajeta.xgboost.booster.Model;
  * tree/node and every per-round margin is bit-identical to the NVIDIA reference —
  * proving the tree builder at real depth and bin occupancy, isolated from the sketch.
  *
- * `@Disabled` until `large_reg` is generated on the NVIDIA box and its storage is
- * settled (git-lfs vs regenerate) — it needs the committed fixture. Binary/multi
- * large fixtures land alongside but their full-model parity is U12-gated (the `expf`
- * link, rounds 1+); only round-0 trees are bit-exact pre-U12.
+ * Binary/multi full-model parity at scale lives in `LargeBinaryTest` /
+ * `LargeMultiTest` (unblocked by gpu-numeric-fidelity U1/U2); the real-data
+ * benchmark is `CovertypeTest`.
  */
 public class LargeParityTest {
 

@@ -15,15 +15,26 @@ import dev.cajeta.xgboost.fastmath.FastMath;
  *
  * Round 0's margins are all equal (base), so `expf(·)=1`, `wsum=K`, and `p_k=1/K`
  * **exactly** (0.25 for K=4) — no `expf` error. Later rounds evaluate `expf` at
- * distinct margins and hit the same transcendental-fidelity item as
- * {@link Logistic} (U6/U7 → U12).
+ * distinct margins through {@link FastMath#expf} (the device `MUFU.EX2` model,
+ * gpu-numeric-fidelity U1) — bit-exact vs the device captures and at scale
+ * (`LargeMultiTest`, `CovertypeTest`).
  */
 public final class Softmax {
 
     static float32 eps() { return (float32) 0.0000000000000001; }   // 1e-16f
 
-    /** Base margin per class (softmax is shift-invariant; XGBoost inits to 0). */
-    public static float32 baseMargin() { return (float32) 0.0; }
+    /**
+     * Base margin per class — `base_score` RAW (identity, no link):
+     * `SoftmaxMultiClassObj` doesn't override `ProbToMargin`, so every
+     * class's margin starts at 0.5, and `margins.npy` confirms it
+     * (post-round-0 margin = 0.5 + leaf). Softmax is shift-invariant only
+     * in exact arithmetic — in float32 `(x+c)−(max+c) ≠ x−max` by ULPs,
+     * so seeding at 0 diverges from the device from round 1 on
+     * (large_multi tree 4 root, ~12 ulp). The seed must match bit for bit.
+     */
+    public static float32 baseMargin(float64 baseScore) {
+        return (float32) baseScore;
+    }
 
     /**
      * Fill per-(row,class) grad/hess. `margin`/`grad`/`hess` are row-major `[n*K]`
