@@ -112,14 +112,31 @@ echo ">> building + running the test binary"
 
 # Parity tests load golden fixtures from tools/fixtures via this env var.
 export XGBOOST_FIXTURES="$here/tools/fixtures"
-# Probed SFU reciprocal table for bit-exact __fdividef gain scoring (FastMath).
-# Absent (e.g. CI without the capture) → FastMath uses a correctly-rounded fallback.
-rcp="$here/tools/fdividef/rcp_mantissa.npy"
-[ -f "$rcp" ] && export RCP_TABLE="$rcp"
-# Probed SFU exp2 table for bit-exact device expf (Logistic/Softmax gradients).
-# Same deal: absent → FastMath falls back to correctly-rounded exp2.
-ex2="$here/tools/expf/ex2_table.npy"
-[ -f "$ex2" ] && export EX2_TABLE="$ex2"
+# Probed SFU capture tables (RCP for __fdividef gain scoring, EX2 for device
+# expf in Logistic/Softmax). Gitignored (32 MB each); when the local capture
+# is absent, fetch the sha256-pinned copy published as a v0.3.0 release
+# asset — so CI asserts the capture-dependent parity tests instead of
+# self-skipping. If the fetch fails (offline), FastMath's correctly-rounded
+# fallback keeps the rest of the suite meaningful.
+CAPTURE_RELEASE="v0.3.0"
+fetch_capture() {
+    # $1 = local path, $2 = asset name, $3 = pinned sha256
+    if [[ -f "$1" ]]; then printf '%s' "$1"; return 0; fi
+    local cache="$here/build/.capture-cache/$2"
+    if [[ ! -f "$cache" ]]; then
+        mkdir -p "$(dirname "$cache")"
+        echo ">> fetching $2 ($CAPTURE_RELEASE release asset)" >&2
+        curl -fsSL -o "$cache.tmp"             "https://github.com/jklappenbach/cajeta-xgboost/releases/download/$CAPTURE_RELEASE/$2"             || { rm -f "$cache.tmp"; echo ">> fetch failed — running without $2" >&2; return 1; }
+        local got
+        got="$(sha256_of "$cache.tmp")"
+        [[ "$got" == "$3" ]] || { rm -f "$cache.tmp"; echo ">> sha256 mismatch for $2 — refusing it" >&2; return 1; }
+        mv "$cache.tmp" "$cache"
+    fi
+    printf '%s' "$cache"
+    return 0
+}
+rcp="$(fetch_capture "$here/tools/fdividef/rcp_mantissa.npy" rcp_mantissa.npy     234796e0057823853e8f8843556bfc23a362e76cb0871b9ae082a612568f61ae)"     && export RCP_TABLE="$rcp"
+ex2="$(fetch_capture "$here/tools/expf/ex2_table.npy" ex2_table.npy     fe6720ac0a3685e6925f4d739cdbfe462184df30e1b2e8e4ed5b026dae680c64)"     && export EX2_TABLE="$ex2"
 # Device expf sweep over [-90, 90] — the ground truth FastMathExpfTest compares
 # against bit-for-bit. Absent → that comparison self-skips; the plumbing
 # assertions, which need no capture, still run.
