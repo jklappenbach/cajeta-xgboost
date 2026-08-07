@@ -45,6 +45,7 @@ public final class Tour {
         demos.add(heap ObjectivesDemo());
         demos.add(heap PersistDemo());
         demos.add(heap InternalsDemo());
+        demos.add(heap GpuHistogramDemo());
         demos.add(heap FastMathDemo());
         demos.add(heap EstimatorDemo());
 

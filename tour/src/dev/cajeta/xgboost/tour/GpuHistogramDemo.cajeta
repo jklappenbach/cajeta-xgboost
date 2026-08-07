@@ -1,0 +1,88 @@
+package dev.cajeta.xgboost.tour;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.objective.SquaredError;
+import dev.cajeta.xgboost.sketch.Binner;
+import dev.cajeta.xgboost.sketch.Sketch;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+
+// The GPU histogram (U12) — the same int64 fixed-point buckets as
+// InternalsDemo's CPU build, accumulated by a cajeta.xpu kernel instead of a
+// host loop, and REQUIRED to match bit for bit. The kernel is integer-only
+// (rows quantized on the host, then a (row, feature) scatter of split-word
+// uint32 atomics with explicit carry), so accumulation order — which the GPU
+// does not promise — cannot change a single bit. Whatever backend the runtime
+// picked here (CUDA, HIP, Vulkan, or the CPU emulation on a GPU-less box),
+// these checks assert the identical bits.
+public class GpuHistogramDemo extends DemoClass {
+
+    public void execute() {
+        this.section("10. The GPU histogram — same bits, any backend");
+
+        Tensor<float64> x = Data.x();
+        float64[] y = Data.y(x);
+        int64 n = Data.rows();
+        int64 nf = Data.features();
+
+        // Prep + round-1 gradients (InternalsDemo's path, compactly).
+        int64 maxBin = (int64) 32;
+        int64[] cutPtrsA = heap int64[nf + (int64) 1];
+        float32[] cuts = Sketch.cuts(x, n, nf, maxBin, cutPtrsA);
+        int64 total = cutPtrsA[nf];
+        float64[] cutVals = heap float64[total];
+        int64 c = (int64) 0;
+        while (c < total) { cutVals[c] = (float64) cuts[c]; c = c + (int64) 1; }
+        int64[] cvShape = heap int64[1]; cvShape[0] = total;
+        Tensor<float64> cutValuesT = Tensor.of<float64>(cutVals, cvShape);
+        int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;
+        Tensor<int64> cutPtrsT = Tensor.of<int64>(cutPtrsA, cpShape);
+        int32[] binsA = Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
+        int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
+        Tensor<int32> binsT = Tensor.of<int32>(binsA, bShape);
+
+        float32 base = SquaredError.baseMargin((float64) 0.5);
+        float32[] margin = heap float32[n];
+        int64 i = (int64) 0;
+        while (i < n) { margin[i] = base; i = i + (int64) 1; }
+        float64[] grad = heap float64[n];
+        float64[] hess = heap float64[n];
+        SquaredError.gradHess(margin, y, n, grad, hess);
+        GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
+
+        // The same root histogram, both ways.
+        Histogram cpu = Histogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
+        Histogram gpu = GpuHistogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
+
+        boolean same = cpu.nbins == gpu.nbins
+            && cpu.totalG == gpu.totalG && cpu.totalH == gpu.totalH;
+        int64 b = (int64) 0;
+        while (b < cpu.nbins) {
+            if (gpu.g[b] != cpu.g[b] || gpu.h[b] != cpu.h[b]) { same = false; }
+            b = b + (int64) 1;
+        }
+        System.stdout.println("   " + cpu.nbins + " bins, device vs host");
+        this.check(same,
+            "every bin's (G, H) is BIT-IDENTICAL to the CPU build — integer "
+            + "atomics commute, so no backend and no scatter order can differ");
+
+        // A partitioned build (what every non-root node does).
+        int64[] position = heap int64[n];
+        int64 r = (int64) 0;
+        while (r < n) { position[r] = (int64) 1 + r % (int64) 2; r = r + (int64) 1; }
+        Histogram cpuL = Histogram.buildPos(binsT, cutPtrsT, q, grad, hess,
+                                            position, (int64) 1, n);
+        Histogram gpuL = GpuHistogram.buildPos(binsT, cutPtrsT, q, grad, hess,
+                                               position, (int64) 1, n);
+        boolean sameL = cpuL.totalG == gpuL.totalG && cpuL.totalH == gpuL.totalH;
+        b = (int64) 0;
+        while (b < cpuL.nbins) {
+            if (gpuL.g[b] != cpuL.g[b] || gpuL.h[b] != cpuL.h[b]) { sameL = false; }
+            b = b + (int64) 1;
+        }
+        this.check(sameL,
+            "a node-partitioned build matches too — the kernel filters by "
+            + "row position exactly like the CPU builder");
+    }
+}

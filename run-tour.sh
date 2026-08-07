@@ -49,7 +49,10 @@ fi
 
 echo ">> compiling the tour"
 mkdir -p build/tour
-"$CAJETA" --emit=exe --classpath="$art,$ml_cja" \
+# Device codegen happens at EXE emission (the library's @Kernels lower here),
+# so the tour binary bundles the same backends as the test suite.
+XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
+"$CAJETA" --emit=exe --xpu-backend="$XPU_BACKENDS" --classpath="$art,$ml_cja" \
     -o build/tour/xgboost-tour \
     dev.cajeta.xgboost.tour.Tour.main "$here/tour/src" build/tour >/dev/null
 

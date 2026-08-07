@@ -29,6 +29,13 @@
         // FixtureLoader reads golden fixtures from disk.
         "capabilities": ["filesystem"],
 
+        // U12: @Kernel device codegen for every backend the toolchain emits —
+        // the runtime picks CUDA -> HIP -> Vulkan -> CPU at first device
+        // touch, so one archive serves phoenix (CUDA), Strix Halo
+        // (HIP/Vulkan), and GPU-less CI (CPU emulation). Needs >= v0.17.2
+        // (classpath @Kernel registration + the backend-tagged registry).
+        "xpu-backend": "nvptx,amdgpu,vulkan,cpu",
+
         // The core stdlib (cajeta.lang, cajeta.math, cajeta.nucleo, …) is
         // built into the toolchain — not declared, not fetched.
         // dev.cajeta.ml supplies the ecosystem estimator protocol
