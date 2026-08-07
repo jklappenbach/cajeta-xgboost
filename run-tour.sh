@@ -56,5 +56,9 @@ XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
     -o build/tour/xgboost-tour \
     dev.cajeta.xgboost.tour.Tour.main "$here/tour/src" build/tour >/dev/null
 
+# The GPU demos want the probed SFU captures (GpuSplitFinder requires the
+# RCP table); resolve or fetch them exactly as the test suite does.
+source "$here/scripts/fetch-captures.sh" "$here"
+
 echo ">> running"
 exec ./build/tour/xgboost-tour

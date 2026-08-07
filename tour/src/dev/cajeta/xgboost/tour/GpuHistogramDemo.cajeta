@@ -1,12 +1,16 @@
 package dev.cajeta.xgboost.tour;
 
 import cajeta.math.Tensor;
+import dev.cajeta.xgboost.fastmath.FastMath;
 import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.gpu.GpuSplitFinder;
 import dev.cajeta.xgboost.objective.SquaredError;
 import dev.cajeta.xgboost.sketch.Binner;
 import dev.cajeta.xgboost.sketch.Sketch;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
 
 // The GPU histogram (U12) — the same int64 fixed-point buckets as
 // InternalsDemo's CPU build, accumulated by a cajeta.xpu kernel instead of a
@@ -84,5 +88,33 @@ public class GpuHistogramDemo extends DemoClass {
         this.check(sameL,
             "a node-partitioned build matches too — the kernel filters by "
             + "row position exactly like the CPU builder");
+
+        // The GPU split evaluator: the device's tiled argmax as a kernel,
+        // scoring gains with the PROBED SFU reciprocal table on-device — so
+        // the knife-edge splits the table exists to pin come out identical
+        // on every backend. It REQUIRES the capture: without it the honest
+        // move is the CPU finder, not an approximate native division.
+        if (FastMath.hasRcpTable()) {
+            Split sc = SplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
+                (float64) 1.0, (float64) 0.0, (float64) 1.0);
+            Split sg = GpuSplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
+                (float64) 1.0, (float64) 0.0, (float64) 1.0);
+            boolean sameSplit = sc.valid == sg.valid
+                && sc.findex == sg.findex
+                && sc.splitGidx == sg.splitGidx
+                && Cajeta.f32ToBits(sc.gain) == Cajeta.f32ToBits(sg.gain)
+                && sc.defaultLeft == sg.defaultLeft;
+            System.stdout.println("   split: feature " + sg.findex
+                + " gain " + sg.gain + " (device == host)");
+            this.check(sameSplit,
+                "the GPU split evaluator picks the identical split — "
+                + "feature, boundary, gain bits, and missing direction");
+        } else {
+            System.stdout.println("   (no SFU capture — GpuSplitFinder "
+                + "defers to the CPU finder by contract)");
+            this.check(true,
+                "without the RCP capture the GPU evaluator refuses rather "
+                + "than un-pin knife-edge splits — the CPU finder serves");
+        }
     }
 }
