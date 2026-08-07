@@ -106,10 +106,6 @@ XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
     dev.cajeta.xgboost.XGBoost.run "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the test binary"
-# KNOWN DEFECT (cajeta INDEX: amdgpu-kernel-multiarg-miscompile): on a
-# ROCm box the runtime prefers HIP, where the 8-arg histogram kernel
-# miscompiles (deterministic garbage). Until it closes, run with
-# CAJETA_XPU_BACKEND=vulkan on AMD hardware; CUDA and CPU are unaffected.
 # @Kernel device codegen: bundle every backend the toolchain can emit —
 # the runtime picks CUDA -> HIP -> Vulkan -> CPU at first device touch
 # (CAJETA_XPU_BACKEND overrides), so one binary runs the GPU histogram on
