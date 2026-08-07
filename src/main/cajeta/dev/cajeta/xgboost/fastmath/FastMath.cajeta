@@ -64,6 +64,18 @@ public final class FastMath {
     }
 
     /**
+     * The raw 2^23-entry SFU reciprocal table (int32 bit patterns) for the GPU
+     * split evaluator to upload as a device buffer — the in-kernel `__fdividef`
+     * must read the SAME table this class reads, or CPU and GPU gains diverge
+     * on knife-edge splits. Null when the capture is absent; callers gate on
+     * {@link #hasRcpTable} and fall back to the CPU evaluator.
+     */
+    public static Tensor<int32> rcpTableRef() {
+        FastMath.ensureRcpTable();
+        return FastMath.rcpTable;
+    }
+
+    /**
      * `rcp.approx.f32(m)` for `m = bitsToF32(0x3F800000 | idx)`, i.e. the float32
      * in `[1, 2)` whose 23-bit mantissa is `idx`. Result is in `(0.5, 1]`.
      *

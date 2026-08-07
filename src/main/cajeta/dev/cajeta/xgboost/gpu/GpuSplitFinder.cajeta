@@ -1,0 +1,375 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.math.Tensor;
+import cajeta.xpu.KernelBuffer;
+import cajeta.xpu.KernelStream;
+import cajeta.xpu.KernelThread;
+import dev.cajeta.xgboost.fastmath.FastMath;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+
+/**
+ * The GPU split evaluator (plan U12.2.1, spec §8.1): {@link
+ * dev.cajeta.xgboost.tree.SplitFinder}'s Stage A — the device's tiled,
+ * min_child_weight-blind per-feature argmax — as a `cajeta.xpu` kernel, one
+ * thread per feature replaying the CPU loop OP FOR OP. Stage B (the
+ * cross-feature Update) runs on the host over the kernel's per-feature
+ * records, mirroring the CPU code exactly, so a {@link Split} from here is
+ * bit-identical to `SplitFinder.findBest`'s on every backend.
+ *
+ * **Why per-feature threads.** Bit-identity is the contract (§1.4): a thread
+ * that replays the CPU's sequential tile scan for its feature produces the
+ * same bits STRUCTURALLY — no reduction-order argument needed. Features are
+ * independent, so this parallelizes across them; finer-grained schemes
+ * (per-tile threads + wave scan) are a later performance pass under the same
+ * test, not a correctness question.
+ *
+ * **In-kernel `__fdividef`.** Gain scoring replicates {@link
+ * FastMath#fdividef} inside the kernel — the probed SFU reciprocal table
+ * rides along as a device buffer (`rcpTab`), so every backend computes the
+ * same `a * rcp(b)` the CUDA silicon does. The table is REQUIRED here: the
+ * host wrapper throws without it (callers gate on `FastMath.hasRcpTable()`
+ * and use the CPU finder), because a per-backend native division would
+ * un-pin exactly the knife-edge splits the table exists to pin.
+ *
+ * The int64 prefix scans are exact integer arithmetic; the float64
+ * dequantize multiplies and float32 narrowings are IEEE-identical on every
+ * backend (verified by the U12 op-inventory probe).
+ */
+public final class GpuSplitFinder {
+
+    @Kernel
+    public static void featureScan(KernelBuffer<float32> outGain,
+                                   KernelBuffer<int32> outMeta,
+                                   KernelBuffer<int64> outStats,
+                                   KernelBuffer<int64> histG,
+                                   KernelBuffer<int64> histH,
+                                   KernelBuffer<int32> cutOff,
+                                   KernelBuffer<int64> parents,
+                                   KernelBuffer<int32> rcpTab,
+                                   float64 toFloatGrad, float64 toFloatHess,
+                                   float64 lambda, float64 alpha,
+                                   float64 minChildWeight, uint32 nf) {
+        uint32 f = KernelThread.globalIdX();
+        if (f < nf) {
+            int64 b0 = (int64) cutOff[f];
+            int64 b1 = (int64) cutOff[f + 1];
+            int64 parentG = parents[0];
+            int64 parentH = parents[1];
+
+            // missing gpair = parent - Σ(feature's bins), summed from b0
+            // exactly like Histogram.featureSumG/H.
+            int64 fSumG = 0;
+            int64 fSumH = 0;
+            int64 sb = b0;
+            while (sb < b1) {
+                fSumG = fSumG + histG[sb];
+                fSumH = fSumH + histH[sb];
+                sb = sb + 1;
+            }
+            int64 missG = parentG - fSumG;
+            int64 missH = parentH - fSumH;
+
+            boolean featHas = false;
+            float32 featGain = (float32) 0.0;
+            int64 featP = 0;
+            int64 featScanG = 0;
+            int64 featScanH = 0;
+            boolean featMissLeft = true;
+
+            int64 scanG = 0;
+            int64 scanH = 0;
+            int64 tileStart = b0 + 1;
+            while (tileStart < b1) {
+                int64 tileEnd = tileStart + 32;
+                if (tileEnd > b1) { tileEnd = b1; }
+
+                boolean tileHas = false;
+                float32 tileGain = (float32) 0.0;
+                int64 tileP = 0;
+                int64 tileScanG = 0;
+                int64 tileScanH = 0;
+                boolean tileMissLeft = true;
+
+                int64 p = tileStart;
+                while (p < tileEnd) {
+                    // ---- gain(missing-left): left = scan + missing --------
+                    int64 lLG = scanG + missG;
+                    int64 lLH = scanH + missH;
+                    // splitGain(lLG, lLH, parent-lLG, parent-lLH), inlined:
+                    // gainGivenWeight(left) + gainGivenWeight(right), each
+                    // (f32)(tL1(G)²) fdividef (f32)(H+λ) — SplitFinder's
+                    // exact op order.
+                    float32 gainL;
+                    {
+                        float64 gdl = (float64) lLG * toFloatGrad;
+                        float64 hdl = (float64) lLH * toFloatHess;
+                        float32 gl = (float32) 0.0;
+                        if (hdl > 0.0) {
+                            float64 tl = gdl;
+                            if (gdl > alpha) { tl = gdl - alpha; }
+                            else if (gdl < 0.0 - alpha) { tl = gdl + alpha; }
+                            else { tl = 0.0; }
+                            float32 num = (float32) (tl * tl);
+                            float32 den = (float32) (hdl + lambda);
+                            gl = GpuSplitFinder.kfdividef(num, den, rcpTab);
+                        }
+                        float64 gdr = (float64) (parentG - lLG) * toFloatGrad;
+                        float64 hdr = (float64) (parentH - lLH) * toFloatHess;
+                        float32 gr = (float32) 0.0;
+                        if (hdr > 0.0) {
+                            float64 tr = gdr;
+                            if (gdr > alpha) { tr = gdr - alpha; }
+                            else if (gdr < 0.0 - alpha) { tr = gdr + alpha; }
+                            else { tr = 0.0; }
+                            float32 num2 = (float32) (tr * tr);
+                            float32 den2 = (float32) (hdr + lambda);
+                            gr = GpuSplitFinder.kfdividef(num2, den2, rcpTab);
+                        }
+                        gainL = gl + gr;
+                    }
+                    // ---- gain(missing-right): left = scan -----------------
+                    float32 gainR;
+                    {
+                        float64 gdl = (float64) scanG * toFloatGrad;
+                        float64 hdl = (float64) scanH * toFloatHess;
+                        float32 gl = (float32) 0.0;
+                        if (hdl > 0.0) {
+                            float64 tl = gdl;
+                            if (gdl > alpha) { tl = gdl - alpha; }
+                            else if (gdl < 0.0 - alpha) { tl = gdl + alpha; }
+                            else { tl = 0.0; }
+                            float32 num = (float32) (tl * tl);
+                            float32 den = (float32) (hdl + lambda);
+                            gl = GpuSplitFinder.kfdividef(num, den, rcpTab);
+                        }
+                        float64 gdr = (float64) (parentG - scanG) * toFloatGrad;
+                        float64 hdr = (float64) (parentH - scanH) * toFloatHess;
+                        float32 gr = (float32) 0.0;
+                        if (hdr > 0.0) {
+                            float64 tr = gdr;
+                            if (gdr > alpha) { tr = gdr - alpha; }
+                            else if (gdr < 0.0 - alpha) { tr = gdr + alpha; }
+                            else { tr = 0.0; }
+                            float32 num2 = (float32) (tr * tr);
+                            float32 den2 = (float32) (hdr + lambda);
+                            gr = GpuSplitFinder.kfdividef(num2, den2, rcpTab);
+                        }
+                        gainR = gl + gr;
+                    }
+
+                    boolean missLeft = gainL > gainR;
+                    float32 gain = gainR;
+                    if (missLeft) { gain = gainL; }
+
+                    if (!tileHas || gain > tileGain) {
+                        tileHas = true;
+                        tileGain = gain;
+                        tileP = p;
+                        tileScanG = scanG;
+                        tileScanH = scanH;
+                        tileMissLeft = missLeft;
+                    }
+
+                    scanG = scanG + histG[p];
+                    scanH = scanH + histH[p];
+                    p = p + 1;
+                }
+
+                if (tileHas) {
+                    int64 cLH = tileScanH;
+                    if (tileMissLeft) { cLH = tileScanH + missH; }
+                    int64 cRH = parentH - cLH;
+                    boolean valid = (float64) cLH * toFloatHess >= minChildWeight
+                                 && (float64) cRH * toFloatHess >= minChildWeight;
+                    if (valid && (!featHas || tileGain > featGain)) {
+                        featHas = true;
+                        featGain = tileGain;
+                        featP = tileP;
+                        featScanG = tileScanG;
+                        featScanH = tileScanH;
+                        featMissLeft = tileMissLeft;
+                    }
+                }
+
+                tileStart = tileEnd;
+            }
+
+            outGain[f] = featGain;
+            int32 hasI = 0;
+            if (featHas) { hasI = 1; }
+            int32 mlI = 0;
+            if (featMissLeft) { mlI = 1; }
+            outMeta[f * 3] = hasI;
+            outMeta[f * 3 + 1] = mlI;
+            outMeta[f * 3 + 2] = (int32) featP;
+            outStats[f * 4] = featScanG;
+            outStats[f * 4 + 1] = featScanH;
+            outStats[f * 4 + 2] = missG;
+            outStats[f * 4 + 3] = missH;
+        }
+    }
+
+    /**
+     * In-kernel `__fdividef` — {@link FastMath#fdividef} verbatim against the
+     * uploaded SFU table. `@Device` (callable from the kernel only).
+     */
+    @Device
+    static float32 kfdividef(float32 a, float32 b, KernelBuffer<int32> rcpTab) {
+        int32 bb = Cajeta.f32ToBits(b);
+        int32 expBiased = (bb >> 23) & 0xFF;
+        if (bb < 0 || expBiased == 0 || expBiased == 0xFF) {
+            return (float32) ((float64) a / (float64) b);
+        }
+        int32 e = expBiased - 127;
+        int32 manIdx = bb & 0x7FFFFF;
+        float32 rcpM = Cajeta.bitsToF32(rcpTab[(uint32) manIdx]);
+        int32 rmb = Cajeta.f32ToBits(rcpM);
+        int32 rmExp = (rmb >> 23) & 0xFF;
+        int32 newExp = rmExp - e;
+        if (newExp < 1 || newExp > 254) {
+            return (float32) ((float64) a / (float64) b);
+        }
+        int32 rcpBbits = (rmb & 0x807FFFFF) | (newExp << 23);
+        float32 rcpB = Cajeta.bitsToF32(rcpBbits);
+        return a * rcpB;
+    }
+
+    // Device-resident SFU table, uploaded once per process (32 MB).
+    private static KernelBuffer<int32> dRcp;
+    private static boolean dRcpTried;
+
+    static KernelBuffer<int32> deviceRcpTable() {
+        if (!GpuSplitFinder.dRcpTried) {
+            GpuSplitFinder.dRcpTried = true;
+            Tensor<int32> t = FastMath.rcpTableRef();
+            if (t != null) {
+                int64 n = t.size();
+                int32[] host = heap int32[n];
+                int64 i = (int64) 0;
+                while (i < n) { host[i] = t.flatGet(i); i = i + (int64) 1; }
+                KernelBuffer<int32> d = heap KernelBuffer<int32>(n);
+                d.upload(host);
+                GpuSplitFinder.dRcp #= d;
+            }
+        }
+        return GpuSplitFinder.dRcp;
+    }
+
+    /**
+     * The GPU analog of `SplitFinder.findBest` — same arguments, same result
+     * bit for bit. Stage A runs on the device (one thread per feature);
+     * Stage B — the cross-feature Update (strict `>` and the
+     * min_child_weight gate; ties → lowest feature) — replays the CPU code
+     * over the per-feature records here on the host.
+     *
+     * Requires the probed SFU table (`FastMath.hasRcpTable()`); throws
+     * without it — dispatch to the CPU finder instead.
+     */
+    public static #Split findBest(Histogram hist, Tensor<int64> cutPtrs,
+                                  Tensor<float64> cutValues,
+                                  GradientQuantiser q,
+                                  float64 lambda, float64 alpha,
+                                  float64 minChildWeight) {
+        KernelBuffer<int32> rcpTab = GpuSplitFinder.deviceRcpTable();
+        if (rcpTab == null) {
+            throw heap RecoverableException("GpuSplitFinder.findBest: the SFU "
+                + "reciprocal capture (RCP_TABLE) is required for bit-exact "
+                + "gain scoring — use SplitFinder.findBest without it");
+        }
+        int64 nf = hist.nf;
+        int64 nbins = hist.nbins;
+
+        int32[] cutOffH = heap int32[nf + (int64) 1];
+        int64 f = (int64) 0;
+        while (f <= nf) {
+            cutOffH[f] = (int32) cutPtrs.flatGet(f);
+            f = f + (int64) 1;
+        }
+        int64[] parentsH = heap int64[2];
+        parentsH[0] = hist.totalG;
+        parentsH[1] = hist.totalH;
+
+        KernelStream s = KernelStream.current();
+        KernelBuffer<float32> dGain = heap KernelBuffer<float32>(nf);
+        KernelBuffer<int32> dMeta = heap KernelBuffer<int32>(nf * (int64) 3);
+        KernelBuffer<int64> dStats = heap KernelBuffer<int64>(nf * (int64) 4);
+        KernelBuffer<int64> dHistG = heap KernelBuffer<int64>(nbins);
+        KernelBuffer<int64> dHistH = heap KernelBuffer<int64>(nbins);
+        KernelBuffer<int32> dCut = heap KernelBuffer<int32>(nf + (int64) 1);
+        KernelBuffer<int64> dParents = heap KernelBuffer<int64>(2);
+        float32[] zg = heap float32[nf];
+        int32[] zm = heap int32[nf * (int64) 3];
+        int64[] zs = heap int64[nf * (int64) 4];
+        dGain.upload(zg);
+        dMeta.upload(zm);
+        dStats.upload(zs);
+        dHistG.upload(hist.g);
+        dHistH.upload(hist.h);
+        dCut.upload(cutOffH);
+        dParents.upload(parentsH);
+
+        uint32 unf = (uint32) nf;
+        featureScan.launch(s, grid: [(unf + 63) / 64], block: [64])
+            (dGain, dMeta, dStats, dHistG, dHistH, dCut, dParents, rcpTab,
+             q.toFloatGrad, q.toFloatHess, lambda, alpha, minChildWeight, unf);
+        s.sync();
+
+        float32[] featGain = heap float32[nf];
+        int32[] featMeta = heap int32[nf * (int64) 3];
+        int64[] featStats = heap int64[nf * (int64) 4];
+        dGain.download(featGain);
+        dMeta.download(featMeta);
+        dStats.download(featStats);
+
+        // Stage B — verbatim from SplitFinder.findBest.
+        Split best = heap Split();
+        float32 bestGain = (float32) 0.0;
+        boolean haveBest = false;
+        int64 parentG = hist.totalG;
+        int64 parentH = hist.totalH;
+
+        f = (int64) 0;
+        while (f < nf) {
+            boolean featHas = featMeta[f * (int64) 3] != (int32) 0;
+            if (featHas) {
+                boolean featMissLeft = featMeta[f * (int64) 3 + (int64) 1] != (int32) 0;
+                int64 featP = (int64) featMeta[f * (int64) 3 + (int64) 2];
+                int64 featScanG = featStats[f * (int64) 4];
+                int64 featScanH = featStats[f * (int64) 4 + (int64) 1];
+                int64 missG = featStats[f * (int64) 4 + (int64) 2];
+                int64 missH = featStats[f * (int64) 4 + (int64) 3];
+                float32 fGain = featGain[f];
+
+                int64 lG = featMissLeft ? featScanG + missG : featScanG;
+                int64 lH = featMissLeft ? featScanH + missH : featScanH;
+                int64 rG = parentG - lG;
+                int64 rH = parentH - lH;
+                boolean okW = q.floatHess(lH) >= minChildWeight
+                           && q.floatHess(rH) >= minChildWeight;
+                if (okW && (!haveBest || fGain > bestGain)) {
+                    haveBest = true;
+                    bestGain = fGain;
+                    best.valid = true;
+                    best.findex = f;
+                    best.gain = fGain;
+                    best.defaultLeft = featMissLeft;
+                    best.leftG = lG;
+                    best.leftH = lH;
+                    best.rightG = rG;
+                    best.rightH = rH;
+                    int64 splitGidx = featP - (int64) 1;
+                    best.splitGidx = splitGidx;
+                    if (splitGidx >= cutPtrs.flatGet(f)) {
+                        best.fvalue = (float32) cutValues.flatGet(splitGidx);
+                    } else {
+                        best.fvalue = (float32) 0.0;
+                    }
+                }
+            }
+            f = f + (int64) 1;
+        }
+        return #best;
+    }
+}

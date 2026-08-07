@@ -1,0 +1,107 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.fastmath.FastMath;
+import dev.cajeta.xgboost.gpu.GpuSplitFinder;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
+
+/**
+ * U12.2.1 — the GPU split evaluator is bit-identical to the CPU
+ * {@link SplitFinder} on every fixture that has ever caught a selection bug:
+ * tiny_reg (baseline), tiny_reg_mcw10 (the knife-edge tile-gate fixture the
+ * device semantics were reverse-engineered on), tiny_reg_missing (missing
+ * default direction), tiny_binary round 0 (non-unit hessian), large_reg
+ * (256-bin features — multi-tile scans at scale). Runs on whatever backend
+ * `cajeta.xpu` selects, like GpuHistogramTest. Requires the SFU capture
+ * (fetched by run-tests.sh); the whole class self-skips without it.
+ */
+public class GpuSplitFinderTest {
+
+    public GpuSplitFinderTest() { return; }
+
+    static void assertSameSplit(Split cpu, Split gpu) {
+        Assert.equals(gpu.valid ? (int64) 1 : (int64) 0,
+                      cpu.valid ? (int64) 1 : (int64) 0);
+        Assert.equals(gpu.findex, cpu.findex);
+        Assert.equals(gpu.splitGidx, cpu.splitGidx);
+        Assert.equals((int64) Cajeta.f32ToBits(gpu.gain),
+                      (int64) Cajeta.f32ToBits(cpu.gain));
+        Assert.equals((int64) Cajeta.f32ToBits(gpu.fvalue),
+                      (int64) Cajeta.f32ToBits(cpu.fvalue));
+        Assert.equals(gpu.defaultLeft ? (int64) 1 : (int64) 0,
+                      cpu.defaultLeft ? (int64) 1 : (int64) 0);
+        Assert.equals(gpu.leftG, cpu.leftG);
+        Assert.equals(gpu.leftH, cpu.leftH);
+        Assert.equals(gpu.rightG, cpu.rightG);
+        Assert.equals(gpu.rightH, cpu.rightH);
+        return;
+    }
+
+    static void compareRoot(String fixture, float64 lambda, float64 alpha,
+                            float64 mcw) {
+        FixtureLoader f = FixtureLoader.open(fixture);
+        float64[] g = f.gradRound((int32) 0);
+        float64[] h = f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        Histogram hist = Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+
+        Split cpu = SplitFinder.findBest(hist, f.cutPtrs(), f.cutValues(), q,
+                                         lambda, alpha, mcw);
+        Split gpu = GpuSplitFinder.findBest(hist, f.cutPtrs(), f.cutValues(), q,
+                                            lambda, alpha, mcw);
+        assertSameSplit(cpu, gpu);
+        return;
+    }
+
+    @Test
+    public void rootSplitsBitIdenticalAcrossFixtures() {
+        if (!FastMath.hasRcpTable()) { return; }
+        compareRoot("tiny_reg", (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        compareRoot("tiny_reg_missing", (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        compareRoot("tiny_binary", (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        compareRoot("large_reg", (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        return;
+    }
+
+    // The knife-edge fixture: min_child_weight = 10 makes tile-level gating
+    // decide the winner (the CPU finder's device-semantics port exists
+    // because of this exact case).
+    @Test
+    public void minChildWeightKnifeEdgeBitIdentical() {
+        if (!FastMath.hasRcpTable()) { return; }
+        compareRoot("tiny_reg_mcw10", (float64) 1.0, (float64) 0.0, (float64) 10.0);
+        return;
+    }
+
+    // Non-root shape: a partitioned histogram (nonzero missing mass in both
+    // children on the 15%-missing fixture).
+    @Test
+    public void partitionedNodeSplitBitIdentical() {
+        if (!FastMath.hasRcpTable()) { return; }
+        FixtureLoader f = FixtureLoader.open("tiny_reg_missing");
+        float64[] g = f.gradRound((int32) 0);
+        float64[] h = f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+
+        int64[] position = heap int64[n];
+        int64 r = (int64) 0;
+        while (r < n) {
+            position[r] = (int64) 1 + r % (int64) 2;
+            r = r + (int64) 1;
+        }
+        Histogram h1 = Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+                                          position, (int64) 1, n);
+        Split cpu = SplitFinder.findBest(h1, f.cutPtrs(), f.cutValues(), q,
+                                         (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Split gpu = GpuSplitFinder.findBest(h1, f.cutPtrs(), f.cutValues(), q,
+                                            (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        assertSameSplit(cpu, gpu);
+        return;
+    }
+}
