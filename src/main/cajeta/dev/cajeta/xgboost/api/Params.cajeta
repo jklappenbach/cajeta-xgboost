@@ -26,6 +26,7 @@ public final class Params {
     public int64   maxBin;           // max_bin
     public float64 subsample;        // row subsample fraction (1 = deterministic)
     public float64 colsampleByTree;  // column subsample fraction (1 = deterministic)
+    public String  device;           // "cpu" (default) or "gpu" — same model bit for bit
 
     /** XGBoost defaults — the deterministic, bit-exact config set (§6.4). */
     public Params() {
@@ -43,6 +44,7 @@ public final class Params {
         this.maxBin = (int64) 256;
         this.subsample = (float64) 1.0;
         this.colsampleByTree = (float64) 1.0;
+        this.device = "cpu";
         return;
     }
 
@@ -60,6 +62,16 @@ public final class Params {
             return this.numClass;
         }
         return (int64) 1;
+    }
+
+    /**
+     * True iff training should run the tree-growing data passes as
+     * `cajeta.xpu` kernels (device == "gpu"). The grown model is IDENTICAL
+     * bit for bit either way — the GPU components reproduce their CPU twins
+     * exactly — so this is a throughput choice, not a semantics one.
+     */
+    public boolean deviceGpu() {
+        return this.device != null && this.device.equals("gpu");
     }
 
     public boolean usesStochasticSampling() {

@@ -1,0 +1,125 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.gpu.GpuPartition;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
+
+/**
+ * U12.2.1 — the GPU row partition is bit-identical to TreeBuilder's CPU
+ * repartition loop: after a split, every row of the node moves to the same
+ * child on both paths, and the (left, right) counts agree. Each thread writes
+ * only its own row and the counts are int64 atomicAdds (commutative), so no
+ * backend or scatter order can differ. Runs on whatever backend `cajeta.xpu`
+ * selects, like GpuHistogramTest; needs no SFU capture (the split itself
+ * comes from the CPU finder).
+ */
+public class GpuPartitionTest {
+
+    public GpuPartitionTest() { return; }
+
+    // The CPU repartition loop, verbatim from TreeBuilder.grow.
+    static #int64[] cpuPartition(Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                 Split s, int64[] position,
+                                 int64 nid, int64 li, int64 ri,
+                                 int64 nf, int64 n) {
+        int64 b0 = cutPtrs.flatGet(s.findex);
+        int64 localSplit = s.splitGidx - b0;
+        int64 r = (int64) 0;
+        int64 cntL = (int64) 0;
+        int64 cntR = (int64) 0;
+        while (r < n) {
+            if (position[r] == nid) {
+                int32 b = bins.flatGet(r * nf + s.findex);
+                boolean goLeft;
+                if (b < (int32) 0) { goLeft = s.defaultLeft; }
+                else { goLeft = (int64) b <= localSplit; }
+                if (goLeft) { position[r] = li; cntL = cntL + (int64) 1; }
+                else        { position[r] = ri; cntR = cntR + (int64) 1; }
+            }
+            r = r + (int64) 1;
+        }
+        int64[] out = heap int64[2];
+        out[0] = cntL;
+        out[1] = cntR;
+        return #out;
+    }
+
+    static void comparePartition(String fixture) {
+        FixtureLoader f = FixtureLoader.open(fixture);
+        float64[] g = f.gradRound((int32) 0);
+        float64[] h = f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
+        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+
+        // Root split from the CPU finder (no capture needed).
+        Histogram root = Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Split s = SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
+                                       (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Assert.isTrue(s.valid);
+
+        // Root partition: 0 -> (1, 2), both paths.
+        int64[] posCpu = heap int64[n];
+        int64[] posGpu = heap int64[n];
+        int64[] cCpu = GpuPartitionTest.cpuPartition(
+            f.bins(), f.cutPtrs(), s, posCpu, (int64) 0, (int64) 1, (int64) 2, nf, n);
+        int64[] cGpu = GpuPartition.partition(
+            f.bins(), f.cutPtrs(), s, posGpu, (int64) 0, (int64) 1, (int64) 2, nf, n);
+
+        Assert.equals(cGpu[0], cCpu[0]);
+        Assert.equals(cGpu[1], cCpu[1]);
+        Assert.equals(cGpu[0] + cGpu[1], n);
+        int64 r = (int64) 0;
+        while (r < n) {
+            Assert.equals(posGpu[r], posCpu[r]);
+            r = r + (int64) 1;
+        }
+
+        // A second-level partition (rows already split across nodes 1 and 2):
+        // split node 1's rows again — the kernel must leave node 2's rows
+        // untouched and agree row-for-row on node 1's.
+        Histogram h1 = Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+                                          posCpu, (int64) 1, n);
+        Split s1 = SplitFinder.findBest(h1, f.cutPtrs(), f.cutValues(), q,
+                                        (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        if (s1.valid) {
+            int64[] c1Cpu = GpuPartitionTest.cpuPartition(
+                f.bins(), f.cutPtrs(), s1, posCpu, (int64) 1, (int64) 3, (int64) 4, nf, n);
+            int64[] c1Gpu = GpuPartition.partition(
+                f.bins(), f.cutPtrs(), s1, posGpu, (int64) 1, (int64) 3, (int64) 4, nf, n);
+            Assert.equals(c1Gpu[0], c1Cpu[0]);
+            Assert.equals(c1Gpu[1], c1Cpu[1]);
+            int64 rr = (int64) 0;
+            while (rr < n) {
+                Assert.equals(posGpu[rr], posCpu[rr]);
+                rr = rr + (int64) 1;
+            }
+        }
+        return;
+    }
+
+    @Test
+    public void rootAndChildPartitionsBitIdentical() {
+        GpuPartitionTest.comparePartition("tiny_reg");
+        return;
+    }
+
+    // 15% missing values: the default-direction (missing) arm must route
+    // exactly like the CPU loop.
+    @Test
+    public void missingRowsFollowDefaultDirection() {
+        GpuPartitionTest.comparePartition("tiny_reg_missing");
+        return;
+    }
+
+    // 256-bin features at scale — localSplit spans multi-tile bin ranges.
+    @Test
+    public void largeFixturePartitionBitIdentical() {
+        GpuPartitionTest.comparePartition("large_reg");
+        return;
+    }
+}

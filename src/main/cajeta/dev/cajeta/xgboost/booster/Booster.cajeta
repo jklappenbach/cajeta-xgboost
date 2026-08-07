@@ -66,6 +66,24 @@ public final class Booster {
                                float64 eta, float64 baseScore,
                                Objective objective, int64 numClass,
                                float32[] marginHistory) {
+        return Booster.train(bins, cutPtrs, cutValues, label, n, rounds,
+                             maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
+                             eta, baseScore, objective, numClass, marginHistory, false);
+    }
+
+    /**
+     * The device-dispatch form: `device` selects {@link TreeBuilder}'s GPU
+     * path for every tree — same model bit for bit (each device component is
+     * bit-identical to its CPU twin). Objectives and margin updates stay on
+     * the host either way.
+     */
+    public static #Model train(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                               float64[] label, int64 n, int64 rounds,
+                               int64 maxDepth, int64 maxLeaves,
+                               float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
+                               float64 eta, float64 baseScore,
+                               Objective objective, int64 numClass,
+                               float32[] marginHistory, boolean device) {
         int64 cap = TreeBuilder.capacity(maxDepth);
         // Output groups per round. K trees are grown per round, one per class,
         // each over ITS OWN gradient slice — the objective is the only thing
@@ -125,7 +143,8 @@ public final class Booster {
                 float64[] shs = heap float64[cap];
                 int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, gradK, hessK, n,
                                             maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
-                                            eta, si, sc, dl, lc, rc, bw, lf, lch, shs, leafOf);
+                                            eta, si, sc, dl, lc, rc, bw, lf, lch, shs, leafOf,
+                                            device);
                 // Tree index is round-major: r*K + g, so class g's trees are
                 // every K-th tree — XGBoost's own layout.
                 int64 t = r * K + g;

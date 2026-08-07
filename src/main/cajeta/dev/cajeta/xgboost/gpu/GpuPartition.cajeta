@@ -1,0 +1,89 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.math.Tensor;
+import cajeta.xpu.KernelBuffer;
+import cajeta.xpu.KernelStream;
+import cajeta.xpu.KernelThread;
+import dev.cajeta.xgboost.tree.Split;
+
+/**
+ * The GPU row partition (plan U12.2.1): after a split, move every row of
+ * node `nid` to its child — the device analog of TreeBuilder.grow's
+ * repartition loop, same result bit for bit.
+ *
+ * **Why this is bit-identical on every backend.** Each row's destination is
+ * a pure function of its own bin value (`present -> left iff bin <=
+ * localSplit`, `missing -> the split's default direction`), and each thread
+ * writes only its own `pos[r]` slot — there is no cross-thread data flow at
+ * all. The (left, right) counts are int64 `atomicAdd`s, which commute, so
+ * scatter order cannot change them either.
+ */
+public final class GpuPartition {
+
+    @Kernel
+    public static void partitionScatter(KernelBuffer<int64> pos,
+                                        KernelBuffer<int32> bins,
+                                        KernelBuffer<int64> counts,
+                                        int32 nid, int32 li, int32 ri,
+                                        int32 findex, int32 localSplit,
+                                        int32 defLeft, uint32 n, uint32 nf) {
+        uint32 r = KernelThread.globalIdX();
+        if (r < n) {
+            if (pos[r] == (int64) nid) {
+                int32 b = bins[r * nf + (uint32) findex];
+                boolean goLeft;
+                if (b < 0) { goLeft = defLeft != 0; }
+                else { goLeft = b <= localSplit; }
+                if (goLeft) {
+                    pos[r] = (int64) li;
+                    counts.atomicAdd(0, (int64) 1);
+                } else {
+                    pos[r] = (int64) ri;
+                    counts.atomicAdd(1, (int64) 1);
+                }
+            }
+        }
+    }
+
+    /**
+     * Repartition node `nid`'s rows to `li`/`ri` in `position` (updated in
+     * place), returning `[cntL, cntR]` — the GPU analog of the repartition
+     * loop in TreeBuilder.grow, same `position[]` and counts bit for bit.
+     */
+    public static #int64[] partition(Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                     Split s, int64[] position,
+                                     int64 nid, int64 li, int64 ri,
+                                     int64 nf, int64 n) {
+        int64 b0 = cutPtrs.flatGet(s.findex);
+        int64 localSplit = s.splitGidx - b0;
+
+        int32[] binsH = heap int32[n * nf];
+        int64 c = (int64) 0;
+        while (c < n * nf) {
+            binsH[c] = bins.flatGet(c);
+            c = c + (int64) 1;
+        }
+
+        KernelStream st = KernelStream.current();
+        KernelBuffer<int64> dPos = heap KernelBuffer<int64>(n);
+        KernelBuffer<int32> dBins = heap KernelBuffer<int32>(n * nf);
+        KernelBuffer<int64> dCnt = heap KernelBuffer<int64>(2);
+        int64[] zeros = heap int64[2];
+        dPos.upload(position);
+        dBins.upload(binsH);
+        dCnt.upload(zeros);
+
+        uint32 un = (uint32) n;
+        partitionScatter.launch(st, grid: [(un + 63) / 64], block: [64])
+            (dPos, dBins, dCnt, (int32) nid, (int32) li, (int32) ri,
+             (int32) s.findex, (int32) localSplit,
+             s.defaultLeft ? (int32) 1 : (int32) 0,
+             un, (uint32) nf);
+        st.sync();
+
+        dPos.download(position);
+        int64[] counts = heap int64[2];
+        dCnt.download(counts);
+        return #counts;
+    }
+}

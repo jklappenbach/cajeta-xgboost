@@ -97,7 +97,7 @@ public final class GBDT {
                                 p.maxDepth, p.maxLeaves,
                                 p.lambda, p.alpha, p.gamma, p.minChildWeight,
                                 p.eta, p.baseScore, p.objective, p.numClass,
-                                marginHistory);
+                                marginHistory, p.deviceGpu());
         m.deterministic = deterministic;
         return #m;
     }

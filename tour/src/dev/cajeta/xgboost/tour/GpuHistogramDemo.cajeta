@@ -3,6 +3,7 @@ package dev.cajeta.xgboost.tour;
 import cajeta.math.Tensor;
 import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.gpu.GpuPartition;
 import dev.cajeta.xgboost.gpu.GpuSplitFinder;
 import dev.cajeta.xgboost.objective.SquaredError;
 import dev.cajeta.xgboost.sketch.Binner;
@@ -116,5 +117,43 @@ public class GpuHistogramDemo extends DemoClass {
                 "without the RCP capture the GPU evaluator refuses rather "
                 + "than un-pin knife-edge splits — the CPU finder serves");
         }
+
+        // The GPU row partition — the third device kernel: each thread routes
+        // its own row (present -> left iff bin <= boundary, missing -> the
+        // split's default direction) and the child counts are int64
+        // atomicAdds, so no scatter order can change anything. Needs no
+        // capture: the split here comes from the CPU finder.
+        Split sp = SplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
+            (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        int64 bp0 = cutPtrsT.flatGet(sp.findex);
+        int64 localSplit = sp.splitGidx - bp0;
+        int64[] posC = heap int64[n];
+        int64[] posG = heap int64[n];
+        int64 cL = (int64) 0;
+        int64 cR = (int64) 0;
+        int64 pr = (int64) 0;
+        while (pr < n) {
+            int32 pb = binsT.flatGet(pr * nf + sp.findex);
+            boolean goLeft;
+            if (pb < (int32) 0) { goLeft = sp.defaultLeft; }
+            else { goLeft = (int64) pb <= localSplit; }
+            if (goLeft) { posC[pr] = (int64) 1; cL = cL + (int64) 1; }
+            else        { posC[pr] = (int64) 2; cR = cR + (int64) 1; }
+            pr = pr + (int64) 1;
+        }
+        int64[] cnts = GpuPartition.partition(binsT, cutPtrsT, sp, posG,
+                                              (int64) 0, (int64) 1, (int64) 2,
+                                              nf, n);
+        boolean samePart = cnts[0] == cL && cnts[1] == cR;
+        pr = (int64) 0;
+        while (pr < n) {
+            if (posG[pr] != posC[pr]) { samePart = false; }
+            pr = pr + (int64) 1;
+        }
+        System.stdout.println("   partition: " + cnts[0] + " left / "
+            + cnts[1] + " right (device == host)");
+        this.check(samePart,
+            "the GPU partition routes every row to the same child as the "
+            + "CPU loop — per-row pure function + commutative counts");
     }
 }

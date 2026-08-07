@@ -1,0 +1,106 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * U12.2.1 (dispatch) — training with the device path produces the IDENTICAL
+ * model, bit for bit: same trees (splits, thresholds, children, default
+ * directions), same leaf values, same margins after every round. The GPU
+ * histogram/split/partition components are individually bit-identical to
+ * their CPU twins, so the whole grow loop must be too; this pins the
+ * composition. Runs on whatever backend `cajeta.xpu` selects. Without the
+ * SFU capture the device path's split finding falls back to the CPU finder
+ * by contract — equality must hold either way, so this test never skips.
+ */
+public class GrowDeviceTest {
+
+    public GrowDeviceTest() { return; }
+
+    static void assertSameModel(Model a, Model b, int64 rounds, int64 n) {
+        Assert.equals(b.rounds, a.rounds);
+        Assert.equals(b.cap, a.cap);
+        Assert.equals((int64) Cajeta.f32ToBits(b.baseMargin),
+                      (int64) Cajeta.f32ToBits(a.baseMargin));
+        int64 trees = (int64) a.nodeCount.count();
+        Assert.equals((int64) b.nodeCount.count(), trees);
+        int64 t = (int64) 0;
+        while (t < trees) {
+            Assert.equals(b.nodeCount[t], a.nodeCount[t]);
+            t = t + (int64) 1;
+        }
+        int64 total = trees * a.cap;
+        int64 i = (int64) 0;
+        while (i < total) {
+            Assert.equals(b.splitIndices[i], a.splitIndices[i]);
+            Assert.equals((int64) Cajeta.f32ToBits(b.splitConditions[i]),
+                          (int64) Cajeta.f32ToBits(a.splitConditions[i]));
+            Assert.equals(b.defaultLeft[i] ? (int64) 1 : (int64) 0,
+                          a.defaultLeft[i] ? (int64) 1 : (int64) 0);
+            Assert.equals(b.leftChildren[i], a.leftChildren[i]);
+            Assert.equals(b.rightChildren[i], a.rightChildren[i]);
+            Assert.equals((int64) Cajeta.f32ToBits(b.baseWeights[i]),
+                          (int64) Cajeta.f32ToBits(a.baseWeights[i]));
+            Assert.equals(b.isLeaf[i] ? (int64) 1 : (int64) 0,
+                          a.isLeaf[i] ? (int64) 1 : (int64) 0);
+            Assert.equals((int64) Cajeta.f32ToBits(b.lossChanges[i]),
+                          (int64) Cajeta.f32ToBits(a.lossChanges[i]));
+            Assert.equals(Cajeta.f64ToBits(b.sumHessian[i]),
+                          Cajeta.f64ToBits(a.sumHessian[i]));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+
+    static void compareTraining(String fixture, Objective obj, int64 rounds) {
+        FixtureLoader f = FixtureLoader.open(fixture);
+        Tensor<float64> yT = f.y();
+        int64 n = yT.size();
+        float64[] label = heap float64[n];
+        int64 li = (int64) 0;
+        while (li < n) { label[li] = yT.flatGet(li); li = li + (int64) 1; }
+
+        float32[] mhCpu = heap float32[rounds * n];
+        float32[] mhGpu = heap float32[rounds * n];
+        Model cpu = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
+                                  n, rounds, (int64) 6, (int64) 0,
+                                  (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                  (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                  obj, (int64) 1, mhCpu, false);
+        Model gpu = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
+                                  n, rounds, (int64) 6, (int64) 0,
+                                  (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                  (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                  obj, (int64) 1, mhGpu, true);
+
+        GrowDeviceTest.assertSameModel(cpu, gpu, rounds, n);
+        int64 i = (int64) 0;
+        while (i < rounds * n) {
+            Assert.equals((int64) Cajeta.f32ToBits(mhGpu[i]),
+                          (int64) Cajeta.f32ToBits(mhCpu[i]));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+
+    @Test
+    public void regressionTrainingBitIdenticalOnDevice() {
+        GrowDeviceTest.compareTraining("tiny_reg", Objective.SQUARED_ERROR, (int64) 5);
+        return;
+    }
+
+    @Test
+    public void missingValuesTrainingBitIdenticalOnDevice() {
+        GrowDeviceTest.compareTraining("tiny_reg_missing", Objective.SQUARED_ERROR, (int64) 5);
+        return;
+    }
+
+    @Test
+    public void logisticTrainingBitIdenticalOnDevice() {
+        GrowDeviceTest.compareTraining("tiny_binary", Objective.LOGISTIC, (int64) 5);
+        return;
+    }
+}
