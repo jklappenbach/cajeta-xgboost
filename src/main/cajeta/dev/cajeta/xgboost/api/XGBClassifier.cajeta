@@ -1,0 +1,172 @@
+package dev.cajeta.xgboost.api;
+
+import cajeta.math.Tensor;
+import dev.cajeta.ml.MlException;
+import dev.cajeta.ml.ProbClassifier;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * The classification twin of {@link XGBRegressor} (ml-trees-ensembles U7,
+ * spec §9): xgboost classification as a `dev.cajeta.ml.ProbClassifier`, so a
+ * boosted classifier slots into `Split.crossValScore`, `Pipeline`, and every
+ * ml model-selection utility unchanged. Adds an objective and an API
+ * surface, NOT a new numeric contract — the booster underneath is the same
+ * bit-exact {@link GBDT} pipeline the parity suite pins (§9.4).
+ *
+ * Binary labels (K == 2) drive `binary:logistic`; K >= 3 drives
+ * `multi:softmax`. `predictProba` returns the calibrated probabilities from
+ * the raw margins (§9.2): sigmoid for binary (as `(n, 2)` — `1−p, p`),
+ * max-shifted softmax for multiclass. `predict` is the class decision.
+ * Deterministic contract inherited; stochastic configs are refused by
+ * {@link GBDT#fit} itself.
+ */
+public final class XGBClassifier implements ProbClassifier {
+
+    private Params params;
+    private Model model;
+    private int64 nFeatures;
+    private int64 nClasses;
+    private boolean fitted;
+
+    /** Snapshot `p`'s hyperparameters (objective/numClass are derived from
+     *  the labels at fit; later mutation of `p` has no effect). */
+    public XGBClassifier(Params p) {
+        Params own = heap Params();
+        own.rounds = p.rounds;
+        own.maxDepth = p.maxDepth;
+        own.maxLeaves = p.maxLeaves;
+        own.lambda = p.lambda;
+        own.alpha = p.alpha;
+        own.gamma = p.gamma;
+        own.minChildWeight = p.minChildWeight;
+        own.eta = p.eta;
+        own.baseScore = p.baseScore;
+        own.maxBin = p.maxBin;
+        own.subsample = p.subsample;
+        own.colsampleByTree = p.colsampleByTree;
+        own.device = p.device;
+        this.params #= own;
+        this.nFeatures = (int64) 0;
+        this.nClasses = (int64) 0;
+        this.fitted = false;
+        return;
+    }
+
+    public void fit(Tensor<float64> x, Tensor<float64> y) {
+        if (x.ndim() != 2) {
+            throw heap MlException("XGBClassifier.fit: x must be 2-D (n, p)");
+        }
+        int64 n = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        if (y.ndim() != 1 || y.shapeAt(0) != n) {
+            throw heap MlException("XGBClassifier.fit: y must be (n,) matching x rows");
+        }
+        int64 kmax = (int64) 0;
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            float64 v = y.get1(i);
+            int64 li = (int64) v;
+            if (v != (float64) li || li < (int64) 0) {
+                throw heap MlException("XGBClassifier.fit: labels must be integers 0..K-1");
+            }
+            if (li > kmax) { kmax = li; }
+            label[i] = v;
+            i = i + (int64) 1;
+        }
+        int64 k = kmax + (int64) 1;
+        if (k < (int64) 2) { k = (int64) 2; }
+        this.nClasses = k;
+        if (k == (int64) 2) {
+            this.params.objective = Objective.LOGISTIC;
+            this.params.numClass = (int64) 1;
+        } else {
+            this.params.objective = Objective.SOFTMAX;
+            this.params.numClass = k;
+        }
+        Model m = GBDT.fit(x, label, n, nf, this.params);
+        this.model #= m;
+        this.nFeatures = nf;
+        this.fitted = true;
+        return;
+    }
+
+    public boolean isFitted() {
+        return this.fitted;
+    }
+
+    void requireReady(Tensor<float64> x, String who) {
+        if (!this.fitted) {
+            throw heap MlException(who + ": fit first");
+        }
+        if (x.ndim() != 2 || x.shapeAt(1) != this.nFeatures) {
+            throw heap MlException(who + ": x must be (n, p) with p matching the fit");
+        }
+        return;
+    }
+
+    /** `(n, K)` calibrated probabilities from the raw margins (§9.2). */
+    public #Tensor<float64> predictProba(Tensor<float64> x) {
+        this.requireReady(x, "XGBClassifier.predictProba");
+        int64 n = x.shapeAt(0);
+        int64 k = this.nClasses;
+        float32[] proba = GBDT.predictProba(this.model, x, n, this.nFeatures);
+        float64[] wide = heap float64[n * k];
+        if (k == (int64) 2) {
+            // Binary proba is the positive-class sigmoid, (n,); widen to
+            // the protocol's (n, 2) as [1-p, p].
+            int64 r = (int64) 0;
+            while (r < n) {
+                float64 p1 = (float64) proba[r];
+                wide[r * (int64) 2] = 1.0 - p1;
+                wide[r * (int64) 2 + (int64) 1] = p1;
+                r = r + (int64) 1;
+            }
+        } else {
+            int64 i = (int64) 0;
+            while (i < n * k) {
+                wide[i] = (float64) proba[i];
+                i = i + (int64) 1;
+            }
+        }
+        int64[] sh = heap int64[2]; sh[0] = n; sh[1] = k;
+        return Tensor.of<float64>(wide, sh);
+    }
+
+    /** `(n,)` class decisions (argmax of margins — softmax is monotone). */
+    public #Tensor<float64> predict(Tensor<float64> x) {
+        this.requireReady(x, "XGBClassifier.predict");
+        int64 n = x.shapeAt(0);
+        int64[] cls = GBDT.predictClass(this.model, x, n, this.nFeatures);
+        float64[] wide = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            wide[i] = (float64) cls[i];
+            i = i + (int64) 1;
+        }
+        int64[] sh = heap int64[1]; sh[0] = n;
+        return Tensor.of<float64>(wide, sh);
+    }
+
+    /** Accuracy — the classifier `score` convention. */
+    public float64 score(Tensor<float64> x, Tensor<float64> y) {
+        Tensor<float64> p = this.predict(x);
+        int64 n = p.shapeAt(0);
+        int64 hits = (int64) 0;
+        int64 i = (int64) 0;
+        while (i < n) {
+            if (p.get1(i) == y.get1(i)) { hits = hits + (int64) 1; }
+            i = i + (int64) 1;
+        }
+        return (float64) hits / (float64) n;
+    }
+
+    /** The fitted {@link Model} — xgboost-specific surfaces (ModelIO, Importance). */
+    public Model model() {
+        if (!this.fitted) {
+            throw heap MlException("XGBClassifier.model: fit first");
+        }
+        return this.model;
+    }
+}

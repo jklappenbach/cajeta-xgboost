@@ -4,6 +4,7 @@ import cajeta.math.Tensor;
 import dev.cajeta.ml.KFold;
 import dev.cajeta.ml.Split;
 import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.api.XGBClassifier;
 import dev.cajeta.xgboost.api.XGBRegressor;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.booster.ModelIO;
@@ -68,5 +69,39 @@ public class EstimatorDemo extends DemoClass {
             "model() hands back the Model — ModelIO and the tree walk still apply");
         this.check(inner.deterministic,
             "the adapter trains through GBDT.fit, so the determinism bit holds");
+
+        // The classification twin (U7): same booster, same discipline —
+        // labels pick the objective (binary -> logistic here), predict is
+        // the class decision, predictProba the calibrated margins.
+        int64 n = x.shapeAt(0);
+        float64 ymean = (float64) 0.0;
+        int64 li = (int64) 0;
+        while (li < n) { ymean = ymean + yT.get1(li); li = li + (int64) 1; }
+        ymean = ymean / (float64) n;
+        float64[] lab = heap float64[n];
+        li = (int64) 0;
+        while (li < n) {
+            lab[li] = yT.get1(li) > ymean ? (float64) 1.0 : (float64) 0.0;
+            li = li + (int64) 1;
+        }
+        int64[] lsh = heap int64[1]; lsh[0] = n;
+        Tensor<float64> yc = Tensor.of<float64>(lab, lsh);
+        Params cp = heap Params();
+        cp.rounds = (int64) 6;
+        cp.maxDepth = (int64) 3;
+        XGBClassifier cls = heap XGBClassifier(cp);
+        cls.fit(x, yc);
+        float64 acc = cls.score(x, yc);
+        System.stdout.println("   classifier accuracy = " + acc);
+        this.check(acc > (float64) 0.9,
+            "XGBClassifier: the same bit-exact booster behind the "
+            + "ProbClassifier protocol — labels choose the objective");
+        Tensor<float64> proba = cls.predictProba(x);
+        float64 p0 = proba.flatGet((int64) 0) + proba.flatGet((int64) 1);
+        float64 dd = p0 - (float64) 1.0;
+        if (dd < (float64) 0.0) { dd = (float64) 0.0 - dd; }
+        this.check(dd < (float64) 0.00001,
+            "predictProba calibrates margins to probabilities — each row "
+            + "sums to 1");
     }
 }
