@@ -2,7 +2,7 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.gpu.GpuSplitFinder;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
@@ -60,7 +60,7 @@ public class GpuSplitFinderTest {
 
     @Test
     public void rootSplitsBitIdenticalAcrossFixtures() {
-        if (!FastMath.hasRcpTable()) { return; }
+        if (!SfuMath.hasRcpTable()) { return; }
         compareRoot("tiny_reg", (float64) 1.0, (float64) 0.0, (float64) 1.0);
         compareRoot("tiny_reg_missing", (float64) 1.0, (float64) 0.0, (float64) 1.0);
         compareRoot("tiny_binary", (float64) 1.0, (float64) 0.0, (float64) 1.0);
@@ -73,7 +73,7 @@ public class GpuSplitFinderTest {
     // because of this exact case).
     @Test
     public void minChildWeightKnifeEdgeBitIdentical() {
-        if (!FastMath.hasRcpTable()) { return; }
+        if (!SfuMath.hasRcpTable()) { return; }
         compareRoot("tiny_reg_mcw10", (float64) 1.0, (float64) 0.0, (float64) 10.0);
         return;
     }
@@ -82,7 +82,7 @@ public class GpuSplitFinderTest {
     // children on the 15%-missing fixture).
     @Test
     public void partitionedNodeSplitBitIdentical() {
-        if (!FastMath.hasRcpTable()) { return; }
+        if (!SfuMath.hasRcpTable()) { return; }
         FixtureLoader f = FixtureLoader.open("tiny_reg_missing");
         float64[] g = f.gradRound((int32) 0);
         float64[] h = f.hessRound((int32) 0);

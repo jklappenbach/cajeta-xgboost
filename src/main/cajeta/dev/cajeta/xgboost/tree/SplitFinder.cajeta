@@ -1,7 +1,7 @@
 package dev.cajeta.xgboost.tree;
 
 import cajeta.math.Tensor;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 
 /**
  * Best-split search over a node {@link Histogram}, reproducing XGBoost's GPU
@@ -42,7 +42,7 @@ public final class SplitFinder {
     /**
      * `CalcGainGivenWeight` (α/λ path, no max_delta_step/constraint). The division
      * is device XGBoost's `__fdividef` (`split_evaluator.h:126`) via
-     * {@link FastMath#fdividef} — bit-exact with the probed SFU table, which decides
+     * {@link SfuMath#fdividef} — bit-exact with the probed SFU table, which decides
      * knife-edge near-tied splits (e.g. `tiny_reg_mcw10`). This is the gain used for
      * split *selection*; the parent `CalcGain` and leaf `CalcWeight` keep accurate
      * division (XGBoost uses `::xgboost::tree::CalcWeight` there, not `__fdividef`).
@@ -52,7 +52,7 @@ public final class SplitFinder {
         float64 t = SplitFinder.thresholdL1(gd, alpha);
         float32 num = (float32) (t * t);
         float32 den = (float32) (hd + lambda);
-        return FastMath.fdividef(num, den);
+        return SfuMath.fdividef(num, den);
     }
 
     /**

@@ -1,6 +1,6 @@
 package dev.cajeta.xgboost.selftest;
 
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;

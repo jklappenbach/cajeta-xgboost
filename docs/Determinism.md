@@ -21,10 +21,10 @@ math:
   design choice removes summation-order sensitivity outright.
 - **Split gain** — the reference divides with `__fdividef`, which is the
   SFU `MUFU.RCP` instruction: a silicon lookup table, *not* the
-  correctly-rounded reciprocal. `FastMath.fdividef` reproduces it from a
+  correctly-rounded reciprocal. `SfuMath.fdividef` reproduces it from a
   probed capture of that table.
 - **Objectives** — device `expf` is not libm's. It reduces the argument
-  into [0,1) and evaluates the SFU `MUFU.EX2` table (`FastMath.expf`
+  into [0,1) and evaluates the SFU `MUFU.EX2` table (`SfuMath.expf`
   models the exact libdevice sequence: saturate, round-down FMA exponent
   split, two-part log2(e) reduction, table lookup, 2^n multiply).
   `Logistic`/`Softmax` mirror the reference op order around it, down to
@@ -37,7 +37,7 @@ capture from the reference GPU (RTX 4090): 2^23-entry tables, ~32 MB each,
 `.gitignore`d, loaded at runtime via `RCP_TABLE` / `EX2_TABLE` env paths
 (`run-tests.sh` wires them when present).
 
-Without the captures — e.g. in CI, which is CPU-only — `FastMath` falls
+Without the captures — e.g. in CI, which is CPU-only — `SfuMath` (promoted to stdlib as `cajeta.math.sfu.SfuMath`) falls
 back to **correctly-rounded** math: same API, same plumbing, not the SFU
 bits. Every capture-dependent test detects this and self-skips, so the
 suite is honest in both environments. (The `expf` model is validated

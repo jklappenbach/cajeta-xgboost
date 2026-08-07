@@ -12,8 +12,8 @@ import dev.cajeta.xgboost.tree.Histogram;
  * Vulkan → CPU emulation), so this same test IS the cross-backend identity
  * probe: Vulkan on the Strix Halo dev box, CUDA on phoenix-wsl, CPU
  * emulation on hosted CI — one assertion, §8.2/§8.3 evidence everywhere it
- * runs. Integer-only accumulation (host quantization + split-word u32
- * atomics with carry) is what makes the claim backend-independent.
+ * runs. Integer-only accumulation (host quantization + native int64
+ * atomics) is what makes the claim backend-independent.
  */
 public class GpuHistogramTest {
 
@@ -82,7 +82,7 @@ public class GpuHistogramTest {
 
     // Negative quantized gradients cross the u32 word boundary constantly;
     // large_reg (20k×50, 5% missing, 256 bins/feature) hammers the
-    // split-word carry path at real bin occupancy.
+    // int64 atomic scatter at real bin occupancy.
     @Test
     public void largeRootHistogramBitIdenticalToCpu() {
         FixtureLoader f = FixtureLoader.open("large_reg");

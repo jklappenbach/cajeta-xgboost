@@ -1,6 +1,6 @@
 package dev.cajeta.xgboost.objective;
 
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 
 /**
  * `binary:logistic` objective (spec §3.2). All arithmetic is float32 to match
@@ -15,7 +15,7 @@ import dev.cajeta.xgboost.fastmath.FastMath;
  *
  * Fidelity note (gpu-numeric-fidelity U1.2.4): the reference trees were built
  * with XGBoost's device `expf`, and this now reproduces it exactly —
- * {@link dev.cajeta.xgboost.fastmath.FastMath#expf} is the bit-exact device
+ * {@link cajeta.math.sfu.SfuMath#expf} is the bit-exact device
  * model (SFU `ex2.approx` on a reduced argument) when the probed table is
  * loaded, correctly-rounded otherwise. The whole reference op order is
  * mirrored: `x = min(-m, 88.7f)` (the overflow clamp — which also keeps the
@@ -35,7 +35,7 @@ public final class Logistic {
         if (x > (float32) 88.7) {
             x = (float32) 88.7;                    // avoid exp overflow (reference)
         }
-        float32 denom = FastMath.expf(x) + (float32) 1.0 + Logistic.kEps();
+        float32 denom = SfuMath.expf(x) + (float32) 1.0 + Logistic.kEps();
         return (float32) 1.0 / denom;
     }
 

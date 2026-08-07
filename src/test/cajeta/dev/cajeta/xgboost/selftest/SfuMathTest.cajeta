@@ -1,12 +1,12 @@
 package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 
 /**
- * Plumbing tests for the {@link FastMath} SFU models — {@link FastMath#fdividef}
+ * Plumbing tests for the {@link SfuMath} SFU models — {@link SfuMath#fdividef}
  * (the exponent-adjust + multiply that turns the mantissa reciprocal table into a
- * full `__fdividef`) and {@link FastMath#ex2Mantissa} (the `ex2.approx.f32` table
+ * full `__fdividef`) and {@link SfuMath#ex2Mantissa} (the `ex2.approx.f32` table
  * over `[0,1)` that device `expf` reduces into).
  *
  * Every assertion here holds **regardless of the table's values** — the division
@@ -16,38 +16,38 @@ import dev.cajeta.xgboost.fastmath.FastMath;
  * against the captured `ex2_table.npy`). So they lock the plumbing down on CI, which
  * is CPU-only and has no capture, and stay valid once the probed tables load.
  */
-public class FastMathTest {
+public class SfuMathTest {
 
-    public FastMathTest() { return; }
+    public SfuMathTest() { return; }
 
     static void invariant(float32 a, float32 b) {
         // fdividef(a, b·2^k)·2^k == fdividef(a, b), exactly — same mantissa index,
         // exponent shifted by k, and a power-of-two scale is exact in float32.
-        Assert.thatFloat((float64) (FastMath.fdividef(a, b * (float32) 8.0) * (float32) 8.0))
-              .isEqualTo((float64) FastMath.fdividef(a, b));
-        Assert.thatFloat((float64) (FastMath.fdividef(a, b * (float32) 0.125) * (float32) 0.125))
-              .isEqualTo((float64) FastMath.fdividef(a, b));
-        Assert.thatFloat((float64) (FastMath.fdividef(a, b * (float32) 64.0) * (float32) 64.0))
-              .isEqualTo((float64) FastMath.fdividef(a, b));
+        Assert.thatFloat((float64) (SfuMath.fdividef(a, b * (float32) 8.0) * (float32) 8.0))
+              .isEqualTo((float64) SfuMath.fdividef(a, b));
+        Assert.thatFloat((float64) (SfuMath.fdividef(a, b * (float32) 0.125) * (float32) 0.125))
+              .isEqualTo((float64) SfuMath.fdividef(a, b));
+        Assert.thatFloat((float64) (SfuMath.fdividef(a, b * (float32) 64.0) * (float32) 64.0))
+              .isEqualTo((float64) SfuMath.fdividef(a, b));
     }
 
     @Test
     public void exponentFactoringIsExact() {
-        FastMathTest.invariant((float32) 3.0, (float32) 7.0);
-        FastMathTest.invariant((float32) 5.0, (float32) 1.5);
-        FastMathTest.invariant((float32) 1.0, (float32) 1.0);
-        FastMathTest.invariant((float32) 123.5, (float32) 2.75);
-        FastMathTest.invariant((float32) 0.25, (float32) 40.0);
+        SfuMathTest.invariant((float32) 3.0, (float32) 7.0);
+        SfuMathTest.invariant((float32) 5.0, (float32) 1.5);
+        SfuMathTest.invariant((float32) 1.0, (float32) 1.0);
+        SfuMathTest.invariant((float32) 123.5, (float32) 2.75);
+        SfuMathTest.invariant((float32) 0.25, (float32) 40.0);
     }
 
     @Test
     public void reciprocalOfPowerOfTwoDenominatorIsExact() {
         // rcp(1)=1 (placeholder and hardware agree on m=1), so a/2^k is exact.
-        Assert.thatFloat((float64) FastMath.fdividef((float32) 7.0, (float32) 1.0))
+        Assert.thatFloat((float64) SfuMath.fdividef((float32) 7.0, (float32) 1.0))
               .isEqualTo((float64) 7.0);
-        Assert.thatFloat((float64) FastMath.fdividef((float32) 7.0, (float32) 2.0))
+        Assert.thatFloat((float64) SfuMath.fdividef((float32) 7.0, (float32) 2.0))
               .isEqualTo((float64) 3.5);
-        Assert.thatFloat((float64) FastMath.fdividef((float32) 3.0, (float32) 16.0))
+        Assert.thatFloat((float64) SfuMath.fdividef((float32) 3.0, (float32) 16.0))
               .isEqualTo((float64) 0.1875);
     }
 
@@ -60,7 +60,7 @@ public class FastMathTest {
     public void ex2AtZeroIsExactlyOne() {
         // 2^0 = 1. The probed table's first entry is exactly 1.0f and so is the
         // accurate placeholder, so this pins the index origin either way.
-        Assert.thatFloat((float64) FastMath.ex2Mantissa((int32) 0))
+        Assert.thatFloat((float64) SfuMath.ex2Mantissa((int32) 0))
               .isEqualTo((float64) 1.0);
     }
 
@@ -69,23 +69,23 @@ public class FastMathTest {
         // f in [0,1) => 2^f in [1,2), so every entry shares one binade — which is
         // what lets `expf` reapply the exponent as a separate multiply.
         int64 i = (int64) 0;
-        while (i < FastMathTest.EX2_N()) {
-            float32 v = FastMath.ex2Mantissa((int32) i);
+        while (i < SfuMathTest.EX2_N()) {
+            float32 v = SfuMath.ex2Mantissa((int32) i);
             Assert.isTrue(v >= (float32) 1.0);
             Assert.isTrue(v < (float32) 2.0);
-            i = i + FastMathTest.STEP();
+            i = i + SfuMathTest.STEP();
         }
     }
 
     @Test
     public void ex2IsMonotoneNonDecreasing() {
-        int64 i = FastMathTest.STEP();
-        float32 prev = FastMath.ex2Mantissa((int32) 0);
-        while (i < FastMathTest.EX2_N()) {
-            float32 v = FastMath.ex2Mantissa((int32) i);
+        int64 i = SfuMathTest.STEP();
+        float32 prev = SfuMath.ex2Mantissa((int32) 0);
+        while (i < SfuMathTest.EX2_N()) {
+            float32 v = SfuMath.ex2Mantissa((int32) i);
             Assert.isTrue(v >= prev);
             prev = v;
-            i = i + FastMathTest.STEP();
+            i = i + SfuMathTest.STEP();
         }
     }
 
@@ -94,11 +94,11 @@ public class FastMathTest {
         // The reduced argument's fraction is 23 bits; nothing above bit 22 is an
         // index, so a stray high bit must not reach the table.
         int64 i = (int64) 0;
-        while (i < FastMathTest.EX2_N()) {
+        while (i < SfuMathTest.EX2_N()) {
             int32 raw = (int32) i;
-            Assert.thatFloat((float64) FastMath.ex2Mantissa(raw | ((int32) 0x00800000)))
-                  .isEqualTo((float64) FastMath.ex2Mantissa(raw));
-            i = i + FastMathTest.STEP();
+            Assert.thatFloat((float64) SfuMath.ex2Mantissa(raw | ((int32) 0x00800000)))
+                  .isEqualTo((float64) SfuMath.ex2Mantissa(raw));
+            i = i + SfuMathTest.STEP();
         }
     }
 }

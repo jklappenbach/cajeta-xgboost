@@ -58,7 +58,7 @@ What each demo demonstrates:
    `SplitFinder.findBest`/`calcGain`/`leafWeight` → `TreeBuilder.growTree` →
    `NodeStats`, closing with `Booster.train` and its per-round margin history
    showing the error fall round over round.
-9. **`FastMathDemo`** — the device-fidelity layer: whether the probed SFU
+9. **`SfuMathDemo`** — the device-fidelity layer: whether the probed SFU
    capture tables are loaded, and `expf` / `fdividef` / `fmaf` / the mantissa
    tables in action. This is why Logistic's gradients can match a GPU's.
 10. **`EstimatorDemo`** — `XGBRegressor`, the `dev.cajeta.ml.Predictor`

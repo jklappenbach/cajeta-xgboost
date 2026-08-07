@@ -3,7 +3,7 @@ package dev.cajeta.xgboost.selftest;
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Booster;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.objective.Objective;
 
@@ -24,7 +24,7 @@ public class CovertypeTest {
     public void covertypeModelBitIdenticalToReference() {
         // Rounds 1+ are expf-dependent: bit-exactness needs the probed
         // MUFU.EX2 capture (EX2_TABLE), absent in CI — self-skip there.
-        if (!FastMath.hasEx2Table()) {
+        if (!SfuMath.hasEx2Table()) {
             return;
         }
         FixtureLoader f = FixtureLoader.open("covertype");

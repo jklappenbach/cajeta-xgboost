@@ -4,7 +4,7 @@ import cajeta.math.Tensor;
 import cajeta.xpu.KernelBuffer;
 import cajeta.xpu.KernelStream;
 import cajeta.xpu.KernelThread;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
 import dev.cajeta.xgboost.tree.Split;
@@ -26,10 +26,10 @@ import dev.cajeta.xgboost.tree.Split;
  * test, not a correctness question.
  *
  * **In-kernel `__fdividef`.** Gain scoring replicates {@link
- * FastMath#fdividef} inside the kernel — the probed SFU reciprocal table
+ * SfuMath#fdividef} inside the kernel — the probed SFU reciprocal table
  * rides along as a device buffer (`rcpTab`), so every backend computes the
  * same `a * rcp(b)` the CUDA silicon does. The table is REQUIRED here: the
- * host wrapper throws without it (callers gate on `FastMath.hasRcpTable()`
+ * host wrapper throws without it (callers gate on `SfuMath.hasRcpTable()`
  * and use the CPU finder), because a per-backend native division would
  * un-pin exactly the knife-edge splits the table exists to pin.
  *
@@ -113,7 +113,7 @@ public final class GpuSplitFinder {
                             else { tl = 0.0; }
                             float32 num = (float32) (tl * tl);
                             float32 den = (float32) (hdl + lambda);
-                            gl = GpuSplitFinder.kfdividef(num, den, rcpTab);
+                            gl = SfuMath.fdividefDev(num, den, rcpTab);
                         }
                         float64 gdr = (float64) (parentG - lLG) * toFloatGrad;
                         float64 hdr = (float64) (parentH - lLH) * toFloatHess;
@@ -125,7 +125,7 @@ public final class GpuSplitFinder {
                             else { tr = 0.0; }
                             float32 num2 = (float32) (tr * tr);
                             float32 den2 = (float32) (hdr + lambda);
-                            gr = GpuSplitFinder.kfdividef(num2, den2, rcpTab);
+                            gr = SfuMath.fdividefDev(num2, den2, rcpTab);
                         }
                         gainL = gl + gr;
                     }
@@ -142,7 +142,7 @@ public final class GpuSplitFinder {
                             else { tl = 0.0; }
                             float32 num = (float32) (tl * tl);
                             float32 den = (float32) (hdl + lambda);
-                            gl = GpuSplitFinder.kfdividef(num, den, rcpTab);
+                            gl = SfuMath.fdividefDev(num, den, rcpTab);
                         }
                         float64 gdr = (float64) (parentG - scanG) * toFloatGrad;
                         float64 hdr = (float64) (parentH - scanH) * toFloatHess;
@@ -154,7 +154,7 @@ public final class GpuSplitFinder {
                             else { tr = 0.0; }
                             float32 num2 = (float32) (tr * tr);
                             float32 den2 = (float32) (hdr + lambda);
-                            gr = GpuSplitFinder.kfdividef(num2, den2, rcpTab);
+                            gr = SfuMath.fdividefDev(num2, den2, rcpTab);
                         }
                         gainR = gl + gr;
                     }
@@ -212,59 +212,13 @@ public final class GpuSplitFinder {
     }
 
     /**
-     * In-kernel `__fdividef` — {@link FastMath#fdividef} verbatim against the
-     * uploaded SFU table. `@Device` (callable from the kernel only).
-     */
-    @Device
-    static float32 kfdividef(float32 a, float32 b, KernelBuffer<int32> rcpTab) {
-        int32 bb = Cajeta.f32ToBits(b);
-        int32 expBiased = (bb >> 23) & 0xFF;
-        if (bb < 0 || expBiased == 0 || expBiased == 0xFF) {
-            return (float32) ((float64) a / (float64) b);
-        }
-        int32 e = expBiased - 127;
-        int32 manIdx = bb & 0x7FFFFF;
-        float32 rcpM = Cajeta.bitsToF32(rcpTab[(uint32) manIdx]);
-        int32 rmb = Cajeta.f32ToBits(rcpM);
-        int32 rmExp = (rmb >> 23) & 0xFF;
-        int32 newExp = rmExp - e;
-        if (newExp < 1 || newExp > 254) {
-            return (float32) ((float64) a / (float64) b);
-        }
-        int32 rcpBbits = (rmb & 0x807FFFFF) | (newExp << 23);
-        float32 rcpB = Cajeta.bitsToF32(rcpBbits);
-        return a * rcpB;
-    }
-
-    // Device-resident SFU table, uploaded once per process (32 MB).
-    private static KernelBuffer<int32> dRcp;
-    private static boolean dRcpTried;
-
-    static KernelBuffer<int32> deviceRcpTable() {
-        if (!GpuSplitFinder.dRcpTried) {
-            GpuSplitFinder.dRcpTried = true;
-            Tensor<int32> t = FastMath.rcpTableRef();
-            if (t != null) {
-                int64 n = t.size();
-                int32[] host = heap int32[n];
-                int64 i = (int64) 0;
-                while (i < n) { host[i] = t.flatGet(i); i = i + (int64) 1; }
-                KernelBuffer<int32> d = heap KernelBuffer<int32>(n);
-                d.upload(host);
-                GpuSplitFinder.dRcp #= d;
-            }
-        }
-        return GpuSplitFinder.dRcp;
-    }
-
-    /**
      * The GPU analog of `SplitFinder.findBest` — same arguments, same result
      * bit for bit. Stage A runs on the device (one thread per feature);
      * Stage B — the cross-feature Update (strict `>` and the
      * min_child_weight gate; ties → lowest feature) — replays the CPU code
      * over the per-feature records here on the host.
      *
-     * Requires the probed SFU table (`FastMath.hasRcpTable()`); throws
+     * Requires the probed SFU table (`SfuMath.hasRcpTable()`); throws
      * without it — dispatch to the CPU finder instead.
      */
     public static #Split findBest(Histogram hist, Tensor<int64> cutPtrs,
@@ -272,7 +226,7 @@ public final class GpuSplitFinder {
                                   GradientQuantiser q,
                                   float64 lambda, float64 alpha,
                                   float64 minChildWeight) {
-        KernelBuffer<int32> rcpTab = GpuSplitFinder.deviceRcpTable();
+        KernelBuffer<int32> rcpTab = SfuMath.deviceRcpTable();
         if (rcpTab == null) {
             throw heap RecoverableException("GpuSplitFinder.findBest: the SFU "
                 + "reciprocal capture (RCP_TABLE) is required for bit-exact "

@@ -1,7 +1,7 @@
 package dev.cajeta.xgboost.tour;
 
 import cajeta.math.Tensor;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.gpu.GpuHistogram;
 import dev.cajeta.xgboost.gpu.GpuSplitFinder;
 import dev.cajeta.xgboost.objective.SquaredError;
@@ -15,8 +15,8 @@ import dev.cajeta.xgboost.tree.SplitFinder;
 // The GPU histogram (U12) — the same int64 fixed-point buckets as
 // InternalsDemo's CPU build, accumulated by a cajeta.xpu kernel instead of a
 // host loop, and REQUIRED to match bit for bit. The kernel is integer-only
-// (rows quantized on the host, then a (row, feature) scatter of split-word
-// uint32 atomics with explicit carry), so accumulation order — which the GPU
+// (rows quantized on the host, then a (row, feature) scatter of native
+// int64 atomicAdds), so accumulation order — which the GPU
 // does not promise — cannot change a single bit. Whatever backend the runtime
 // picked here (CUDA, HIP, Vulkan, or the CPU emulation on a GPU-less box),
 // these checks assert the identical bits.
@@ -94,7 +94,7 @@ public class GpuHistogramDemo extends DemoClass {
         // the knife-edge splits the table exists to pin come out identical
         // on every backend. It REQUIRES the capture: without it the honest
         // move is the CPU finder, not an approximate native division.
-        if (FastMath.hasRcpTable()) {
+        if (SfuMath.hasRcpTable()) {
             Split sc = SplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
                 (float64) 1.0, (float64) 0.0, (float64) 1.0);
             Split sg = GpuSplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,

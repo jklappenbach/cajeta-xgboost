@@ -15,7 +15,7 @@ import dev.cajeta.xgboost.XGBoost;
  *   ObjectivesDemo  the gradients underneath — and the D1 gap
  *   PersistDemo     serialize to a file, reload, predict identically
  *   InternalsDemo   one round through the int64 fixed-point machinery
- *   FastMathDemo    modelling the GPU's special-function units
+ *   SfuMathDemo    modelling the GPU's special-function units
  *   EstimatorDemo   xgboost as a dev.cajeta.ml Predictor
  *
  *     ./run-tour.sh          # build the library + ml dep, compile, run
@@ -46,7 +46,7 @@ public final class Tour {
         demos.add(heap PersistDemo());
         demos.add(heap InternalsDemo());
         demos.add(heap GpuHistogramDemo());
-        demos.add(heap FastMathDemo());
+        demos.add(heap SfuMathDemo());
         demos.add(heap EstimatorDemo());
 
         int32 i = 0;

@@ -1,6 +1,6 @@
 package dev.cajeta.xgboost.objective;
 
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 
 /**
  * `multi:softprob` / `multi:softmax` objective (spec §3.3), reproducing XGBoost's
@@ -15,7 +15,7 @@ import dev.cajeta.xgboost.fastmath.FastMath;
  *
  * Round 0's margins are all equal (base), so `expf(·)=1`, `wsum=K`, and `p_k=1/K`
  * **exactly** (0.25 for K=4) — no `expf` error. Later rounds evaluate `expf` at
- * distinct margins through {@link FastMath#expf} (the device `MUFU.EX2` model,
+ * distinct margins through {@link SfuMath#expf} (the device `MUFU.EX2` model,
  * gpu-numeric-fidelity U1) — bit-exact vs the device captures and at scale
  * (`LargeMultiTest`, `CovertypeTest`).
  */
@@ -59,14 +59,14 @@ public final class Softmax {
             float64 wsum = (float64) 0.0;
             k = (int64) 0;
             while (k < K) {
-                wsum = wsum + (float64) FastMath.expf(margin[base + k] - wmax);
+                wsum = wsum + (float64) SfuMath.expf(margin[base + k] - wmax);
                 k = k + (int64) 1;
             }
             int64 yc = (int64) label[i];
             float32 s = (float32) wsum;
             k = (int64) 0;
             while (k < K) {
-                float32 p = FastMath.expf(margin[base + k] - wmax) / s;
+                float32 p = SfuMath.expf(margin[base + k] - wmax) / s;
                 float32 hp = (float32) 2.0 * p * ((float32) 1.0 - p);
                 float32 h = hp < Softmax.eps() ? Softmax.eps() : hp;
                 float32 g = (k == yc) ? p - (float32) 1.0 : p;

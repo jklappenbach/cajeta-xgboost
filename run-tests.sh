@@ -122,10 +122,10 @@ export XGBOOST_FIXTURES="$here/tools/fixtures"
 # expf in Logistic/Softmax). Gitignored (32 MB each); when the local capture
 # is absent, fetch the sha256-pinned copy published as a v0.3.0 release
 # asset — so CI asserts the capture-dependent parity tests instead of
-# self-skipping. If the fetch fails (offline), FastMath's correctly-rounded
+# self-skipping. If the fetch fails (offline), SfuMath's correctly-rounded
 # fallback keeps the rest of the suite meaningful.
 source "$here/scripts/fetch-captures.sh" "$here"
-# Device expf sweep over [-90, 90] — the ground truth FastMathExpfTest compares
+# Device expf sweep over [-90, 90] — the ground truth SfuMathExpfTest compares
 # against bit-for-bit. Absent → that comparison self-skips; the plumbing
 # assertions, which need no capture, still run.
 sweep="$here/tools/expf/expf_sweep.npy"

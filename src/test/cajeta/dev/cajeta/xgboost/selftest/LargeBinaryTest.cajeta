@@ -3,7 +3,7 @@ package dev.cajeta.xgboost.selftest;
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Booster;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.Tree;
@@ -13,7 +13,7 @@ import dev.cajeta.xgboost.tree.TreeBuilder;
  * U10.1.1 (binary at scale) — `large_binary` (20k×50, depth 6). The round-0
  * tree exercises the builder on binary gradients (`0.5 − y`, hess `0.25`,
  * expf-free) at real depth and bin occupancy. The full-model test covers
- * rounds 1+ — unblocked by gpu-numeric-fidelity U1 (`FastMath.expf`, the
+ * rounds 1+ — unblocked by gpu-numeric-fidelity U1 (`SfuMath.expf`, the
  * device `MUFU.EX2` model): every tree and every per-round margin
  * bit-identical to the NVIDIA reference through the sigmoid link.
  *
@@ -50,7 +50,7 @@ public class LargeBinaryTest {
     public void fullBinaryModelBitIdenticalAtScale() {
         // Rounds 1+ are expf-dependent: bit-exactness needs the probed
         // MUFU.EX2 capture (EX2_TABLE), absent in CI — self-skip there.
-        if (!FastMath.hasEx2Table()) {
+        if (!SfuMath.hasEx2Table()) {
             return;
         }
         FixtureLoader f = FixtureLoader.open("large_binary");

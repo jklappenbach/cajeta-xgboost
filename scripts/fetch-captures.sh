@@ -3,7 +3,7 @@
 # EX2 for device expf) and export RCP_TABLE / EX2_TABLE. Local gitignored
 # captures win; otherwise fetch the sha256-pinned v0.3.0 release assets
 # into build/.capture-cache. Sourced by run-tests.sh and run-tour.sh —
-# callers keep working (FastMath falls back / GPU split finding defers to
+# callers keep working (SfuMath falls back / GPU split finding defers to
 # the CPU finder) if a fetch fails offline.
 #   usage: source scripts/fetch-captures.sh <repo-root>
 _cap_root="${1:?repo root}"

@@ -2,7 +2,7 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.objective.Softmax;
 
 /**
@@ -55,7 +55,7 @@ public class SoftmaxObjectiveTest {
      */
     @Test
     public void multiRoundGradHessDeviceBitIdentical() {
-        if (!FastMath.hasEx2Table()) {
+        if (!SfuMath.hasEx2Table()) {
             return;
         }
         FixtureLoader f = FixtureLoader.open("tiny_multi");

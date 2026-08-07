@@ -25,7 +25,7 @@
     },
 
     "settings": {
-        // FastMath loads the probed SFU tables (RCP_TABLE / EX2_TABLE) and
+        // cajeta.math.sfu.SfuMath loads the probed SFU tables (RCP_TABLE / EX2_TABLE) and
         // FixtureLoader reads golden fixtures from disk.
         "capabilities": ["filesystem"],
 

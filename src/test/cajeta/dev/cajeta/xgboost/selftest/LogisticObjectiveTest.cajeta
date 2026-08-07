@@ -1,6 +1,6 @@
 package dev.cajeta.xgboost.selftest;
 
-import dev.cajeta.xgboost.fastmath.FastMath;
+import cajeta.math.sfu.SfuMath;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
@@ -14,7 +14,7 @@ import dev.cajeta.xgboost.objective.Logistic;
  * Round 0's margin is the base `logit(0.5)=0`, where `sigmoid(0)=0.5` **exactly**
  * (no `expf`), so round 0 is bit-identical — validating the grad/hess formula, the
  * base margin, and the hess floor. Rounds 1+ evaluate `sigmoid` at nonzero margins
- * through `FastMath.expf` — the device `MUFU.EX2` model (gpu-numeric-fidelity U1)
+ * through `SfuMath.expf` — the device `MUFU.EX2` model (gpu-numeric-fidelity U1)
  * — and are bit-identical to the REAL device captures (`device_grad.npy`).
  */
 public class LogisticObjectiveTest {
@@ -53,7 +53,7 @@ public class LogisticObjectiveTest {
      */
     @Test
     public void multiRoundGradHessBitIdentical() {
-        if (!FastMath.hasEx2Table()) {
+        if (!SfuMath.hasEx2Table()) {
             return;
         }
         FixtureLoader f = FixtureLoader.open("tiny_binary");

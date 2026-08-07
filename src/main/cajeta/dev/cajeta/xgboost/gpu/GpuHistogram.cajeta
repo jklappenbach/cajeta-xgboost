@@ -20,25 +20,23 @@ import dev.cajeta.xgboost.tree.Histogram;
  * backends, wave sizes, and runs — cannot change the sums. That is XGBoost's
  * own determinism argument for its GPU histogram, reproduced.
  *
- * **The split-word trick.** `KernelBuffer` atomics are 32-bit
- * (float32/int32/uint32 — no int64), so each int64 sum is accumulated as two
- * uint32 words with an explicit carry: add the low word, carry into the high
- * word on unsigned wraparound, add the high word. Carries are themselves
- * atomic adds, so the (hi, lo) pair converges to the exact 64-bit two's
- * complement sum regardless of interleaving — the pre-sm_60 CUDA idiom, and
- * it needs no Int64Atomics capability anywhere.
+ * Each sum is a single native int64 `atomicAdd` (toolchain ≥ v0.17.4:
+ * Int64Atomics on Vulkan, native 64-bit atomics on CUDA/HIP/CPU). Earlier
+ * versions of this kernel accumulated each int64 as two uint32 words with an
+ * explicit atomic carry — the pre-sm_60 CUDA idiom; the native form is the
+ * same exact sum with a third of the atomics traffic.
  *
- * Layout: `hist` is `[4 * nbins]` uint32 — `gb*4 + {0: gLo, 1: gHi, 2: hLo,
- * 3: hHi}`; `q` is `[4 * n]` uint32 — `r*4 + {qgLo, qgHi, qhLo, qhHi}`.
- * Missing values (`bin == -1`) are skipped exactly as on the CPU.
+ * Layout: `hist` is `[2 * nbins]` int64 — `gb*2 + {0: G, 1: H}`; `q` is
+ * `[2 * n]` int64 — `r*2 + {qg, qh}`. Missing values (`bin == -1`) are
+ * skipped exactly as on the CPU.
  */
 public final class GpuHistogram {
 
     @Kernel
-    public static void histScatter(KernelBuffer<uint32> hist,
+    public static void histScatter(KernelBuffer<int64> hist,
                                    KernelBuffer<int32> bins,
                                    KernelBuffer<int32> cutOff,
-                                   KernelBuffer<uint32> q,
+                                   KernelBuffer<int64> q,
                                    KernelBuffer<int32> pos,
                                    int32 nid, uint32 n, uint32 nf) {
         uint32 i = KernelThread.globalIdX();
@@ -48,17 +46,9 @@ public final class GpuHistogram {
                 int32 b = bins[i];
                 if (b >= 0) {
                     uint32 f = i - r * nf;
-                    uint32 gb = ((uint32) cutOff[f] + (uint32) b) * 4;
-
-                    uint32 gLo = q[r * 4];
-                    uint32 oldG = hist.atomicAdd(gb, gLo);
-                    if (oldG + gLo < gLo) { hist.atomicAdd(gb + 1, 1); }
-                    hist.atomicAdd(gb + 1, q[r * 4 + 1]);
-
-                    uint32 hLo = q[r * 4 + 2];
-                    uint32 oldH = hist.atomicAdd(gb + 2, hLo);
-                    if (oldH + hLo < hLo) { hist.atomicAdd(gb + 3, 1); }
-                    hist.atomicAdd(gb + 3, q[r * 4 + 3]);
+                    uint32 gb = ((uint32) cutOff[f] + (uint32) b) * 2;
+                    hist.atomicAdd(gb, q[r * 2]);
+                    hist.atomicAdd(gb + 1, q[r * 2 + 1]);
                 }
             }
         }
@@ -77,9 +67,9 @@ public final class GpuHistogram {
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
         int64 nbins = cutPtrs.flatGet(nf);
 
-        // Host-side quantization (the CPU builder's own path) + split into
-        // uint32 words; totals accumulate here in CPU row order.
-        uint32[] qWords = heap uint32[n * (int64) 4];
+        // Host-side quantization (the CPU builder's own path); totals
+        // accumulate here in CPU row order.
+        int64[] qFixed = heap int64[n * (int64) 2];
         int32[] posH = heap int32[n];
         int64 totG = (int64) 0;
         int64 totH = (int64) 0;
@@ -91,10 +81,8 @@ public final class GpuHistogram {
                 totG = totG + qg;
                 totH = totH + qh;
             }
-            qWords[r * (int64) 4]             = (uint32) qg;
-            qWords[r * (int64) 4 + (int64) 1] = (uint32) (qg >> (int64) 32);
-            qWords[r * (int64) 4 + (int64) 2] = (uint32) qh;
-            qWords[r * (int64) 4 + (int64) 3] = (uint32) (qh >> (int64) 32);
+            qFixed[r * (int64) 2]             = qg;
+            qFixed[r * (int64) 2 + (int64) 1] = qh;
             posH[r] = (int32) position[r];
             r = r + (int64) 1;
         }
@@ -112,16 +100,16 @@ public final class GpuHistogram {
         }
 
         KernelStream s = KernelStream.current();
-        KernelBuffer<uint32> dHist = heap KernelBuffer<uint32>((int64) 4 * nbins);
+        KernelBuffer<int64> dHist = heap KernelBuffer<int64>((int64) 2 * nbins);
         KernelBuffer<int32> dBins = heap KernelBuffer<int32>(n * nf);
         KernelBuffer<int32> dCut = heap KernelBuffer<int32>(nf);
-        KernelBuffer<uint32> dQ = heap KernelBuffer<uint32>(n * (int64) 4);
+        KernelBuffer<int64> dQ = heap KernelBuffer<int64>(n * (int64) 2);
         KernelBuffer<int32> dPos = heap KernelBuffer<int32>(n);
-        uint32[] zeros = heap uint32[(int64) 4 * nbins];
+        int64[] zeros = heap int64[(int64) 2 * nbins];
         dHist.upload(zeros);
         dBins.upload(binsH);
         dCut.upload(cutOffH);
-        dQ.upload(qWords);
+        dQ.upload(qFixed);
         dPos.upload(posH);
 
         uint32 cells = (uint32) (n * nf);
@@ -129,17 +117,15 @@ public final class GpuHistogram {
             (dHist, dBins, dCut, dQ, dPos, (int32) nid, (uint32) n, (uint32) nf);
         s.sync();
 
-        uint32[] words = heap uint32[(int64) 4 * nbins];
+        int64[] words = heap int64[(int64) 2 * nbins];
         dHist.download(words);
 
         int64[] gg = heap int64[nbins];
         int64[] hh = heap int64[nbins];
         int64 b = (int64) 0;
         while (b < nbins) {
-            gg[b] = ((int64) words[b * (int64) 4 + (int64) 1] << (int64) 32)
-                  | (int64) words[b * (int64) 4];
-            hh[b] = ((int64) words[b * (int64) 4 + (int64) 3] << (int64) 32)
-                  | (int64) words[b * (int64) 4 + (int64) 2];
+            gg[b] = words[b * (int64) 2];
+            hh[b] = words[b * (int64) 2 + (int64) 1];
             b = b + (int64) 1;
         }
         return heap Histogram(#gg, #hh, nbins, nf, totG, totH);
