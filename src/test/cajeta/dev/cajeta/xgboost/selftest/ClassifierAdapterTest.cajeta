@@ -2,10 +2,10 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
-import dev.cajeta.ml.KFold;
+import dev.cajeta.ml.select.KFold;
 import dev.cajeta.ml.MlException;
 import dev.cajeta.ml.ProbClassifier;
-import dev.cajeta.ml.Split;
+import dev.cajeta.ml.select.Split;
 import dev.cajeta.xgboost.api.GBDT;
 import dev.cajeta.xgboost.api.Params;
 import dev.cajeta.xgboost.api.XGBClassifier;
