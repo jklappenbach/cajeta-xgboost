@@ -36,14 +36,14 @@ public class GpuHistogramTest {
     // Root histogram over all rows, tiny_reg (5 features, 200 rows).
     @Test
     public void rootHistogramBitIdenticalToCpu() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        float64[] g = f.gradRound((int32) 0);
-        float64[] h = f.hessRound((int32) 0);
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
         int64 n = (int64) g.count();
-        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
 
-        Histogram cpu = Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
-        Histogram gpu = GpuHistogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Histogram cpu #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Histogram gpu #= GpuHistogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
         assertSame(cpu, gpu);
         return;
     }
@@ -52,11 +52,11 @@ public class GpuHistogramTest {
     // missing-value fixture so the bin == -1 skip path is exercised too.
     @Test
     public void partitionedHistogramBitIdenticalToCpu() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg_missing");
-        float64[] g = f.gradRound((int32) 0);
-        float64[] h = f.hessRound((int32) 0);
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_missing");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
         int64 n = (int64) g.count();
-        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
 
         // A deterministic 2-way partition: rows alternate between nodes 1/2.
         int64[] position = heap int64[n];
@@ -66,15 +66,15 @@ public class GpuHistogramTest {
             r = r + (int64) 1;
         }
 
-        Histogram cpu1 = Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+        Histogram cpu1 #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
                                             position, (int64) 1, n);
-        Histogram gpu1 = GpuHistogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+        Histogram gpu1 #= GpuHistogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
                                                position, (int64) 1, n);
         assertSame(cpu1, gpu1);
 
-        Histogram cpu2 = Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+        Histogram cpu2 #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
                                             position, (int64) 2, n);
-        Histogram gpu2 = GpuHistogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+        Histogram gpu2 #= GpuHistogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
                                                position, (int64) 2, n);
         assertSame(cpu2, gpu2);
         return;
@@ -85,14 +85,14 @@ public class GpuHistogramTest {
     // int64 atomic scatter at real bin occupancy.
     @Test
     public void largeRootHistogramBitIdenticalToCpu() {
-        FixtureLoader f = FixtureLoader.open("large_reg");
-        float64[] g = f.gradRound((int32) 0);
-        float64[] h = f.hessRound((int32) 0);
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
         int64 n = (int64) g.count();
-        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
 
-        Histogram cpu = Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
-        Histogram gpu = GpuHistogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Histogram cpu #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Histogram gpu #= GpuHistogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
         assertSame(cpu, gpu);
         return;
     }

@@ -56,8 +56,8 @@ public class GrowDeviceTest {
     }
 
     static void compareTraining(String fixture, Objective obj, int64 rounds) {
-        FixtureLoader f = FixtureLoader.open(fixture);
-        Tensor<float64> yT = f.y();
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
         int64 n = yT.size();
         float64[] label = heap float64[n];
         int64 li = (int64) 0;
@@ -65,12 +65,12 @@ public class GrowDeviceTest {
 
         float32[] mhCpu = heap float32[rounds * n];
         float32[] mhGpu = heap float32[rounds * n];
-        Model cpu = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
+        Model cpu #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
                                   n, rounds, (int64) 6, (int64) 0,
                                   (float64) 1.0, (float64) 0.0, (float64) 0.0,
                                   (float64) 1.0, (float64) 0.3, (float64) 0.5,
                                   obj, (int64) 1, mhCpu, false);
-        Model gpu = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
+        Model gpu #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
                                   n, rounds, (int64) 6, (int64) 0,
                                   (float64) 1.0, (float64) 0.0, (float64) 0.0,
                                   (float64) 1.0, (float64) 0.3, (float64) 0.5,

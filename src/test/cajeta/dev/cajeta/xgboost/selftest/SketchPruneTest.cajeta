@@ -23,15 +23,15 @@ public class SketchPruneTest {
 
     @Test
     public void prunedCutsMatchReference() {
-        FixtureLoader f = FixtureLoader.open("sketch_selfcheck");
-        Tensor<float64> x     = f.x();
-        Tensor<int64>   refCp = f.cutPtrs();
-        Tensor<float64> refCv = f.cutValues();
+        FixtureLoader f #= FixtureLoader.open("sketch_selfcheck");
+        Tensor<float64> x     #= f.x();
+        Tensor<int64>   refCp #= f.cutPtrs();
+        Tensor<float64> refCv #= f.cutValues();
         int64 n  = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
 
         int64[] cutPtrs = heap int64[nf + (int64) 1];
-        float32[] cuts = Sketch.cuts(x, n, nf, (int64) 8, cutPtrs);
+        float32[] cuts #= Sketch.cuts(x, n, nf, (int64) 8, cutPtrs);
 
         int64 i = (int64) 0;
         while (i < nf + (int64) 1) {

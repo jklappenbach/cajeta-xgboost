@@ -29,17 +29,17 @@ public class LargeBinaryTest {
 
     @Test
     public void roundZeroBinaryTreeBitIdenticalAtScale() {
-        FixtureLoader f = FixtureLoader.open("large_binary");
-        float64[] g = f.gradRound(0);
-        float64[] h = f.hessRound(0);
+        FixtureLoader f #= FixtureLoader.open("large_binary");
+        float64[] g #= f.gradRound(0);
+        float64[] h #= f.hessRound(0);
         int64 n = (int64) g.count();
 
-        Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+        Tree t #= TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
                                       (int64) 6, (int64) 0,
                                       (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                       (float64) 0.3);
 
-        String diff = ParityRunner.compareTree(t, f, (int32) 0);
+        String diff #= ParityRunner.compareTree(t, f, (int32) 0);
         Assert.that(diff).isEqualTo("");
         return;
     }
@@ -53,8 +53,8 @@ public class LargeBinaryTest {
         if (!SfuMath.hasEx2Table()) {
             return;
         }
-        FixtureLoader f = FixtureLoader.open("large_binary");
-        Tensor<float64> yT = f.y();
+        FixtureLoader f #= FixtureLoader.open("large_binary");
+        Tensor<float64> yT #= f.y();
         int64 n = yT.shapeAt(0);
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
@@ -62,15 +62,15 @@ public class LargeBinaryTest {
 
         int64 rounds = (int64) 3;
         float32[] marginHistory = heap float32[rounds * n];
-        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
                                 (int64) 6, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5, Objective.LOGISTIC, (int64) 1,
                                 marginHistory);
 
-        String treeDiff = ParityRunner.compareTrees(m, f, rounds);
+        String treeDiff #= ParityRunner.compareTrees(m, f, rounds);
         Assert.that(treeDiff).isEqualTo("");
-        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
+        String marginDiff #= ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
         Assert.that(marginDiff).isEqualTo("");
         return;
     }

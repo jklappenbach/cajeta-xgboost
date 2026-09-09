@@ -19,7 +19,7 @@ public class ParityRunnerTest {
     public ParityRunnerTest() { return; }
 
     static #Model trainTinyReg(FixtureLoader f, int64 rounds, float32[] marginHistory) {
-        Tensor<float64> yT = f.y();
+        Tensor<float64> yT #= f.y();
         int64 n = yT.shapeAt(0);
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
@@ -32,32 +32,32 @@ public class ParityRunnerTest {
 
     @Test
     public void cleanModelComparesBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
         int64 rounds = (int64) 3;
         int64 n = f.y().shapeAt(0);
         float32[] marginHistory = heap float32[rounds * n];
-        Model m = ParityRunnerTest.trainTinyReg(f, rounds, marginHistory);
+        Model m #= ParityRunnerTest.trainTinyReg(f, rounds, marginHistory);
 
-        String treeDiff = ParityRunner.compareTrees(m, f, rounds);
+        String treeDiff #= ParityRunner.compareTrees(m, f, rounds);
         Assert.that(treeDiff).isEqualTo("");
 
-        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
+        String marginDiff #= ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
         Assert.that(marginDiff).isEqualTo("");
         return;
     }
 
     @Test
     public void mutationIsReportedWithExactLocation() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
         int64 rounds = (int64) 3;
         int64 n = f.y().shapeAt(0);
         float32[] marginHistory = heap float32[rounds * n];
-        Model m = ParityRunnerTest.trainTinyReg(f, rounds, marginHistory);
+        Model m #= ParityRunnerTest.trainTinyReg(f, rounds, marginHistory);
 
         // Perturb round-0 node-0's base weight by one step — must be caught.
         m.baseWeights[0] = m.baseWeights[0] + (float32) 1.0;
 
-        String diff = ParityRunner.compareTrees(m, f, rounds);
+        String diff #= ParityRunner.compareTrees(m, f, rounds);
         Assert.isFalse(diff.equals(""));
         Assert.isTrue(diff.contains("round 0"));
         Assert.isTrue(diff.contains("node 0"));

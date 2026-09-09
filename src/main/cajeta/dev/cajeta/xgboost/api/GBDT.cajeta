@@ -74,26 +74,26 @@ public final class GBDT {
 
         // Raw → cuts (GPU sketch, prune-capable) → bins — bit-exact per U9/U10.
         int64[] cutPtrsA = heap int64[nf + (int64) 1];
-        float32[] cuts = Sketch.cuts(x, n, nf, p.maxBin, cutPtrsA);
+        float32[] cuts #= Sketch.cuts(x, n, nf, p.maxBin, cutPtrsA);
         int64 total = cutPtrsA[nf];
 
         int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;
-        Tensor<int64> cutPtrsT = Tensor.of<int64>(cutPtrsA, cpShape);
+        Tensor<int64> cutPtrsT #= Tensor.of<int64>(cutPtrsA, cpShape);
 
         float64[] cutVals = heap float64[total];
         int64 c = (int64) 0;
         while (c < total) { cutVals[c] = (float64) cuts[c]; c = c + (int64) 1; }
         int64[] cvShape = heap int64[1]; cvShape[0] = total;
-        Tensor<float64> cutValuesT = Tensor.of<float64>(cutVals, cvShape);
+        Tensor<float64> cutValuesT #= Tensor.of<float64>(cutVals, cvShape);
 
-        int32[] binsA = Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
+        int32[] binsA #= Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
         int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
-        Tensor<int32> binsT = Tensor.of<int32>(binsA, bShape);
+        Tensor<int32> binsT #= Tensor.of<int32>(binsA, bShape);
 
         // Boosting loop over the binned matrix.
         int64 K = p.outputGroups();
         float32[] marginHistory = heap float32[p.rounds * n * K];
-        Model m = Booster.train(binsT, cutPtrsT, cutValuesT, label, n, p.rounds,
+        Model m #= Booster.train(binsT, cutPtrsT, cutValuesT, label, n, p.rounds,
                                 p.maxDepth, p.maxLeaves,
                                 p.lambda, p.alpha, p.gamma, p.minChildWeight,
                                 p.eta, p.baseScore, p.objective, p.numClass,

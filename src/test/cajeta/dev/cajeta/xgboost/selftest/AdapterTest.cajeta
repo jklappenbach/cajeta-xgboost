@@ -85,16 +85,16 @@ public class AdapterTest {
 
     @Test
     public void lifecycleUnfittedThrowsThenFitMarks() {
-        Params p = AdapterTest.tinyRegParams();
+        Params p #= AdapterTest.tinyRegParams();
         XGBRegressor r = heap XGBRegressor(p);
         Assert.isFalse(r.isFitted());
 
-        Tensor<float64> x = AdapterTest.synthX();
-        Tensor<float64> y = AdapterTest.synthY();
+        Tensor<float64> x #= AdapterTest.synthX();
+        Tensor<float64> y #= AdapterTest.synthY();
 
         boolean threwPredict = false;
         try {
-            Tensor<float64> pr = r.predict(x);
+            Tensor<float64> pr #= r.predict(x);
         } catch (MlException ex) {
             threwPredict = true;
         }
@@ -114,9 +114,9 @@ public class AdapterTest {
 
     @Test
     public void predictionsBitIdenticalToDirectGbdt() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        Tensor<float64> x = f.x();
-        Tensor<float64> yT = f.y();
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> x #= f.x();
+        Tensor<float64> yT #= f.y();
         int64 n  = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
 
@@ -124,15 +124,15 @@ public class AdapterTest {
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
         while (i < n) { label[i] = yT.get1(i); i = i + (int64) 1; }
-        Params pd = AdapterTest.tinyRegParams();
-        Model m = GBDT.fit(x, label, n, nf, pd);
-        float32[] direct = GBDT.predict(m, x, n, nf);
+        Params pd #= AdapterTest.tinyRegParams();
+        Model m #= GBDT.fit(x, label, n, nf, pd);
+        float32[] direct #= GBDT.predict(m, x, n, nf);
 
         // Adapter pipeline, same config.
-        Params pa = AdapterTest.tinyRegParams();
+        Params pa #= AdapterTest.tinyRegParams();
         XGBRegressor r = heap XGBRegressor(pa);
         r.fit(x, yT);
-        Tensor<float64> pred = r.predict(x);
+        Tensor<float64> pred #= r.predict(x);
 
         Assert.equals((int64) 1, (int64) pred.ndim());
         Assert.equals(n, pred.shapeAt(0));
@@ -146,9 +146,9 @@ public class AdapterTest {
 
     @Test
     public void fitRejectsBadShapes() {
-        Params p = AdapterTest.tinyRegParams();
+        Params p #= AdapterTest.tinyRegParams();
         XGBRegressor r = heap XGBRegressor(p);
-        Tensor<float64> y = AdapterTest.synthY();
+        Tensor<float64> y #= AdapterTest.synthY();
 
         // 1-D x is not a design matrix.
         boolean threw1d = false;
@@ -161,11 +161,11 @@ public class AdapterTest {
         Assert.isFalse(r.isFitted());
 
         // y length mismatched to x rows.
-        Tensor<float64> x = AdapterTest.synthX();
+        Tensor<float64> x #= AdapterTest.synthX();
         float64[] dShort = [ 1.0, 2.0 ];
         int64[] sh = heap int64[1];
         sh[0] = (int64) 2;
-        Tensor<float64> yShort = Tensor.of<float64>(dShort, sh);
+        Tensor<float64> yShort #= Tensor.of<float64>(dShort, sh);
         boolean threwLen = false;
         try {
             r.fit(x, yShort);
@@ -178,12 +178,12 @@ public class AdapterTest {
 
     @Test
     public void scoreIsR2OfPredictions() {
-        Params p = AdapterTest.tinyRegParams();
+        Params p #= AdapterTest.tinyRegParams();
         XGBRegressor r = heap XGBRegressor(p);
-        Tensor<float64> x = AdapterTest.synthX();
-        Tensor<float64> y = AdapterTest.synthY();
+        Tensor<float64> x #= AdapterTest.synthX();
+        Tensor<float64> y #= AdapterTest.synthY();
         r.fit(x, y);
-        Tensor<float64> pred = r.predict(x);
+        Tensor<float64> pred #= r.predict(x);
         float64 want = Metrics.r2(y, pred);
         float64 got = r.score(x, y);
         Assert.isTrue(got == want);
@@ -191,20 +191,20 @@ public class AdapterTest {
 
     @Test
     public void dispatchThroughPredictorReference() {
-        Params pa = AdapterTest.tinyRegParams();
+        Params pa #= AdapterTest.tinyRegParams();
         XGBRegressor concrete = heap XGBRegressor(pa);
-        Params pb = AdapterTest.tinyRegParams();
+        Params pb #= AdapterTest.tinyRegParams();
         Predictor viaIface = heap XGBRegressor(pb);
 
-        Tensor<float64> x = AdapterTest.synthX();
-        Tensor<float64> y = AdapterTest.synthY();
+        Tensor<float64> x #= AdapterTest.synthX();
+        Tensor<float64> y #= AdapterTest.synthY();
 
         concrete.fit(x, y);
         viaIface.fit(x, y);
         Assert.isTrue(viaIface.isFitted());
 
-        Tensor<float64> pc = concrete.predict(x);
-        Tensor<float64> pi = viaIface.predict(x);
+        Tensor<float64> pc #= concrete.predict(x);
+        Tensor<float64> pi #= viaIface.predict(x);
         Assert.equals(pc.shapeAt(0), pi.shapeAt(0));
         int64 i = (int64) 0;
         while (i < pc.shapeAt(0)) {
@@ -236,21 +236,21 @@ public class AdapterTest {
             Column.of<float64>(yv));
 
         // The two lines.
-        Design d = Frames.design<RegRow>(t, "yv");
-        Params pa = AdapterTest.tinyRegParams();
+        Design d #= Frames.design<RegRow>(t, "yv");
+        Params pa #= AdapterTest.tinyRegParams();
         XGBRegressor viaFrame = heap XGBRegressor(pa);
         viaFrame.fit(d.x, d.y);
 
         // The same fit from the adapter's own synthetic tensors (identical
         // values by construction — synthX/synthY use the same formulas).
-        Params pb = AdapterTest.tinyRegParams();
+        Params pb #= AdapterTest.tinyRegParams();
         XGBRegressor viaTensor = heap XGBRegressor(pb);
-        Tensor<float64> hx = AdapterTest.synthX();
-        Tensor<float64> hy = AdapterTest.synthY();
+        Tensor<float64> hx #= AdapterTest.synthX();
+        Tensor<float64> hy #= AdapterTest.synthY();
         viaTensor.fit(hx, hy);
 
-        Tensor<float64> pf = viaFrame.predict(d.x);
-        Tensor<float64> pt = viaTensor.predict(hx);
+        Tensor<float64> pf #= viaFrame.predict(d.x);
+        Tensor<float64> pt #= viaTensor.predict(hx);
         Assert.equals(pf.shapeAt(0), pt.shapeAt(0));
         i = (int64) 0;
         while (i < n) {
@@ -261,13 +261,13 @@ public class AdapterTest {
 
     @Test
     public void crossValScoreAcceptsAdapter() {
-        Params p = AdapterTest.tinyRegParams();
+        Params p #= AdapterTest.tinyRegParams();
         XGBRegressor r = heap XGBRegressor(p);
-        Tensor<float64> x = AdapterTest.synthX();
-        Tensor<float64> y = AdapterTest.synthY();
+        Tensor<float64> x #= AdapterTest.synthX();
+        Tensor<float64> y #= AdapterTest.synthY();
 
         KFold folds = heap KFold((int64) 3, false, (uint64) 0);
-        Tensor<float64> scores = Split.crossValScore(r, x, y, folds);
+        Tensor<float64> scores #= Split.crossValScore(r, x, y, folds);
 
         Assert.equals((int64) 1, (int64) scores.ndim());
         Assert.equals((int64) 3, scores.shapeAt(0));

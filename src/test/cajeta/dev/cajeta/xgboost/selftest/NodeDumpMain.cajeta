@@ -19,11 +19,11 @@ public final class NodeDumpMain {
     public NodeDumpMain() { return; }
 
     public static int32 run() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg_mcw10");
-        float64[] g = f.gradRound(0);
-        float64[] h = f.hessRound(0);
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_mcw10");
+        float64[] g #= f.gradRound(0);
+        float64[] h #= f.hessRound(0);
         int64 n = (int64) g.count();
-        Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+        Tree t #= TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
                                       (int64) 4, (int64) 0,
                                       (float64) 1.0, (float64) 0.0, (float64) 0.0,
                                       (float64) 10.0, (float64) 0.3);

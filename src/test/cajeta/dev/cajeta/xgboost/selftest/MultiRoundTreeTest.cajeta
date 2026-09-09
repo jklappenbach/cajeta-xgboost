@@ -25,16 +25,16 @@ public class MultiRoundTreeTest {
 
     @Test
     public void binaryRoundsOnePlusBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("tiny_binary");
+        FixtureLoader f #= FixtureLoader.open("tiny_binary");
         int64 rounds = f.deviceGrad().shapeAt(0);
 
         int32 r = (int32) 1;
         while ((int64) r < rounds) {
-            float64[] g = f.deviceGradRound(r - (int32) 1);
-            float64[] h = f.deviceHessRound(r - (int32) 1);
+            float64[] g #= f.deviceGradRound(r - (int32) 1);
+            float64[] h #= f.deviceHessRound(r - (int32) 1);
             int64 n = (int64) g.count();
 
-            Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
+            Tree t #= TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n,
                                           (int64) 4, (int64) 0,
                                           (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                           (float64) 0.3);
@@ -46,9 +46,9 @@ public class MultiRoundTreeTest {
 
     @Test
     public void softmaxRoundsOnePlusClassTreesBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("tiny_multi");
-        Tensor<float64> devG = f.deviceGrad();   // [rounds, n, K] flat
-        Tensor<float64> devH = f.deviceHess();
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> devG #= f.deviceGrad();   // [rounds, n, K] flat
+        Tensor<float64> devH #= f.deviceHess();
         int64 rounds = devG.shapeAt(0);
         int64 n = devG.shapeAt(1);
         int64 K = devG.shapeAt(2);
@@ -67,7 +67,7 @@ public class MultiRoundTreeTest {
                     i = i + (int64) 1;
                 }
 
-                Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), gk, hk, n,
+                Tree t #= TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), gk, hk, n,
                                               (int64) 4, (int64) 0,
                                               (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                               (float64) 0.3);

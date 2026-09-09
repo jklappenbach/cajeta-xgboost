@@ -42,7 +42,7 @@ public class ApiTest {
     }
 
     static #float64[] labelOf(FixtureLoader f, int64 n) {
-        Tensor<float64> yT = f.y();
+        Tensor<float64> yT #= f.y();
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
         while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
@@ -51,15 +51,15 @@ public class ApiTest {
 
     @Test
     public void fitFromRawIsDeterministicAndBitExact() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        Tensor<float64> x = f.x();
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> x #= f.x();
         int64 n  = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
-        float64[] label = ApiTest.labelOf(f, n);
+        float64[] label #= ApiTest.labelOf(f, n);
 
-        Params p = ApiTest.tinyRegParams();
-        Model m1 = GBDT.fit(x, label, n, nf, p);
-        Model m2 = GBDT.fit(x, label, n, nf, p);
+        Params p #= ApiTest.tinyRegParams();
+        Model m1 #= GBDT.fit(x, label, n, nf, p);
+        Model m2 #= GBDT.fit(x, label, n, nf, p);
 
         // (a) two default fits are bit-identical to each other (determinism, §1.7.1).
         Assert.that(m1.rounds).isEqualTo(m2.rounds);
@@ -84,12 +84,12 @@ public class ApiTest {
         int64 cap = m1.cap;
         int64 r = (int64) 0;
         while (r < m1.rounds) {
-            Tensor<int32>   rLC = f.treeLeftChildren((int32) r);
-            Tensor<int32>   rRC = f.treeRightChildren((int32) r);
-            Tensor<int32>   rSI = f.treeSplitIndices((int32) r);
-            Tensor<float32> rSC = f.treeSplitConditions((int32) r);
-            Tensor<int32>   rDL = f.treeDefaultLeft((int32) r);
-            Tensor<float32> rBW = f.treeBaseWeights((int32) r);
+            Tensor<int32>   rLC #= f.treeLeftChildren((int32) r);
+            Tensor<int32>   rRC #= f.treeRightChildren((int32) r);
+            Tensor<int32>   rSI #= f.treeSplitIndices((int32) r);
+            Tensor<float32> rSC #= f.treeSplitConditions((int32) r);
+            Tensor<int32>   rDL #= f.treeDefaultLeft((int32) r);
+            Tensor<float32> rBW #= f.treeBaseWeights((int32) r);
             int64 refCount = rBW.shapeAt(0);
             Assert.that(m1.nodeCount[r]).isEqualTo(refCount);
 
@@ -112,8 +112,8 @@ public class ApiTest {
         }
 
         // (c) predict() from raw = reference preds bit-for-bit (identity link).
-        Tensor<float64> refPreds = f.preds();
-        float32[] preds = GBDT.predict(m1, x, n, nf);
+        Tensor<float64> refPreds #= f.preds();
+        float32[] preds #= GBDT.predict(m1, x, n, nf);
         i = (int64) 0;
         while (i < n) {
             Assert.thatFloat((float64) preds[i]).isEqualTo(refPreds.flatGet(i));
@@ -127,45 +127,45 @@ public class ApiTest {
 
     @Test
     public void nonDeterministicModeIsLabeledAndRecorded() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        Tensor<float64> x = f.x();
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> x #= f.x();
         int64 n  = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
-        float64[] label = ApiTest.labelOf(f, n);
-        Params p = ApiTest.tinyRegParams();
+        float64[] label #= ApiTest.labelOf(f, n);
+        Params p #= ApiTest.tinyRegParams();
 
         // The distinctly-named non-deterministic entry point records the mode.
-        Model mND = GBDT.fitNonDeterministic(x, label, n, nf, p);
+        Model mND #= GBDT.fitNonDeterministic(x, label, n, nf, p);
         Assert.isFalse(mND.deterministic);
 
         // The mode survives serialization (auditable, §1.7.3).
-        int8[] buf = ModelIO.serialize(mND);
-        Model back = ModelIO.deserialize(buf);
+        int8[] buf #= ModelIO.serialize(mND);
+        Model back #= ModelIO.deserialize(buf);
         Assert.isFalse(back.deterministic);
 
         // The deterministic default records the deterministic mode, likewise round-trips.
-        Model mD = GBDT.fit(x, label, n, nf, p);
-        int8[] bufD = ModelIO.serialize(mD);
-        Model backD = ModelIO.deserialize(bufD);
+        Model mD #= GBDT.fit(x, label, n, nf, p);
+        int8[] bufD #= ModelIO.serialize(mD);
+        Model backD #= ModelIO.deserialize(bufD);
         Assert.isTrue(backD.deterministic);
         return;
     }
 
     @Test
     public void deterministicPathRefusesStochasticKnobs() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        Tensor<float64> x = f.x();
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> x #= f.x();
         int64 n  = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
-        float64[] label = ApiTest.labelOf(f, n);
+        float64[] label #= ApiTest.labelOf(f, n);
 
-        Params p = ApiTest.tinyRegParams();
+        Params p #= ApiTest.tinyRegParams();
         p.subsample = (float64) 0.5;   // a non-deterministic knob
 
         // The default (deterministic) entry point must refuse it — a user never
         // silently forfeits reproducibility (§1.7.1).
         Assert.assertThrows(() -> {
-            Model bad = GBDT.fit(x, label, n, nf, p);
+            Model bad #= GBDT.fit(x, label, n, nf, p);
         });
         return;
     }

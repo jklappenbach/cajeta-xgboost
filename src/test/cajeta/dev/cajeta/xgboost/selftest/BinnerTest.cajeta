@@ -17,15 +17,15 @@ public class BinnerTest {
     public BinnerTest() { return; }
 
     static void check(String fixture) {
-        FixtureLoader f = FixtureLoader.open(fixture);
-        Tensor<float64> x  = f.x();
-        Tensor<int64>   cp = f.cutPtrs();
-        Tensor<float64> cv = f.cutValues();
-        Tensor<int32>   refBins = f.bins();
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> x  #= f.x();
+        Tensor<int64>   cp #= f.cutPtrs();
+        Tensor<float64> cv #= f.cutValues();
+        Tensor<int32>   refBins #= f.bins();
         int64 n  = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
 
-        int32[] bins = Binner.bin(x, cp, cv, n, nf);
+        int32[] bins #= Binner.bin(x, cp, cv, n, nf);
         int64 i = (int64) 0;
         while (i < n * nf) {
             Assert.that((int64) bins[i]).isEqualTo((int64) refBins.flatGet(i));

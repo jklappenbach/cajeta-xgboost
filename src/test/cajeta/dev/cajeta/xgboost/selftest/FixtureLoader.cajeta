@@ -66,7 +66,7 @@ public final class FixtureLoader {
 
     // --- reference tree arrays (extract_trees.py -> trees/t<idx>_<field>.npy) ---
     #String treePath(int32 idx, String field) {
-        String s = stack Int64((int64) idx).toString();
+        String s #= stack Int64((int64) idx).toString();
         return this.path("trees/t" + s + "_" + field + ".npy");
     }
     public #Tensor<float32> treeBaseWeights(int32 i)     { return Npy.loadF32(this.treePath(i, "base_weights")); }

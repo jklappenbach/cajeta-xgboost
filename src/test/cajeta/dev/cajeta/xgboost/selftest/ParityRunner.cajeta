@@ -42,12 +42,12 @@ public final class ParityRunner {
         int64 cap = m.cap;
         int64 r = (int64) 0;
         while (r < rounds) {
-            Tensor<int32>   rLC = f.treeLeftChildren((int32) r);
-            Tensor<int32>   rRC = f.treeRightChildren((int32) r);
-            Tensor<int32>   rSI = f.treeSplitIndices((int32) r);
-            Tensor<float32> rSC = f.treeSplitConditions((int32) r);
-            Tensor<int32>   rDL = f.treeDefaultLeft((int32) r);
-            Tensor<float32> rBW = f.treeBaseWeights((int32) r);
+            Tensor<int32>   rLC #= f.treeLeftChildren((int32) r);
+            Tensor<int32>   rRC #= f.treeRightChildren((int32) r);
+            Tensor<int32>   rSI #= f.treeSplitIndices((int32) r);
+            Tensor<float32> rSC #= f.treeSplitConditions((int32) r);
+            Tensor<int32>   rDL #= f.treeDefaultLeft((int32) r);
+            Tensor<float32> rBW #= f.treeBaseWeights((int32) r);
             int64 refCount = rBW.shapeAt(0);
             if (m.nodeCount[r] != refCount) {
                 return "round " + ParityRunner.s(r) + ": node count " + ParityRunner.s(m.nodeCount[r])
@@ -91,12 +91,12 @@ public final class ParityRunner {
      * (round `ti`). Returns `""` on bit-identity, else the first diverging node/field.
      */
     public static #String compareTree(Tree t, FixtureLoader f, int32 ti) {
-        Tensor<int32>   rLC = f.treeLeftChildren(ti);
-        Tensor<int32>   rRC = f.treeRightChildren(ti);
-        Tensor<int32>   rSI = f.treeSplitIndices(ti);
-        Tensor<float32> rSC = f.treeSplitConditions(ti);
-        Tensor<int32>   rDL = f.treeDefaultLeft(ti);
-        Tensor<float32> rBW = f.treeBaseWeights(ti);
+        Tensor<int32>   rLC #= f.treeLeftChildren(ti);
+        Tensor<int32>   rRC #= f.treeRightChildren(ti);
+        Tensor<int32>   rSI #= f.treeSplitIndices(ti);
+        Tensor<float32> rSC #= f.treeSplitConditions(ti);
+        Tensor<int32>   rDL #= f.treeDefaultLeft(ti);
+        Tensor<float32> rBW #= f.treeBaseWeights(ti);
         int64 refCount = rBW.shapeAt(0);
         int64 r = (int64) ti;
         if (t.nodeCount != refCount) {

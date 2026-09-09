@@ -27,8 +27,8 @@ public class CovertypeTest {
         if (!SfuMath.hasEx2Table()) {
             return;
         }
-        FixtureLoader f = FixtureLoader.open("covertype");
-        Tensor<float64> yT = f.y();
+        FixtureLoader f #= FixtureLoader.open("covertype");
+        Tensor<float64> yT #= f.y();
         int64 n = yT.shapeAt(0);
         int64 K = (int64) 7;
         float64[] label = heap float64[n];
@@ -37,15 +37,15 @@ public class CovertypeTest {
 
         int64 rounds = (int64) 3;
         float32[] marginHistory = heap float32[rounds * n * K];
-        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
                                 (int64) 6, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5, Objective.SOFTMAX, K,
                                 marginHistory);
 
-        String treeDiff = ParityRunner.compareTrees(m, f, rounds * K);
+        String treeDiff #= ParityRunner.compareTrees(m, f, rounds * K);
         Assert.that(treeDiff).isEqualTo("");
-        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(),
+        String marginDiff #= ParityRunner.compareMargins(marginHistory, f.margins(),
                                                         rounds, n * K);
         Assert.that(marginDiff).isEqualTo("");
         return;

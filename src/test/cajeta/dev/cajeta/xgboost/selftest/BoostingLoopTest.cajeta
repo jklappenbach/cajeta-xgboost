@@ -27,8 +27,8 @@ public class BoostingLoopTest {
 
     @Test
     public void fullRegressionModelBitIdenticalPerRound() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        Tensor<float64> yT = f.y();
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> yT #= f.y();
         int64 n = yT.shapeAt(0);
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
@@ -36,26 +36,26 @@ public class BoostingLoopTest {
 
         int64 rounds = (int64) 3;
         float32[] marginHistory = heap float32[rounds * n];
-        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
                                 (int64) 4, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5,
                                 Objective.SQUARED_ERROR, (int64) 1, marginHistory);
         Assert.that(m.rounds).isEqualTo(rounds);
 
-        Tensor<float64> refMargins = f.margins();   // [rounds, n]
-        Tensor<float64> refPreds   = f.preds();      // [n]
+        Tensor<float64> refMargins #= f.margins();   // [rounds, n]
+        Tensor<float64> refPreds   #= f.preds();      // [n]
         int64 cap = m.cap;
 
         int64 r = (int64) 0;
         while (r < rounds) {
             // (a) tree r bit-identical to the reference tree of round r.
-            Tensor<int32>   rLC = f.treeLeftChildren((int32) r);
-            Tensor<int32>   rRC = f.treeRightChildren((int32) r);
-            Tensor<int32>   rSI = f.treeSplitIndices((int32) r);
-            Tensor<float32> rSC = f.treeSplitConditions((int32) r);
-            Tensor<int32>   rDL = f.treeDefaultLeft((int32) r);
-            Tensor<float32> rBW = f.treeBaseWeights((int32) r);
+            Tensor<int32>   rLC #= f.treeLeftChildren((int32) r);
+            Tensor<int32>   rRC #= f.treeRightChildren((int32) r);
+            Tensor<int32>   rSI #= f.treeSplitIndices((int32) r);
+            Tensor<float32> rSC #= f.treeSplitConditions((int32) r);
+            Tensor<int32>   rDL #= f.treeDefaultLeft((int32) r);
+            Tensor<float32> rBW #= f.treeBaseWeights((int32) r);
 
             int64 refCount = rBW.shapeAt(0);
             Assert.that(m.nodeCount[r]).isEqualTo(refCount);

@@ -85,7 +85,7 @@ public final class XGBClassifier implements ProbClassifier {
             this.params.objective = Objective.SOFTMAX;
             this.params.numClass = k;
         }
-        Model m = GBDT.fit(x, label, n, nf, this.params);
+        Model m #= GBDT.fit(x, label, n, nf, this.params);
         this.model #= m;
         this.nFeatures = nf;
         this.fitted = true;
@@ -111,7 +111,7 @@ public final class XGBClassifier implements ProbClassifier {
         this.requireReady(x, "XGBClassifier.predictProba");
         int64 n = x.shapeAt(0);
         int64 k = this.nClasses;
-        float32[] proba = GBDT.predictProba(this.model, x, n, this.nFeatures);
+        float32[] proba #= GBDT.predictProba(this.model, x, n, this.nFeatures);
         float64[] wide = heap float64[n * k];
         if (k == (int64) 2) {
             // Binary proba is the positive-class sigmoid, (n,); widen to
@@ -138,7 +138,7 @@ public final class XGBClassifier implements ProbClassifier {
     public #Tensor<float64> predict(Tensor<float64> x) {
         this.requireReady(x, "XGBClassifier.predict");
         int64 n = x.shapeAt(0);
-        int64[] cls = GBDT.predictClass(this.model, x, n, this.nFeatures);
+        int64[] cls #= GBDT.predictClass(this.model, x, n, this.nFeatures);
         float64[] wide = heap float64[n];
         int64 i = (int64) 0;
         while (i < n) {
@@ -151,7 +151,7 @@ public final class XGBClassifier implements ProbClassifier {
 
     /** Accuracy — the classifier `score` convention. */
     public float64 score(Tensor<float64> x, Tensor<float64> y) {
-        Tensor<float64> p = this.predict(x);
+        Tensor<float64> p #= this.predict(x);
         int64 n = p.shapeAt(0);
         int64 hits = (int64) 0;
         int64 i = (int64) 0;

@@ -245,7 +245,7 @@ public final class GpuSplitFinder {
         parentsH[0] = hist.totalG;
         parentsH[1] = hist.totalH;
 
-        KernelStream s = KernelStream.current();
+        KernelStream s #= KernelStream.current();
         KernelBuffer<float32> dGain = heap KernelBuffer<float32>(nf);
         KernelBuffer<int32> dMeta = heap KernelBuffer<int32>(nf * (int64) 3);
         KernelBuffer<int64> dStats = heap KernelBuffer<int64>(nf * (int64) 4);

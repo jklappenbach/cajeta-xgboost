@@ -34,10 +34,10 @@ public class TreeWalkerTest {
     }
 
     static void checkMargin(String fixture, float32 base, boolean checkPreds) {
-        FixtureLoader f = FixtureLoader.open(fixture);
-        Tensor<float64> x       = f.x();
-        Tensor<float64> preds   = f.preds();      // [n]
-        Tensor<float64> margins = f.margins();    // [rounds, n]
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> x       #= f.x();
+        Tensor<float64> preds   #= f.preds();      // [n]
+        Tensor<float64> margins #= f.margins();    // [rounds, n]
         int64 n  = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
         int64 rounds = margins.shapeAt(0);
@@ -54,11 +54,11 @@ public class TreeWalkerTest {
 
         int64 t = (int64) 0;
         while (t < rounds) {
-            Tensor<int32>   rLC = f.treeLeftChildren((int32) t);
-            Tensor<int32>   rRC = f.treeRightChildren((int32) t);
-            Tensor<int32>   rSI = f.treeSplitIndices((int32) t);
-            Tensor<float32> rSC = f.treeSplitConditions((int32) t);
-            Tensor<int32>   rDL = f.treeDefaultLeft((int32) t);
+            Tensor<int32>   rLC #= f.treeLeftChildren((int32) t);
+            Tensor<int32>   rRC #= f.treeRightChildren((int32) t);
+            Tensor<int32>   rSI #= f.treeSplitIndices((int32) t);
+            Tensor<float32> rSC #= f.treeSplitConditions((int32) t);
+            Tensor<int32>   rDL #= f.treeDefaultLeft((int32) t);
             int64 cnt = f.treeBaseWeights((int32) t).shapeAt(0);
             int64 off = t * cap;
             int64 k = (int64) 0;

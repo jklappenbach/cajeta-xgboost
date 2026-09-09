@@ -27,9 +27,9 @@ public class MultiTreeTest {
 
     @Test
     public void roundZeroClassTreesBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("tiny_multi");
-        Tensor<float64> gAll = f.grad();   // [rounds, n, K] flat
-        Tensor<float64> hAll = f.hess();
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> gAll #= f.grad();   // [rounds, n, K] flat
+        Tensor<float64> hAll #= f.hess();
         int64 K = (int64) 4;
         int64 n = gAll.shapeAt(1);
 
@@ -44,17 +44,17 @@ public class MultiTreeTest {
                 i = i + (int64) 1;
             }
 
-            Tree t = TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), gk, hk, n,
+            Tree t #= TreeBuilder.growTree(f.bins(), f.cutPtrs(), f.cutValues(), gk, hk, n,
                                           (int64) 4, (int64) 0,
                                           (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                           (float64) 0.3);
 
-            Tensor<int32>   rLC = f.treeLeftChildren((int32) k);
-            Tensor<int32>   rRC = f.treeRightChildren((int32) k);
-            Tensor<int32>   rSI = f.treeSplitIndices((int32) k);
-            Tensor<float32> rSC = f.treeSplitConditions((int32) k);
-            Tensor<int32>   rDL = f.treeDefaultLeft((int32) k);
-            Tensor<float32> rBW = f.treeBaseWeights((int32) k);
+            Tensor<int32>   rLC #= f.treeLeftChildren((int32) k);
+            Tensor<int32>   rRC #= f.treeRightChildren((int32) k);
+            Tensor<int32>   rSI #= f.treeSplitIndices((int32) k);
+            Tensor<float32> rSC #= f.treeSplitConditions((int32) k);
+            Tensor<int32>   rDL #= f.treeDefaultLeft((int32) k);
+            Tensor<float32> rBW #= f.treeBaseWeights((int32) k);
 
             int64 refCount = rBW.shapeAt(0);
             Assert.that(t.nodeCount).isEqualTo(refCount);

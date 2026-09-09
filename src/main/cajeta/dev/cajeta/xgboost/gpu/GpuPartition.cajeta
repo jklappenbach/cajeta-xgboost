@@ -64,7 +64,7 @@ public final class GpuPartition {
             c = c + (int64) 1;
         }
 
-        KernelStream st = KernelStream.current();
+        KernelStream st #= KernelStream.current();
         KernelBuffer<int64> dPos = heap KernelBuffer<int64>(n);
         KernelBuffer<int32> dBins = heap KernelBuffer<int32>(n * nf);
         KernelBuffer<int64> dCnt = heap KernelBuffer<int64>(2);

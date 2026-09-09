@@ -18,10 +18,10 @@ public class SoftmaxObjectiveTest {
 
     @Test
     public void roundZeroGradHessBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("tiny_multi");
-        Tensor<float64> yT      = f.y();
-        Tensor<float64> refGrad = f.grad();   // [rounds, n, K] flat
-        Tensor<float64> refHess = f.hess();
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> yT      #= f.y();
+        Tensor<float64> refGrad #= f.grad();   // [rounds, n, K] flat
+        Tensor<float64> refHess #= f.hess();
         int64 n = yT.shapeAt(0);
         int64 K = (int64) 4;
 
@@ -58,11 +58,11 @@ public class SoftmaxObjectiveTest {
         if (!SfuMath.hasEx2Table()) {
             return;
         }
-        FixtureLoader f = FixtureLoader.open("tiny_multi");
-        Tensor<float64> yT      = f.y();
-        Tensor<float64> devGrad = f.deviceGrad();   // [rows, n, K]
-        Tensor<float64> devHess = f.deviceHess();
-        Tensor<float64> margins = f.margins();      // [rows, n, K]
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> yT      #= f.y();
+        Tensor<float64> devGrad #= f.deviceGrad();   // [rows, n, K]
+        Tensor<float64> devHess #= f.deviceHess();
+        Tensor<float64> margins #= f.margins();      // [rows, n, K]
         int64 n = yT.shapeAt(0);
         int64 K = (int64) 4;
         int64 rows = devGrad.shapeAt(0);

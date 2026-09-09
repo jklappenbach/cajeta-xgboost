@@ -26,16 +26,16 @@ public class HistogramTest {
 
     @Test
     public void quantisedHistogramMatchesNvidiaReference() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        float64[] g = f.gradRound(0);
-        float64[] h = f.hessRound(0);
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        float64[] g #= f.gradRound(0);
+        float64[] h #= f.hessRound(0);
         int64 n = (int64) g.count();
 
-        Tensor<int32> bins = f.bins();
-        Tensor<int64> cutPtrs = f.cutPtrs();
+        Tensor<int32> bins #= f.bins();
+        Tensor<int64> cutPtrs #= f.cutPtrs();
 
-        GradientQuantiser q = GradientQuantiser.build(g, h, n);
-        Histogram hist = Histogram.buildAll(bins, cutPtrs, q, g, h, n);
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        Histogram hist #= Histogram.buildAll(bins, cutPtrs, q, g, h, n);
 
         // (1) Determinism: sum quantized gpairs in reverse order → identical int64.
         int64 revG = (int64) 0;
@@ -61,7 +61,7 @@ public class HistogramTest {
         float64 gSum = q.floatGrad(hist.totalG);
         float64 hSum = q.floatHess(hist.totalH);
         float32 w = (float32) (((float64) 0.0 - gSum) / (hSum + (float64) 1.0));
-        Tensor<float32> bw = f.treeBaseWeights(0);
+        Tensor<float32> bw #= f.treeBaseWeights(0);
         Assert.thatFloat((float64) w).isEqualTo((float64) bw.flatGet(0));
         return;
     }

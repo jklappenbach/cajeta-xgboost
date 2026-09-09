@@ -99,7 +99,7 @@ public final class GpuHistogram {
             f = f + (int64) 1;
         }
 
-        KernelStream s = KernelStream.current();
+        KernelStream s #= KernelStream.current();
         KernelBuffer<int64> dHist = heap KernelBuffer<int64>((int64) 2 * nbins);
         KernelBuffer<int32> dBins = heap KernelBuffer<int32>(n * nf);
         KernelBuffer<int32> dCut = heap KernelBuffer<int32>(nf);

@@ -35,7 +35,7 @@ public class ClassifierAdapterTest {
     }
 
     static #Tensor<float64> labelsOf(FixtureLoader f, int64 n) {
-        Tensor<float64> yT = f.y();
+        Tensor<float64> yT #= f.y();
         float64[] a = heap float64[n];
         int64 i = (int64) 0;
         while (i < n) { a[i] = yT.flatGet(i); i = i + (int64) 1; }
@@ -47,25 +47,25 @@ public class ClassifierAdapterTest {
     // for bit — classes and probabilities; proba rows are [1-p, p].
     @Test
     public void binaryBitIdenticalToDirectPipeline() {
-        FixtureLoader f = FixtureLoader.open("tiny_binary");
-        Tensor<float64> x = f.x();
+        FixtureLoader f #= FixtureLoader.open("tiny_binary");
+        Tensor<float64> x #= f.x();
         int64 n = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
-        Tensor<float64> y = ClassifierAdapterTest.labelsOf(f, n);
+        Tensor<float64> y #= ClassifierAdapterTest.labelsOf(f, n);
 
-        Params pd = ClassifierAdapterTest.tinyParams();
+        Params pd #= ClassifierAdapterTest.tinyParams();
         pd.objective = Objective.LOGISTIC;
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
         while (i < n) { label[i] = y.get1(i); i = i + (int64) 1; }
-        dev.cajeta.xgboost.booster.Model dm = GBDT.fit(x, label, n, nf, pd);
-        int64[] directCls = GBDT.predictClass(dm, x, n, nf);
-        float32[] directProba = GBDT.predictProba(dm, x, n, nf);
+        dev.cajeta.xgboost.booster.Model dm #= GBDT.fit(x, label, n, nf, pd);
+        int64[] directCls #= GBDT.predictClass(dm, x, n, nf);
+        float32[] directProba #= GBDT.predictProba(dm, x, n, nf);
 
         XGBClassifier c = heap XGBClassifier(ClassifierAdapterTest.tinyParams());
         c.fit(x, y);
-        Tensor<float64> pc = c.predict(x);
-        Tensor<float64> pp = c.predictProba(x);
+        Tensor<float64> pc #= c.predict(x);
+        Tensor<float64> pp #= c.predictProba(x);
         i = (int64) 0;
         while (i < n) {
             Assert.equals((int64) pc.flatGet(i), directCls[i]);
@@ -84,27 +84,27 @@ public class ClassifierAdapterTest {
     // pipeline; each proba row sums to ~1.
     @Test
     public void multiclassBitIdenticalToDirectPipeline() {
-        FixtureLoader f = FixtureLoader.open("tiny_multi");
-        Tensor<float64> x = f.x();
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> x #= f.x();
         int64 n = x.shapeAt(0);
         int64 nf = x.shapeAt(1);
-        Tensor<float64> y = ClassifierAdapterTest.labelsOf(f, n);
+        Tensor<float64> y #= ClassifierAdapterTest.labelsOf(f, n);
         int64 k = (int64) 4;
 
-        Params pd = ClassifierAdapterTest.tinyParams();
+        Params pd #= ClassifierAdapterTest.tinyParams();
         pd.objective = Objective.SOFTMAX;
         pd.numClass = k;
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
         while (i < n) { label[i] = y.get1(i); i = i + (int64) 1; }
-        dev.cajeta.xgboost.booster.Model dm = GBDT.fit(x, label, n, nf, pd);
-        int64[] directCls = GBDT.predictClass(dm, x, n, nf);
-        float32[] directProba = GBDT.predictProba(dm, x, n, nf);
+        dev.cajeta.xgboost.booster.Model dm #= GBDT.fit(x, label, n, nf, pd);
+        int64[] directCls #= GBDT.predictClass(dm, x, n, nf);
+        float32[] directProba #= GBDT.predictProba(dm, x, n, nf);
 
         XGBClassifier c = heap XGBClassifier(ClassifierAdapterTest.tinyParams());
         c.fit(x, y);
-        Tensor<float64> pc = c.predict(x);
-        Tensor<float64> pp = c.predictProba(x);
+        Tensor<float64> pc #= c.predict(x);
+        Tensor<float64> pp #= c.predictProba(x);
         Assert.equals(pp.shapeAt(1), k);
         i = (int64) 0;
         while (i < n) {
@@ -130,22 +130,22 @@ public class ClassifierAdapterTest {
     // crossValScore composition; misuse is loud.
     @Test
     public void composesThroughTheProtocol() {
-        FixtureLoader f = FixtureLoader.open("tiny_binary");
-        Tensor<float64> x = f.x();
+        FixtureLoader f #= FixtureLoader.open("tiny_binary");
+        Tensor<float64> x #= f.x();
         int64 n = x.shapeAt(0);
-        Tensor<float64> y = ClassifierAdapterTest.labelsOf(f, n);
+        Tensor<float64> y #= ClassifierAdapterTest.labelsOf(f, n);
 
         ProbClassifier pc = heap XGBClassifier(ClassifierAdapterTest.tinyParams());
         Assert.isTrue(!pc.isFitted());
         pc.fit(x, y);
         Assert.isTrue(pc.isFitted());
-        Tensor<float64> p = pc.predict(x);
+        Tensor<float64> p #= pc.predict(x);
         Assert.equals(p.shapeAt(0), n);
         Assert.isTrue(pc.score(x, y) > (float64) 0.9);
 
         XGBClassifier c2 = heap XGBClassifier(ClassifierAdapterTest.tinyParams());
         KFold folds = heap KFold((int64) 3, false, (uint64) 0);
-        Tensor<float64> scores = Split.crossValScore(c2, x, y, folds);
+        Tensor<float64> scores #= Split.crossValScore(c2, x, y, folds);
         Assert.equals(scores.shapeAt(0), (int64) 3);
         int64 i = (int64) 0;
         while (i < (int64) 3) {
@@ -157,7 +157,7 @@ public class ClassifierAdapterTest {
         boolean threw = false;
         try {
             XGBClassifier bad = heap XGBClassifier(ClassifierAdapterTest.tinyParams());
-            Tensor<float64> q = bad.predict(x);
+            Tensor<float64> q #= bad.predict(x);
         } catch (MlException ex) { threw = true; }
         Assert.isTrue(threw);
         return;

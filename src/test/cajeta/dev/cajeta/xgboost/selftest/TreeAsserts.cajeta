@@ -16,12 +16,12 @@ public final class TreeAsserts {
     public TreeAsserts() { return; }
 
     public static void assertMatches(Tree t, FixtureLoader f, int32 treeIdx) {
-        Tensor<int32>   rLC = f.treeLeftChildren(treeIdx);
-        Tensor<int32>   rRC = f.treeRightChildren(treeIdx);
-        Tensor<int32>   rSI = f.treeSplitIndices(treeIdx);
-        Tensor<float32> rSC = f.treeSplitConditions(treeIdx);
-        Tensor<int32>   rDL = f.treeDefaultLeft(treeIdx);
-        Tensor<float32> rBW = f.treeBaseWeights(treeIdx);
+        Tensor<int32>   rLC #= f.treeLeftChildren(treeIdx);
+        Tensor<int32>   rRC #= f.treeRightChildren(treeIdx);
+        Tensor<int32>   rSI #= f.treeSplitIndices(treeIdx);
+        Tensor<float32> rSC #= f.treeSplitConditions(treeIdx);
+        Tensor<int32>   rDL #= f.treeDefaultLeft(treeIdx);
+        Tensor<float32> rBW #= f.treeBaseWeights(treeIdx);
 
         int64 refCount = rBW.shapeAt(0);
         Assert.that(t.nodeCount).isEqualTo(refCount);

@@ -23,10 +23,10 @@ public class LogisticObjectiveTest {
 
     @Test
     public void roundZeroGradHessBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("tiny_binary");
-        Tensor<float64> yT      = f.y();
-        Tensor<float64> refGrad = f.grad();
-        Tensor<float64> refHess = f.hess();
+        FixtureLoader f #= FixtureLoader.open("tiny_binary");
+        Tensor<float64> yT      #= f.y();
+        Tensor<float64> refGrad #= f.grad();
+        Tensor<float64> refHess #= f.hess();
         int64 n = yT.shapeAt(0);
 
         float32 base = Logistic.baseMargin((float64) 0.5);   // 0
@@ -56,11 +56,11 @@ public class LogisticObjectiveTest {
         if (!SfuMath.hasEx2Table()) {
             return;
         }
-        FixtureLoader f = FixtureLoader.open("tiny_binary");
-        Tensor<float64> yT      = f.y();
-        Tensor<float64> devGrad = f.deviceGrad();
-        Tensor<float64> devHess = f.deviceHess();
-        Tensor<float64> margins = f.margins();
+        FixtureLoader f #= FixtureLoader.open("tiny_binary");
+        Tensor<float64> yT      #= f.y();
+        Tensor<float64> devGrad #= f.deviceGrad();
+        Tensor<float64> devHess #= f.deviceHess();
+        Tensor<float64> margins #= f.margins();
         int64 n = yT.shapeAt(0);
         int64 rows = devGrad.shapeAt(0);
 

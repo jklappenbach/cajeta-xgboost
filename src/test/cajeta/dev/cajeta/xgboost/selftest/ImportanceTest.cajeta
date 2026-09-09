@@ -19,7 +19,7 @@ public class ImportanceTest {
 
     @Test
     public void totalsMatchReferenceGetScore() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
         int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
         int64 numTrees = (int64) 3;
 
@@ -38,9 +38,9 @@ public class ImportanceTest {
             t = t + (int64) 1;
         }
 
-        Tensor<float32> rW = f.importance("weight");
-        Tensor<float32> rG = f.importance("total_gain");
-        Tensor<float32> rC = f.importance("total_cover");
+        Tensor<float32> rW #= f.importance("weight");
+        Tensor<float32> rG #= f.importance("total_gain");
+        Tensor<float32> rC #= f.importance("total_cover");
         int64 fdx = (int64) 0;
         while (fdx < nf) {
             Assert.thatFloat((float64) (float32) weight[fdx]).isEqualTo((float64) rW.flatGet(fdx));

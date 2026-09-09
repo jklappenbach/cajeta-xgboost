@@ -15,17 +15,17 @@ public class FixtureLoaderTest {
 
     @Test
     public void loadsTinyRegFixtureWithCorrectShapesAndValues() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg_cpu");
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_cpu");
 
-        Tensor<float64> x = f.x();                 // [200, 5]
+        Tensor<float64> x #= f.x();                 // [200, 5]
         Assert.that(x.shapeAt(0)).isEqualTo((int64) 200);
         Assert.that(x.shapeAt(1)).isEqualTo((int64) 5);
 
-        Tensor<float64> g = f.grad();              // [rounds=3, 200]
+        Tensor<float64> g #= f.grad();              // [rounds=3, 200]
         Assert.that(g.shapeAt(0)).isEqualTo((int64) 3);
         Assert.that(g.shapeAt(1)).isEqualTo((int64) 200);
 
-        Tensor<float64> h = f.hess();              // reg hess all ones
+        Tensor<float64> h #= f.hess();              // reg hess all ones
         Assert.thatFloat(h.flatGet(0)).isEqualTo((float64) 1.0);
         Assert.thatFloat(h.flatGet(199)).isEqualTo((float64) 1.0);
 
@@ -33,17 +33,17 @@ public class FixtureLoaderTest {
         // float32 (XGBoost's GradientPair precision), so it agrees with the
         // float64 relation only to ~float32 epsilon — the exact float32 value is
         // what makes the tree bit-identical (see OneTreeTest).
-        Tensor<float64> y = f.y();                 // [200]
+        Tensor<float64> y #= f.y();                 // [200]
         Assert.thatFloat(g.flatGet(0)).isCloseTo((float64) 0.5 - y.flatGet(0),
                                                  (float64) 0.000001);
         Assert.thatFloat(g.flatGet(7)).isCloseTo((float64) 0.5 - y.flatGet(7),
                                                  (float64) 0.000001);
 
-        Tensor<int32> bins = f.bins();             // [200, 5]
+        Tensor<int32> bins #= f.bins();             // [200, 5]
         Assert.that(bins.shapeAt(0)).isEqualTo((int64) 200);
         Assert.that(bins.shapeAt(1)).isEqualTo((int64) 5);
 
-        Tensor<int64> cp = f.cutPtrs();            // [features+1] = 6
+        Tensor<int64> cp #= f.cutPtrs();            // [features+1] = 6
         Assert.that(cp.shapeAt(0)).isEqualTo((int64) 6);
         Assert.that(cp.flatGet(0)).isEqualTo((int64) 0);
         return;

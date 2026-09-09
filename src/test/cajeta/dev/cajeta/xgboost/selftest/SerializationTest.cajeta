@@ -21,10 +21,10 @@ public class SerializationTest {
 
     @Test
     public void roundTripPredictsBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("tiny_reg");
-        Tensor<float64> yT = f.y();
-        Tensor<float64> x  = f.x();
-        Tensor<float64> preds = f.preds();
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> yT #= f.y();
+        Tensor<float64> x  #= f.x();
+        Tensor<float64> preds #= f.preds();
         int64 n  = yT.shapeAt(0);
         int64 nf = x.shapeAt(1);
         float64[] label = heap float64[n];
@@ -33,13 +33,13 @@ public class SerializationTest {
 
         int64 rounds = (int64) 3;
         float32[] hist = heap float32[rounds * n];
-        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
                                 (int64) 4, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5, Objective.SQUARED_ERROR, (int64) 1, hist);
 
-        int8[] buf = ModelIO.serialize(m);
-        Model m2 = ModelIO.deserialize(buf);
+        int8[] buf #= ModelIO.serialize(m);
+        Model m2 #= ModelIO.deserialize(buf);
 
         Assert.that(m2.rounds).isEqualTo(m.rounds);
         Assert.that(m2.cap).isEqualTo(m.cap);

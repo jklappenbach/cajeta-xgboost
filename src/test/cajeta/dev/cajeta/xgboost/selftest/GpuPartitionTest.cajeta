@@ -49,25 +49,25 @@ public class GpuPartitionTest {
     }
 
     static void comparePartition(String fixture) {
-        FixtureLoader f = FixtureLoader.open(fixture);
-        float64[] g = f.gradRound((int32) 0);
-        float64[] h = f.hessRound((int32) 0);
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
         int64 n = (int64) g.count();
         int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
-        GradientQuantiser q = GradientQuantiser.build(g, h, n);
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
 
         // Root split from the CPU finder (no capture needed).
-        Histogram root = Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
-        Split s = SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
+        Histogram root #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Split s #= SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
                                        (float64) 1.0, (float64) 0.0, (float64) 1.0);
         Assert.isTrue(s.valid);
 
         // Root partition: 0 -> (1, 2), both paths.
         int64[] posCpu = heap int64[n];
         int64[] posGpu = heap int64[n];
-        int64[] cCpu = GpuPartitionTest.cpuPartition(
+        int64[] cCpu #= GpuPartitionTest.cpuPartition(
             f.bins(), f.cutPtrs(), s, posCpu, (int64) 0, (int64) 1, (int64) 2, nf, n);
-        int64[] cGpu = GpuPartition.partition(
+        int64[] cGpu #= GpuPartition.partition(
             f.bins(), f.cutPtrs(), s, posGpu, (int64) 0, (int64) 1, (int64) 2, nf, n);
 
         Assert.equals(cGpu[0], cCpu[0]);
@@ -82,14 +82,14 @@ public class GpuPartitionTest {
         // A second-level partition (rows already split across nodes 1 and 2):
         // split node 1's rows again — the kernel must leave node 2's rows
         // untouched and agree row-for-row on node 1's.
-        Histogram h1 = Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+        Histogram h1 #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
                                           posCpu, (int64) 1, n);
-        Split s1 = SplitFinder.findBest(h1, f.cutPtrs(), f.cutValues(), q,
+        Split s1 #= SplitFinder.findBest(h1, f.cutPtrs(), f.cutValues(), q,
                                         (float64) 1.0, (float64) 0.0, (float64) 1.0);
         if (s1.valid) {
-            int64[] c1Cpu = GpuPartitionTest.cpuPartition(
+            int64[] c1Cpu #= GpuPartitionTest.cpuPartition(
                 f.bins(), f.cutPtrs(), s1, posCpu, (int64) 1, (int64) 3, (int64) 4, nf, n);
-            int64[] c1Gpu = GpuPartition.partition(
+            int64[] c1Gpu #= GpuPartition.partition(
                 f.bins(), f.cutPtrs(), s1, posGpu, (int64) 1, (int64) 3, (int64) 4, nf, n);
             Assert.equals(c1Gpu[0], c1Cpu[0]);
             Assert.equals(c1Gpu[1], c1Cpu[1]);

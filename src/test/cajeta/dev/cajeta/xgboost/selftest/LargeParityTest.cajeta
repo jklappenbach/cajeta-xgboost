@@ -23,8 +23,8 @@ public class LargeParityTest {
 
     @Test
     public void largeRegTreesAndMarginsBitIdentical() {
-        FixtureLoader f = FixtureLoader.open("large_reg");
-        Tensor<float64> yT = f.y();
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        Tensor<float64> yT #= f.y();
         int64 n = yT.shapeAt(0);
         float64[] label = heap float64[n];
         int64 i = (int64) 0;
@@ -32,14 +32,14 @@ public class LargeParityTest {
 
         int64 rounds = (int64) 3;
         float32[] marginHistory = heap float32[rounds * n];
-        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
                                 (int64) 6, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5, Objective.SQUARED_ERROR, (int64) 1, marginHistory);
 
-        String treeDiff = ParityRunner.compareTrees(m, f, rounds);
+        String treeDiff #= ParityRunner.compareTrees(m, f, rounds);
         Assert.that(treeDiff).isEqualTo("");
-        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
+        String marginDiff #= ParityRunner.compareMargins(marginHistory, f.margins(), rounds, n);
         Assert.that(marginDiff).isEqualTo("");
         return;
     }

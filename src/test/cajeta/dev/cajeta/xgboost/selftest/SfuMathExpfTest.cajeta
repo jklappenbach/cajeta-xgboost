@@ -121,7 +121,7 @@ public class SfuMathExpfTest {
         if (path == null) { return; }              // no capture (CI) — tiers 1+2 stand
         if (!SfuMath.hasEx2Table()) { return; }   // sweep without the SFU table proves nothing
 
-        Tensor<int32> sweep = Npy.loadI32(path);
+        Tensor<int32> sweep #= Npy.loadI32(path);
 
         int32 k = (int32) 0;
         while (k < SfuMathExpfTest.SWEEP_N()) {

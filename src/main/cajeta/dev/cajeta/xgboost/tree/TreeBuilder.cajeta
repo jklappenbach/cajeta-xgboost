@@ -115,7 +115,7 @@ public final class TreeBuilder {
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
                              float32[] lossChg, float64[] sumHess,
                              int64[] leafOf, boolean device) {
-        GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
+        GradientQuantiser q #= GradientQuantiser.build(grad, hess, n);
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
         int64 nbins = cutPtrs.flatGet(nf);
 
@@ -153,7 +153,7 @@ public final class TreeBuilder {
             int64 base = nid * nbins;
 
             // This node's histogram is already resident in the store.
-            Histogram hist = Histogram.fromStore(histG, histH, base, nbins, nf, totGof[nid], totHof[nid]);
+            Histogram hist #= Histogram.fromStore(histG, histH, base, nbins, nf, totGof[nid], totHof[nid]);
 
             // gpu-numeric-fidelity 2.2.1 — evaluate-probe input dump. With
             // XGBOOST_NODE_DUMP=<dir> and XGBOOST_NODE_DUMP_NID=<nid>, this node's
@@ -180,9 +180,9 @@ public final class TreeBuilder {
 
             Split s;
             if (device && SfuMath.hasRcpTable()) {
-                s = GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
+                s #= GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
             } else {
-                s = SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
+                s #= SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
             }
 
             boolean canSplit = false;
@@ -220,7 +220,7 @@ public final class TreeBuilder {
                 int64 cntL;
                 int64 cntR;
                 if (device) {
-                    int64[] cnts = GpuPartition.partition(bins, cutPtrs, s, position,
+                    int64[] cnts #= GpuPartition.partition(bins, cutPtrs, s, position,
                                                           nid, li, ri, nf, n);
                     cntL = cnts[0];
                     cntR = cnts[1];
@@ -287,8 +287,8 @@ public final class TreeBuilder {
                          float64 lambda, float64 alpha, float64 minChildWeight) {
         int64[] hshape = heap int64[1];
         hshape[0] = nbins;
-        Tensor<int64> hg = Tensor.zeros<int64>(hshape);
-        Tensor<int64> hh = Tensor.zeros<int64>(hshape);
+        Tensor<int64> hg #= Tensor.zeros<int64>(hshape);
+        Tensor<int64> hh #= Tensor.zeros<int64>(hshape);
         int64 b = (int64) 0;
         while (b < nbins) {
             hg.flatSet(b, histG[base + b]);
@@ -300,21 +300,21 @@ public final class TreeBuilder {
 
         int64[] pshape = heap int64[1];
         pshape[0] = (int64) 2;
-        Tensor<int64> par = Tensor.zeros<int64>(pshape);
+        Tensor<int64> par #= Tensor.zeros<int64>(pshape);
         par.flatSet((int64) 0, parentG);
         par.flatSet((int64) 1, parentH);
         Npy.saveI64(dir + "/parent.npy", par);
 
         int64[] cshape = heap int64[1];
         cshape[0] = nf + (int64) 1;
-        Tensor<int64> cp = Tensor.zeros<int64>(cshape);
+        Tensor<int64> cp #= Tensor.zeros<int64>(cshape);
         int64 f = (int64) 0;
         while (f <= nf) { cp.flatSet(f, cutPtrs.flatGet(f)); f = f + (int64) 1; }
         Npy.saveI64(dir + "/cut_ptrs.npy", cp);
 
         int64[] sshape = heap int64[1];
         sshape[0] = (int64) 5;
-        Tensor<float64> cfg = Tensor.zeros<float64>(sshape);
+        Tensor<float64> cfg #= Tensor.zeros<float64>(sshape);
         cfg.flatSet((int64) 0, q.toFloatGrad);
         cfg.flatSet((int64) 1, q.toFloatHess);
         cfg.flatSet((int64) 2, lambda);
@@ -343,7 +343,7 @@ public final class TreeBuilder {
                               float64[] grad, float64[] hess, int64[] position, int64 nf, int64 n,
                               int64 nbins) {
         if (device) {
-            Histogram hb = GpuHistogram.buildPos(bins, cutPtrs, q, grad, hess,
+            Histogram hb #= GpuHistogram.buildPos(bins, cutPtrs, q, grad, hess,
                                                  position, nid, n);
             int64 b = (int64) 0;
             while (b < nbins) {

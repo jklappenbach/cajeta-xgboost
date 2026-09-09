@@ -26,8 +26,8 @@ public class LargeMultiTest {
         if (!SfuMath.hasEx2Table()) {
             return;
         }
-        FixtureLoader f = FixtureLoader.open("large_multi");
-        Tensor<float64> yT = f.y();
+        FixtureLoader f #= FixtureLoader.open("large_multi");
+        Tensor<float64> yT #= f.y();
         int64 n = yT.shapeAt(0);
         int64 K = (int64) 4;
         float64[] label = heap float64[n];
@@ -36,18 +36,18 @@ public class LargeMultiTest {
 
         int64 rounds = (int64) 3;
         float32[] marginHistory = heap float32[rounds * n * K];
-        Model m = Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
                                 (int64) 6, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5, Objective.SOFTMAX, K,
                                 marginHistory);
 
         // Trees are flat round-major r*K + g — compare all rounds*K of them.
-        String treeDiff = ParityRunner.compareTrees(m, f, rounds * K);
+        String treeDiff #= ParityRunner.compareTrees(m, f, rounds * K);
         Assert.that(treeDiff).isEqualTo("");
         // margins.npy is [rounds, n, K] row-major == the history's
         // r*(n*K) + i*K + g layout, so compare with n*K per round.
-        String marginDiff = ParityRunner.compareMargins(marginHistory, f.margins(),
+        String marginDiff #= ParityRunner.compareMargins(marginHistory, f.margins(),
                                                         rounds, n * K);
         Assert.that(marginDiff).isEqualTo("");
         return;
