@@ -8,9 +8,11 @@
 # registry.
 #
 # The probed SFU capture tables (RCP_TABLE / EX2_TABLE, 32 MB each) are
-# .gitignore'd and absent in CI: FastMath falls back to correctly-rounded
-# math and every capture-dependent test self-skips. Bit-exactness against
-# the captures is a local/GPU-runner concern, not this job's.
+# .gitignore'd, so scripts/fetch-captures.sh pulls the sha256-pinned copies
+# published as v0.3.0 release assets and CI asserts the capture-dependent
+# parity tests rather than skipping them. If that fetch fails, offline say,
+# cajeta.math.sfu.SfuMath falls back to correctly-rounded math and those
+# tests self-skip, leaving the rest of the suite meaningful.
 #
 # Triggers (push-to-main flow; no PRs):
 #   - push to main         → build + test (no publish)
@@ -36,11 +38,31 @@ permissions:
   contents: write
 
 env:
-  # Must match a release tag of jklappenbach/cajeta. v0.13.0 is the line the
-  # dev.cajeta.ml 0.3.0 dependency is published against; it also carries the
+  # Must match a release tag of jklappenbach/cajeta. v0.13.0 was the line the
+  # dev.cajeta.ml 0.3.0 dependency was published against; it also carried the
   # v0.12.1 loader-materialization fix (cross-file records; the Frames bridge
-  # test) and v0.12.0's iface-generic-returns dispatch fix.
-  CAJETA_VERSION: v0.17.4
+  # test) and v0.12.0's iface-generic-returns dispatch fix. v0.17.4 followed for
+  # the classpath @Kernel registration the U12 device work needs.
+  #
+  # v0.29.0 is not here for being the newest release. It is the floor this tree
+  # requires, measured on a local checkout against the released binary from a
+  # cleared artifact cache, not inferred.
+  #
+  # A consumer's compiler re-checks a DEPENDENCY archive's own sources, so this
+  # pin decides whether the archives cajeta.json names are acceptable. At the old
+  # dependency pins the test binary never links: dev.cajeta.unit 0.2.0 stops it
+  # with CAJETA_ERROR_CAPTURED_BORROW_PARAM naming `pred`, and with that raised,
+  # dev.cajeta.ml 0.10.0 stops it again naming `x` (Batches keeps a plain
+  # Tensor<float32> parameter in a field). Neither symbol exists in this library.
+  # The archives that link are unit 0.3.0 and ml 0.10.2, and v0.29.0 is the
+  # toolchain that cut both.
+  #
+  # It also found 105 tour bindings that received a `#`-returning call with a
+  # plain `=` (CAJETA_ERROR_OWNED_RESULT_NEEDS_TRANSFER). The old v0.17.4 pin is
+  # why CI had never seen one of them.
+  #
+  # Keep this in step with settings.toolchain.version in cajeta.json.
+  CAJETA_VERSION: v0.29.0
 
 jobs:
   build-test:

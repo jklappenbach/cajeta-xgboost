@@ -17,7 +17,7 @@
 
     "details": {
         "name":               "dev.cajeta.xgboost",
-        "version":            "0.3.0",
+        "version":            "0.4.0",
         "description":        "cajeta-xgboost — bit-exact-to-NVIDIA GBDT training and prediction",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
@@ -25,6 +25,32 @@
     },
 
     "settings": {
+        // The toolchain this library is built and gated against. It is not here
+        // for being the newest release — it is here because nothing in this tree
+        // builds under the pins it replaces, measured on this checkout against
+        // the released v0.29.0 from a cleared artifact cache.
+        //
+        // A consumer's compiler re-checks a DEPENDENCY archive's own sources, so
+        // the dependency pins and the toolchain move together or not at all. At
+        // the old pins the test binary never links: unit 0.2.0 stops it with
+        // CAJETA_ERROR_CAPTURED_BORROW_PARAM naming `pred`, and with that raised,
+        // ml 0.10.0 stops it again naming `x`. Neither symbol exists in this
+        // library. The archives that do link are unit 0.3.0 and ml 0.10.2, and
+        // both were cut by v0.29.0.
+        //
+        // The second thing the floor bought is the tour. v0.29.0 raises
+        // CAJETA_ERROR_OWNED_RESULT_NEEDS_TRANSFER where a `#`-returning call is
+        // received with a plain `=`, and the tour had 105 of them, every one
+        // invisible under the old v0.17.4 pin.
+        //
+        // Keep this in step with CAJETA_VERSION in .github/workflows/release.yml.
+        // They are separate knobs: this one is documentation, the workflow's is
+        // what CI installs, and a stale value here is a false claim about what
+        // builds.
+        "toolchain": {
+            "version": "0.29.0"
+        },
+
         // cajeta.math.sfu.SfuMath loads the probed SFU tables (RCP_TABLE / EX2_TABLE) and
         // FixtureLoader reads golden fixtures from disk.
         "capabilities": ["filesystem"],
@@ -42,15 +68,28 @@
         // (Estimator/Predictor) that XGBRegressor conforms to, plus the
         // Metrics/Split machinery the adapter and its tests lean on;
         // run-tests.sh resolves it (sibling checkout → store → Olla).
+        //
+        // 0.10.0 -> 0.10.2 is a required floor, not a courtesy raise. The 0.10.0
+        // archive carries dev.cajeta.ml.data.Batches, which keeps a plain
+        // `Tensor<float32> x` parameter in a field of the same name, and this
+        // toolchain's captured-borrow check rejects it — measured here as
+        // CAJETA_ERROR_CAPTURED_BORROW_PARAM naming `x`, a symbol this library
+        // does not contain. 0.10.2 stores it with `#=`.
         "dependencies": {
-            "dev.cajeta.ml": "0.10.0"
+            "dev.cajeta.ml": "0.10.2"
         },
 
         // The suite is driven by cajeta-unit's reflective @Test discovery;
         // run-tests.sh resolves the archive (sibling checkout, then store,
         // then a sha256-verified Olla fetch at this pin).
+        //
+        // 0.2.0 -> 0.3.0 for the same reason and by the same measurement: 0.2.0
+        // brings a PredMatcher that keeps a plain function parameter `pred` in a
+        // field, and the test binary refuses to link with
+        // CAJETA_ERROR_CAPTURED_BORROW_PARAM naming it. 0.3.0 takes the predicate
+        // owned.
         "dev-dependencies": {
-            "dev.cajeta.unit": "0.2.0"
+            "dev.cajeta.unit": "0.3.0"
         },
 
         "repositories": [
