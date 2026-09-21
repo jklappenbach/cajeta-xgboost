@@ -12,7 +12,7 @@ package dev.cajeta.xgboost;
 public final class XGBoost {
     /** The library version. Mirrors `details.version` in cajeta.json, which
      *  is the single source of truth. Raise both in the same cut. */
-    public static #String version() { return "0.4.0"; }
+    public static #String version() { return "0.4.1"; }
 
     /** `--emit=cja` entry. */
     public static int32 run() { return 0; }
