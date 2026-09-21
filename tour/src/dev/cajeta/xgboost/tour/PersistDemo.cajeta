@@ -26,22 +26,22 @@ public class PersistDemo extends DemoClass {
     public void execute() {
         this.section("8. Persistence — serialize to a file, reload, predict identically");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
         int64 n = Data.rows();
         int64 nf = Data.features();
-        Model trained = TrainDemo.fitted(x, y);
-        float32[] before = GBDT.predict(trained, x, n, nf);
+        Model trained #= TrainDemo.fitted(x, y);
+        float32[] before #= GBDT.predict(trained, x, n, nf);
 
         // --- the training job's half: serialize and write --------------
         String path = "tour-model.xgb";
-        Path stale = Path.of(path);
+        Path stale #= Path.of(path);
         if (stale.exists()) {
             stale.delete();                   // never inherit a previous run
         }
-        int8[] bytes = ModelIO.serialize(trained);
+        int8[] bytes #= ModelIO.serialize(trained);
         int32 size = (int32) bytes.count();
-        FileWriter w = File.openWrite(path, OpenMode.WRITE);
+        FileWriter w #= File.openWrite(path, OpenMode.WRITE);
         w.write(bytes, size);
         w.close();                            // flush + release the fd
         System.stdout.println("   wrote " + path + " (" + size + " bytes, "
@@ -49,14 +49,14 @@ public class PersistDemo extends DemoClass {
         this.check(Path.of(path).exists(), "the model file is on disk");
 
         // --- the serving process's half: read and deserialize ----------
-        FileReader r = File.openRead(path);
+        FileReader r #= File.openRead(path);
         int8[] buf = heap int8[size];
         int32 got = r.read(buf, size);
         r.close();
         this.check(got == size, "read back every byte that was written");
 
-        Model loaded = ModelIO.deserialize(buf);
-        float32[] after = GBDT.predict(loaded, x, n, nf);
+        Model loaded #= ModelIO.deserialize(buf);
+        float32[] after #= GBDT.predict(loaded, x, n, nf);
         this.check(DemoClass.sameBitsAll(before, after, n),
             "the reloaded model predicts BIT-identically, all " + n + " rows");
         this.check(loaded.rounds == trained.rounds && loaded.cap == trained.cap,

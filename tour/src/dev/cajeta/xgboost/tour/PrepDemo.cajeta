@@ -29,14 +29,14 @@ public class PrepDemo extends DemoClass {
     public void execute() {
         this.section("2. Data prep — quantile cuts and binning (bin once, train many)");
 
-        Tensor<float64> x = Data.x();
+        Tensor<float64> x #= Data.x();
         int64 n = Data.rows();
         int64 nf = Data.features();
 
         // A modest maxBin so the printout is readable; 256 is the default.
         int64 maxBin = (int64) 16;
         int64[] cutPtrs = heap int64[nf + (int64) 1];
-        float32[] cuts = Sketch.cuts(x, n, nf, maxBin, cutPtrs);
+        float32[] cuts #= Sketch.cuts(x, n, nf, maxBin, cutPtrs);
 
         // The layout: one contiguous run of cut values per feature, framed
         // by min/max sentinels, with cutPtrs as the index.
@@ -72,9 +72,9 @@ public class PrepDemo extends DemoClass {
         // for more bins, get more (and finer) thresholds to split on — at
         // the cost of a longer histogram to scan per node.
         int64[] coarsePtrs = heap int64[nf + (int64) 1];
-        float32[] coarse = Sketch.cuts(x, n, nf, (int64) 4, coarsePtrs);
+        float32[] coarse #= Sketch.cuts(x, n, nf, (int64) 4, coarsePtrs);
         int64[] finePtrs = heap int64[nf + (int64) 1];
-        float32[] fine = Sketch.cuts(x, n, nf, (int64) 64, finePtrs);
+        float32[] fine #= Sketch.cuts(x, n, nf, (int64) 64, finePtrs);
         System.stdout.println("   total cut points: maxBin 4 -> " + coarsePtrs[nf]
             + ", maxBin " + maxBin + " -> " + cutPtrs[nf]
             + ", maxBin 64 -> " + finePtrs[nf]);
@@ -85,7 +85,7 @@ public class PrepDemo extends DemoClass {
         // step — the contrast that shows what pruning removes (nothing at
         // all when the sketch never exceeded the limit, as here).
         int64[] rawPtrs = heap int64[nf + (int64) 1];
-        float32[] raw = Sketch.cutsNoPrune(x, n, nf, maxBin, rawPtrs);
+        float32[] raw #= Sketch.cutsNoPrune(x, n, nf, maxBin, rawPtrs);
         System.stdout.println("   at maxBin " + maxBin + ": pruned " + cutPtrs[nf]
             + " cut points, unpruned " + rawPtrs[nf]);
         this.check(rawPtrs[nf] >= cutPtrs[nf],
@@ -100,9 +100,9 @@ public class PrepDemo extends DemoClass {
         int64 sq = Data.SQFT();
         int64 sqB0 = cutPtrs[sq];
         int64 sqB1 = cutPtrs[sq + (int64) 1];
-        Tensor<float64> cutValsT = PrepDemo.asF64Tensor(cuts, total);
-        Tensor<int64> cutPtrsT = PrepDemo.asI64Tensor(cutPtrs, nf + (int64) 1);
-        int32[] bins = Binner.bin(x, cutPtrsT, cutValsT, n, nf);
+        Tensor<float64> cutValsT #= PrepDemo.asF64Tensor(cuts, total);
+        Tensor<int64> cutPtrsT #= PrepDemo.asI64Tensor(cutPtrs, nf + (int64) 1);
+        int32[] bins #= Binner.bin(x, cutPtrsT, cutValsT, n, nf);
         this.check((int64) bins.count() == n * nf,
             "the bin matrix is one int32 per (row, feature)");
 

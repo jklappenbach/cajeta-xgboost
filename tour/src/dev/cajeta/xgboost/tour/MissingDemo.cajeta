@@ -26,11 +26,11 @@ public class MissingDemo extends DemoClass {
     public void execute() {
         this.section("5. Missing values — NaN takes the node's default direction");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
         int64 n = Data.rows();
         int64 nf = Data.features();
-        Model m = TrainDemo.fitted(x, y);
+        Model m #= TrainDemo.fitted(x, y);
 
         // The data really does carry missing values — training saw them.
         int64 missingRows = (int64) 0;
@@ -73,10 +73,10 @@ public class MissingDemo extends DemoClass {
         int64 row = (int64) 0;
         while (row < n) {
             if (!Data.lotMissingAt(row)) {
-                Tensor<float64> asIsR = MissingDemo.oneRow(x, row, nf, false);
-                Tensor<float64> blankR = MissingDemo.oneRow(x, row, nf, true);
-                float32[] a = GBDT.predict(m, asIsR, (int64) 1, nf);
-                float32[] bl = GBDT.predict(m, blankR, (int64) 1, nf);
+                Tensor<float64> asIsR #= MissingDemo.oneRow(x, row, nf, false);
+                Tensor<float64> blankR #= MissingDemo.oneRow(x, row, nf, true);
+                float32[] a #= GBDT.predict(m, asIsR, (int64) 1, nf);
+                float32[] bl #= GBDT.predict(m, blankR, (int64) 1, nf);
                 if (!DemoClass.sameBits(a[0], bl[0])) {
                     moved = moved + (int64) 1;
                     if (probeRow < (int64) 0) { probeRow = row; }
@@ -89,10 +89,10 @@ public class MissingDemo extends DemoClass {
         this.check(moved > (int64) 0,
             "a missing value is ROUTED, not ignored — predictions actually move");
 
-        Tensor<float64> asIs = MissingDemo.oneRow(x, probeRow, nf, false);
-        Tensor<float64> blanked = MissingDemo.oneRow(x, probeRow, nf, true);
-        float32[] prAsIs = GBDT.predict(m, asIs, (int64) 1, nf);
-        float32[] prBlank = GBDT.predict(m, blanked, (int64) 1, nf);
+        Tensor<float64> asIs #= MissingDemo.oneRow(x, probeRow, nf, false);
+        Tensor<float64> blanked #= MissingDemo.oneRow(x, probeRow, nf, true);
+        float32[] prAsIs #= GBDT.predict(m, asIs, (int64) 1, nf);
+        float32[] prBlank #= GBDT.predict(m, blanked, (int64) 1, nf);
         System.stdout.println("   listing " + probeRow + ": with lot_sqft -> "
             + (float64) prAsIs[0] + ", blanked -> " + (float64) prBlank[0]);
         this.check(!DemoClass.sameBits(prAsIs[0], prBlank[0]),

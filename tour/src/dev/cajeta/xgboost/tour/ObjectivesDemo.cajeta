@@ -37,8 +37,8 @@ public class ObjectivesDemo extends DemoClass {
     public void execute() {
         this.section("7. Objectives — regression, binary, and multiclass from one table");
 
-        Tensor<float64> x = Data.x();
-        float64[] price = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] price #= Data.y(x);
         int64 n = Data.rows();
         int64 nf = Data.features();
 
@@ -70,18 +70,18 @@ public class ObjectivesDemo extends DemoClass {
             "softmax: true class pushed up, per-row gradients sum to zero");
 
         // --- binary:logistic, trained ------------------------------------
-        float64[] expensive = Data.expensiveLabels(price);
+        float64[] expensive #= Data.expensiveLabels(price);
         Params bp = heap Params();
         bp.objective = Objective.LOGISTIC;
         bp.rounds = (int64) 12;
         bp.maxDepth = (int64) 4;
-        Model bm = GBDT.fit(x, expensive, n, nf, bp);
+        Model bm #= GBDT.fit(x, expensive, n, nf, bp);
         this.check(bm.numClass == (int64) 1,
             "binary:logistic is a single output group — one tree per round");
         this.check(bm.rounds == (int64) 12, "12 rounds -> 12 trees");
 
-        float32[] proba = GBDT.predictProba(bm, x, n, nf);
-        int64[] guess = GBDT.predictClass(bm, x, n, nf);
+        float32[] proba #= GBDT.predictProba(bm, x, n, nf);
+        int64[] guess #= GBDT.predictClass(bm, x, n, nf);
         boolean inRange = true;
         int64 correct = (int64) 0;
         int64 i = (int64) 0;
@@ -101,7 +101,7 @@ public class ObjectivesDemo extends DemoClass {
             "the trees separate expensive listings (accuracy > 95%)");
         // The link is monotone, so the class decision needs no exp at all:
         // margin > 0 is exactly probability > 0.5.
-        float32[] rawMargin = GBDT.predict(bm, x, n, nf);
+        float32[] rawMargin #= GBDT.predict(bm, x, n, nf);
         boolean agrees = true;
         i = (int64) 0;
         while (i < n) {
@@ -113,20 +113,20 @@ public class ObjectivesDemo extends DemoClass {
             "margin > 0 <=> proba > 0.5 — the decision is link-free");
 
         // --- multi:softmax, trained --------------------------------------
-        float64[] tier = Data.tierLabels(price);
+        float64[] tier #= Data.tierLabels(price);
         Params mp = heap Params();
         mp.objective = Objective.SOFTMAX;
         mp.numClass = Data.tiers();
         mp.rounds = (int64) 12;
         mp.maxDepth = (int64) 4;
-        Model mm2 = GBDT.fit(x, tier, n, nf, mp);
+        Model mm2 #= GBDT.fit(x, tier, n, nf, mp);
         this.check(mm2.numClass == Data.tiers(),
             "the model records its class count");
         this.check(mm2.rounds == (int64) 12 * Data.tiers(),
             "K groups: 12 rounds x 3 classes = 36 trees, round-major");
 
-        float32[] mproba = GBDT.predictProba(mm2, x, n, nf);
-        int64[] mguess = GBDT.predictClass(mm2, x, n, nf);
+        float32[] mproba #= GBDT.predictProba(mm2, x, n, nf);
+        int64[] mguess #= GBDT.predictClass(mm2, x, n, nf);
         boolean rowsSumToOne = true;
         int64 mcorrect = (int64) 0;
         i = (int64) 0;
@@ -152,8 +152,8 @@ public class ObjectivesDemo extends DemoClass {
 
         // Determinism holds for classification too — it is a property of the
         // engine, not of the objective.
-        Model again = GBDT.fit(x, tier, n, nf, mp);
-        float32[] mproba2 = GBDT.predictProba(again, x, n, nf);
+        Model again #= GBDT.fit(x, tier, n, nf, mp);
+        float32[] mproba2 #= GBDT.predictProba(again, x, n, nf);
         this.check(DemoClass.sameBitsAll(mproba, mproba2, n * Data.tiers()),
             "a refit reproduces the class probabilities bit-for-bit");
 
@@ -163,7 +163,7 @@ public class ObjectivesDemo extends DemoClass {
         bad.objective = Objective.SOFTMAX;
         boolean refused = false;
         try {
-            Model never = GBDT.fit(x, tier, n, nf, bad);
+            Model never #= GBDT.fit(x, tier, n, nf, bad);
         } catch (cajeta.error.RecoverableException e) {
             refused = true;
         }

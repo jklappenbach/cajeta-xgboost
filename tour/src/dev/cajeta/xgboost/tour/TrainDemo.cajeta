@@ -30,25 +30,25 @@ public class TrainDemo extends DemoClass {
 
     /** The tour's shared trained model — the other demos start here. */
     public static #Model fitted(Tensor<float64> x, float64[] y) {
-        Params p = TrainDemo.params();
+        Params p #= TrainDemo.params();
         return GBDT.fit(x, y, Data.rows(), Data.features(), p);
     }
 
     public void execute() {
         this.section("3. Training — one call, and the same bits every time");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
         int64 n = Data.rows();
         int64 nf = Data.features();
 
-        Model m1 = TrainDemo.fitted(x, y);
-        Model m2 = TrainDemo.fitted(x, y);
+        Model m1 #= TrainDemo.fitted(x, y);
+        Model m2 #= TrainDemo.fitted(x, y);
         this.check(m1.rounds == (int64) 8, "one tree per boosting round");
         this.check(m1.deterministic, "the model records the mode it was trained in");
 
-        float32[] p1 = GBDT.predict(m1, x, n, nf);
-        float32[] p2 = GBDT.predict(m2, x, n, nf);
+        float32[] p1 #= GBDT.predict(m1, x, n, nf);
+        float32[] p2 #= GBDT.predict(m2, x, n, nf);
         this.check(DemoClass.sameBitsAll(p1, p2, n),
             "two independent fits -> bit-identical predictions, all " + n + " rows");
 

@@ -43,8 +43,8 @@ public class ParamsDemo extends DemoClass {
         this.check(!p.usesStochasticSampling(),
             "the defaults are the deterministic config set");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
         int64 n = Data.rows();
         int64 nf = Data.features();
 
@@ -55,10 +55,10 @@ public class ParamsDemo extends DemoClass {
         reg.rounds = (int64) 8;
         reg.maxDepth = (int64) 4;
         reg.lambda = (float64) 5000.0;
-        Model plain = GBDT.fit(x, y, n, nf, p);
-        Model damped = GBDT.fit(x, y, n, nf, reg);
-        float32[] prPlain = GBDT.predict(plain, x, n, nf);
-        float32[] prDamped = GBDT.predict(damped, x, n, nf);
+        Model plain #= GBDT.fit(x, y, n, nf, p);
+        Model damped #= GBDT.fit(x, y, n, nf, reg);
+        float32[] prPlain #= GBDT.predict(plain, x, n, nf);
+        float32[] prDamped #= GBDT.predict(damped, x, n, nf);
         float64 spreadPlain = ParamsDemo.spread(prPlain, n);
         float64 spreadDamped = ParamsDemo.spread(prDamped, n);
         System.stdout.println("   prediction spread: lambda=1 -> " + spreadPlain
@@ -74,7 +74,7 @@ public class ParamsDemo extends DemoClass {
             "subsample < 1 leaves the deterministic set");
         boolean refused = false;
         try {
-            Model never = GBDT.fit(x, y, n, nf, sampled);
+            Model never #= GBDT.fit(x, y, n, nf, sampled);
         } catch (RecoverableException e) {
             refused = true;
             System.stdout.println("   fit() refused: " + e.message);
@@ -87,7 +87,7 @@ public class ParamsDemo extends DemoClass {
         // so it refuses rather than silently training on all rows.
         boolean hatchRefused = false;
         try {
-            Model never2 = GBDT.fitNonDeterministic(x, y, n, nf, sampled);
+            Model never2 #= GBDT.fitNonDeterministic(x, y, n, nf, sampled);
         } catch (RecoverableException e) {
             hatchRefused = true;
             System.stdout.println("   fitNonDeterministic(): " + e.message);
@@ -97,7 +97,7 @@ public class ParamsDemo extends DemoClass {
 
         // Without sampling, the hatch trains normally; the only difference
         // is the audit bit it stamps on the model.
-        Model labeled = GBDT.fitNonDeterministic(x, y, n, nf, p);
+        Model labeled #= GBDT.fitNonDeterministic(x, y, n, nf, p);
         this.check(plain.deterministic && !labeled.deterministic,
             "the mode is RECORDED on the model — auditable after the fact");
     }

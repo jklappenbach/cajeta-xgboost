@@ -27,10 +27,10 @@ public class ImportanceDemo extends DemoClass {
     public void execute() {
         this.section("6. Feature importance — get_score parity from a trained Model");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
         int64 nf = Data.features();
-        Model m = TrainDemo.fitted(x, y);
+        Model m #= TrainDemo.fitted(x, y);
 
         // --- the whole forest, one call ---------------------------------
         float64[] mWeight = heap float64[nf];
@@ -104,10 +104,10 @@ public class ImportanceDemo extends DemoClass {
         lcA[2] = (int32) 0 - (int32) 1;  lcA[3] = (int32) 0 - (int32) 1;
         lcA[4] = (int32) 0 - (int32) 1;
 
-        Tensor<int32> lc = ImportanceDemo.i32t(lcA, nodes);
-        Tensor<int32> si = ImportanceDemo.i32t(siA, nodes);
-        Tensor<float32> loss = ImportanceDemo.f32t(lossA, nodes);
-        Tensor<float64> hess = ImportanceDemo.f64t(hessA, nodes);
+        Tensor<int32> lc #= ImportanceDemo.i32t(lcA, nodes);
+        Tensor<int32> si #= ImportanceDemo.i32t(siA, nodes);
+        Tensor<float32> loss #= ImportanceDemo.f32t(lossA, nodes);
+        Tensor<float64> hess #= ImportanceDemo.f64t(hessA, nodes);
 
         float64[] w2 = heap float64[nf];
         float64[] gain = heap float64[nf];

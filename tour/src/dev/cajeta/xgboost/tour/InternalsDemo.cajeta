@@ -38,26 +38,26 @@ public class InternalsDemo extends DemoClass {
     public void execute() {
         this.section("9. Under the hood — one round through the fixed-point machinery");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
         int64 n = Data.rows();
         int64 nf = Data.features();
 
         // Prep (PrepDemo's path, compactly).
         int64 maxBin = (int64) 32;
         int64[] cutPtrsA = heap int64[nf + (int64) 1];
-        float32[] cuts = Sketch.cuts(x, n, nf, maxBin, cutPtrsA);
+        float32[] cuts #= Sketch.cuts(x, n, nf, maxBin, cutPtrsA);
         int64 total = cutPtrsA[nf];
         float64[] cutVals = heap float64[total];
         int64 c = (int64) 0;
         while (c < total) { cutVals[c] = (float64) cuts[c]; c = c + (int64) 1; }
         int64[] cvShape = heap int64[1]; cvShape[0] = total;
-        Tensor<float64> cutValuesT = Tensor.of<float64>(cutVals, cvShape);
+        Tensor<float64> cutValuesT #= Tensor.of<float64>(cutVals, cvShape);
         int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;
-        Tensor<int64> cutPtrsT = Tensor.of<int64>(cutPtrsA, cpShape);
-        int32[] binsA = Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
+        Tensor<int64> cutPtrsT #= Tensor.of<int64>(cutPtrsA, cpShape);
+        int32[] binsA #= Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
         int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
-        Tensor<int32> binsT = Tensor.of<int32>(binsA, bShape);
+        Tensor<int32> binsT #= Tensor.of<int32>(binsA, bShape);
 
         // (1) Round 1's gradients: every margin starts at the base score.
         float32 base = SquaredError.baseMargin((float64) 0.5);
@@ -72,14 +72,14 @@ public class InternalsDemo extends DemoClass {
 
         // (2) The node's float64 (G, H) reduction — what the root's weight
         //     and gain are computed from.
-        NodeStats root = NodeStats.over(grad, hess, n);
+        NodeStats root #= NodeStats.over(grad, hess, n);
         System.stdout.println("   root sums: G = " + root.g + ", H = " + root.h);
         this.check(root.h == (float64) n,
             "H over all rows == n (hessian 1 per row)");
 
         // (3) The quantiser: a per-round scale chosen from the gradient
         //     magnitudes, so the fixed-point histogram cannot overflow.
-        GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
+        GradientQuantiser q #= GradientQuantiser.build(grad, hess, n);
         int64 qg = q.fixedGrad(grad[0]);
         float64 backAgain = q.floatGrad(qg);
         System.stdout.println("   quantiser: grad[0] " + grad[0] + " -> fixed "
@@ -90,7 +90,7 @@ public class InternalsDemo extends DemoClass {
 
         // (4) The histogram: int64 buckets per global bin. Integer addition
         //     is associative, so ANY accumulation order gives these bits.
-        Histogram hist = Histogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
+        Histogram hist #= Histogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
         System.stdout.println("   histogram: " + hist.nbins + " bins over "
             + hist.nf + " features; totalH(fixed) = " + hist.totalH);
         this.check(hist.nbins == total && hist.nf == nf,
@@ -106,13 +106,13 @@ public class InternalsDemo extends DemoClass {
         int64[] leftRows = heap int64[half];
         int64 r2 = (int64) 0;
         while (r2 < half) { leftRows[r2] = r2; r2 = r2 + (int64) 1; }
-        Histogram leftH = Histogram.buildRows(binsT, cutPtrsT, q, grad, hess,
+        Histogram leftH #= Histogram.buildRows(binsT, cutPtrsT, q, grad, hess,
                                               leftRows, half);
-        Histogram rightH = Histogram.subtract(hist, leftH);
+        Histogram rightH #= Histogram.subtract(hist, leftH);
         int64[] rightRows = heap int64[n - half];
         int64 r3 = half;
         while (r3 < n) { rightRows[r3 - half] = r3; r3 = r3 + (int64) 1; }
-        Histogram rightDirect = Histogram.buildRows(binsT, cutPtrsT, q, grad, hess,
+        Histogram rightDirect #= Histogram.buildRows(binsT, cutPtrsT, q, grad, hess,
                                                     rightRows, n - half);
         boolean identical = true;
         int64 b = (int64) 0;
@@ -126,7 +126,7 @@ public class InternalsDemo extends DemoClass {
             "parent - left == right, bin for bin (the subtraction trick is EXACT)");
 
         // (6) The split search: the tiled argmax over every boundary.
-        Split best = SplitFinder.findBest(hist, cutPtrsT, cutValuesT, q,
+        Split best #= SplitFinder.findBest(hist, cutPtrsT, cutValuesT, q,
                                           (float64) 1.0, (float64) 0.0, (float64) 1.0);
         this.check(best.valid, "the root found a valid split");
         System.stdout.println("   best root split: " + Data.featureName(best.findex)
@@ -155,7 +155,7 @@ public class InternalsDemo extends DemoClass {
 
         // (8) A whole tree, standalone — the Tree object rather than the
         //     forest slice the booster keeps.
-        Tree t = TreeBuilder.growTree(binsT, cutPtrsT, cutValuesT, grad, hess, n,
+        Tree t #= TreeBuilder.growTree(binsT, cutPtrsT, cutValuesT, grad, hess, n,
                                       (int64) 3, (int64) 0,
                                       (float64) 1.0, (float64) 0.0, (float64) 0.0,
                                       (float64) 1.0, (float64) 0.3);
@@ -173,7 +173,7 @@ public class InternalsDemo extends DemoClass {
         //     prediction, which is exactly what GBDT.predict recomputes.
         int64 rounds = (int64) 4;
         float32[] history = heap float32[rounds * n];
-        Model m = Booster.train(binsT, cutPtrsT, cutValuesT, y, n, rounds,
+        Model m #= Booster.train(binsT, cutPtrsT, cutValuesT, y, n, rounds,
                                 (int64) 3, (int64) 0,
                                 (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
                                 (float64) 0.3, (float64) 0.5, Objective.SQUARED_ERROR, (int64) 1, history);

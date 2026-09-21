@@ -26,26 +26,26 @@ public class GpuHistogramDemo extends DemoClass {
     public void execute() {
         this.section("10. The GPU histogram — same bits, any backend");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
         int64 n = Data.rows();
         int64 nf = Data.features();
 
         // Prep + round-1 gradients (InternalsDemo's path, compactly).
         int64 maxBin = (int64) 32;
         int64[] cutPtrsA = heap int64[nf + (int64) 1];
-        float32[] cuts = Sketch.cuts(x, n, nf, maxBin, cutPtrsA);
+        float32[] cuts #= Sketch.cuts(x, n, nf, maxBin, cutPtrsA);
         int64 total = cutPtrsA[nf];
         float64[] cutVals = heap float64[total];
         int64 c = (int64) 0;
         while (c < total) { cutVals[c] = (float64) cuts[c]; c = c + (int64) 1; }
         int64[] cvShape = heap int64[1]; cvShape[0] = total;
-        Tensor<float64> cutValuesT = Tensor.of<float64>(cutVals, cvShape);
+        Tensor<float64> cutValuesT #= Tensor.of<float64>(cutVals, cvShape);
         int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;
-        Tensor<int64> cutPtrsT = Tensor.of<int64>(cutPtrsA, cpShape);
-        int32[] binsA = Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
+        Tensor<int64> cutPtrsT #= Tensor.of<int64>(cutPtrsA, cpShape);
+        int32[] binsA #= Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
         int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
-        Tensor<int32> binsT = Tensor.of<int32>(binsA, bShape);
+        Tensor<int32> binsT #= Tensor.of<int32>(binsA, bShape);
 
         float32 base = SquaredError.baseMargin((float64) 0.5);
         float32[] margin = heap float32[n];
@@ -54,11 +54,11 @@ public class GpuHistogramDemo extends DemoClass {
         float64[] grad = heap float64[n];
         float64[] hess = heap float64[n];
         SquaredError.gradHess(margin, y, n, grad, hess);
-        GradientQuantiser q = GradientQuantiser.build(grad, hess, n);
+        GradientQuantiser q #= GradientQuantiser.build(grad, hess, n);
 
         // The same root histogram, both ways.
-        Histogram cpu = Histogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
-        Histogram gpu = GpuHistogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
+        Histogram cpu #= Histogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
+        Histogram gpu #= GpuHistogram.buildAll(binsT, cutPtrsT, q, grad, hess, n);
 
         boolean same = cpu.nbins == gpu.nbins
             && cpu.totalG == gpu.totalG && cpu.totalH == gpu.totalH;
@@ -76,9 +76,9 @@ public class GpuHistogramDemo extends DemoClass {
         int64[] position = heap int64[n];
         int64 r = (int64) 0;
         while (r < n) { position[r] = (int64) 1 + r % (int64) 2; r = r + (int64) 1; }
-        Histogram cpuL = Histogram.buildPos(binsT, cutPtrsT, q, grad, hess,
+        Histogram cpuL #= Histogram.buildPos(binsT, cutPtrsT, q, grad, hess,
                                             position, (int64) 1, n);
-        Histogram gpuL = GpuHistogram.buildPos(binsT, cutPtrsT, q, grad, hess,
+        Histogram gpuL #= GpuHistogram.buildPos(binsT, cutPtrsT, q, grad, hess,
                                                position, (int64) 1, n);
         boolean sameL = cpuL.totalG == gpuL.totalG && cpuL.totalH == gpuL.totalH;
         b = (int64) 0;
@@ -96,9 +96,9 @@ public class GpuHistogramDemo extends DemoClass {
         // on every backend. It REQUIRES the capture: without it the honest
         // move is the CPU finder, not an approximate native division.
         if (SfuMath.hasRcpTable()) {
-            Split sc = SplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
+            Split sc #= SplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
                 (float64) 1.0, (float64) 0.0, (float64) 1.0);
-            Split sg = GpuSplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
+            Split sg #= GpuSplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
                 (float64) 1.0, (float64) 0.0, (float64) 1.0);
             boolean sameSplit = sc.valid == sg.valid
                 && sc.findex == sg.findex
@@ -123,7 +123,7 @@ public class GpuHistogramDemo extends DemoClass {
         // split's default direction) and the child counts are int64
         // atomicAdds, so no scatter order can change anything. Needs no
         // capture: the split here comes from the CPU finder.
-        Split sp = SplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
+        Split sp #= SplitFinder.findBest(cpu, cutPtrsT, cutValuesT, q,
             (float64) 1.0, (float64) 0.0, (float64) 1.0);
         int64 bp0 = cutPtrsT.flatGet(sp.findex);
         int64 localSplit = sp.splitGidx - bp0;
@@ -141,7 +141,7 @@ public class GpuHistogramDemo extends DemoClass {
             else        { posC[pr] = (int64) 2; cR = cR + (int64) 1; }
             pr = pr + (int64) 1;
         }
-        int64[] cnts = GpuPartition.partition(binsT, cutPtrsT, sp, posG,
+        int64[] cnts #= GpuPartition.partition(binsT, cutPtrsT, sp, posG,
                                               (int64) 0, (int64) 1, (int64) 2,
                                               nf, n);
         boolean samePart = cnts[0] == cL && cnts[1] == cR;

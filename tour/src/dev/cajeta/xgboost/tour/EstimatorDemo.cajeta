@@ -23,9 +23,9 @@ public class EstimatorDemo extends DemoClass {
     public void execute() {
         this.section("11. The estimator protocol — a dev.cajeta.ml Predictor");
 
-        Tensor<float64> x = Data.x();
-        float64[] y = Data.y(x);
-        Tensor<float64> yT = Data.yTensor(y);
+        Tensor<float64> x #= Data.x();
+        float64[] y #= Data.y(x);
+        Tensor<float64> yT #= Data.yTensor(y);
 
         Params p = heap Params();
         p.rounds = (int64) 8;
@@ -44,7 +44,7 @@ public class EstimatorDemo extends DemoClass {
         // The protocol's payoff: an ml utility drives the estimator without
         // knowing what a gradient-boosted tree is.
         KFold folds = heap KFold((int64) 4, false, (uint64) 0);
-        Tensor<float64> cv = Split.crossValScore(est, x, yT, folds);
+        Tensor<float64> cv #= Split.crossValScore(est, x, yT, folds);
         System.stdout.println("   4-fold CV R^2: " + cv.flatGet((int64) 0)
             + ", " + cv.flatGet((int64) 1)
             + ", " + cv.flatGet((int64) 2)
@@ -64,7 +64,7 @@ public class EstimatorDemo extends DemoClass {
         // Adopting the protocol costs nothing: the xgboost surfaces stay
         // reachable through model().
         Model inner = est.model();
-        int8[] bytes = ModelIO.serialize(inner);
+        int8[] bytes #= ModelIO.serialize(inner);
         this.check(inner.rounds == (int64) 8 && (int64) bytes.count() > (int64) 0,
             "model() hands back the Model — ModelIO and the tree walk still apply");
         this.check(inner.deterministic,
@@ -85,7 +85,7 @@ public class EstimatorDemo extends DemoClass {
             li = li + (int64) 1;
         }
         int64[] lsh = heap int64[1]; lsh[0] = n;
-        Tensor<float64> yc = Tensor.of<float64>(lab, lsh);
+        Tensor<float64> yc #= Tensor.of<float64>(lab, lsh);
         Params cp = heap Params();
         cp.rounds = (int64) 6;
         cp.maxDepth = (int64) 3;
@@ -96,7 +96,7 @@ public class EstimatorDemo extends DemoClass {
         this.check(acc > (float64) 0.9,
             "XGBClassifier: the same bit-exact booster behind the "
             + "ProbClassifier protocol — labels choose the objective");
-        Tensor<float64> proba = cls.predictProba(x);
+        Tensor<float64> proba #= cls.predictProba(x);
         float64 p0 = proba.flatGet((int64) 0) + proba.flatGet((int64) 1);
         float64 dd = p0 - (float64) 1.0;
         if (dd < (float64) 0.0) { dd = (float64) 0.0 - dd; }

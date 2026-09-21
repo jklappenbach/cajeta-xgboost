@@ -27,8 +27,8 @@ Params p = heap Params();          // XGBoost's defaults, verbatim
 p.rounds = (int64) 20;
 p.maxDepth = (int64) 5;
 
-Model m = GBDT.fit(x, y, n, nf, p);
-float32[] preds = GBDT.predict(m, x, n, nf);
+Model m #= GBDT.fit(x, y, n, nf, p);
+float32[] preds #= GBDT.predict(m, x, n, nf);
 ```
 
 `fit` runs raw matrix → quantile cuts → bins → boosting loop, all
@@ -110,9 +110,9 @@ Params p = heap Params();
 p.rounds = (int64) 8;
 XGBRegressor est = heap XGBRegressor(p);   // hyperparams snapshot at construction
 est.fit(x, y);                             // y is a (n,) float64 Tensor
-Tensor<float64> pred = est.predict(x);     // (n,) float64
+Tensor<float64> pred #= est.predict(x);    // (n,) float64
 float64 r2 = est.score(xTest, yTest);      // sklearn R² convention
-Tensor<float64> cv = Split.crossValScore(est, x, y, heap KFold((int64) 5, false, (uint64) 0));
+Tensor<float64> cv #= Split.crossValScore(est, x, y, heap KFold((int64) 5, false, (uint64) 0));
 ```
 
 Notes:
