@@ -10,6 +10,10 @@
 tmp/
 *.tmp
 
+# Per-target @Kernel access manifests, rewritten beside the extracted archive on
+# every run of the suite or the tour. Generated, never authored.
+/deps/
+
 # Golden fixtures are committed under tools/fixtures/ — do NOT ignore them.
 __pycache__/
 
