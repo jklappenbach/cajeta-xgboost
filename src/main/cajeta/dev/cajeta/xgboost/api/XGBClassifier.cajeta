@@ -45,7 +45,11 @@ public final class XGBClassifier implements ProbClassifier {
         own.maxBin = p.maxBin;
         own.subsample = p.subsample;
         own.colsampleByTree = p.colsampleByTree;
-        own.device = p.device;
+        if (p.device != null) {
+            own.device #= p.device.clone();
+        } else {
+            own.device = null;
+        }
         this.params #= own;
         this.nFeatures = (int64) 0;
         this.nClasses = (int64) 0;

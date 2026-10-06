@@ -61,8 +61,11 @@ env:
   # plain `=` (CAJETA_ERROR_OWNED_RESULT_NEEDS_TRANSFER). The old v0.17.4 pin is
   # why CI had never seen one of them.
   #
+  # v0.35.0 enforces the field-store rule on every dependency archive, so it
+  # moves together with ml 0.10.3 and unit 0.3.3.
+  #
   # Keep this in step with settings.toolchain.version in cajeta.json.
-  CAJETA_VERSION: v0.29.0
+  CAJETA_VERSION: v0.35.0
 
 jobs:
   build-test:
