@@ -65,9 +65,10 @@ env:
   # moves together with ml 0.10.3 and unit 0.3.3.
   # v0.36.0 adds the escaping-holder store check, so it moves with ml 0.10.4 and unit 0.3.4.
   # v0.38.0 moves with ml 0.10.5 and unit 0.3.5.
+  # v0.39.0 moves with ml 0.10.6 and unit 0.3.6.
   #
   # Keep this in step with settings.toolchain.version in cajeta.json.
-  CAJETA_VERSION: v0.38.0
+  CAJETA_VERSION: v0.39.0
 
 jobs:
   build-test:

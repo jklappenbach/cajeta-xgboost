@@ -17,7 +17,7 @@
 
     "details": {
         "name":               "dev.cajeta.xgboost",
-        "version":            "0.4.4",
+        "version":            "0.4.5",
         "description":        "cajeta-xgboost — bit-exact-to-NVIDIA GBDT training and prediction",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
@@ -47,13 +47,14 @@
         // moves together with ml 0.10.3 and unit 0.3.3.
         // v0.36.0 adds the escaping-holder store check, so it moves with ml 0.10.4 and unit 0.3.4.
         // v0.38.0 moves with ml 0.10.5 and unit 0.3.5.
+        // v0.39.0 moves with ml 0.10.6 and unit 0.3.6.
         //
         // Keep this in step with CAJETA_VERSION in .github/workflows/release.yml.
         // They are separate knobs: this one is documentation, the workflow's is
         // what CI installs, and a stale value here is a false claim about what
         // builds.
         "toolchain": {
-            "version": "0.38.0"
+            "version": "0.39.0"
         },
 
         // cajeta.math.sfu.SfuMath loads the probed SFU tables (RCP_TABLE / EX2_TABLE) and
@@ -74,7 +75,7 @@
         // CAJETA_ERROR_CAPTURED_BORROW_PARAM naming `x`, a symbol this library
         // does not contain. 0.10.2 stores it with `#=`.
         "dependencies": {
-            "dev.cajeta.ml": "0.10.5"
+            "dev.cajeta.ml": "0.10.6"
         },
 
         // The suite is driven by cajeta-unit's reflective @Test discovery;
@@ -87,7 +88,7 @@
         // CAJETA_ERROR_CAPTURED_BORROW_PARAM naming it. 0.3.0 takes the predicate
         // owned.
         "dev-dependencies": {
-            "dev.cajeta.unit": "0.3.5"
+            "dev.cajeta.unit": "0.3.6"
         },
 
         "repositories": [
