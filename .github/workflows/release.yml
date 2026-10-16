@@ -152,5 +152,3 @@ jobs:
         with:
           cja-path: ${{ steps.build.outputs.artifact }}
           version: ${{ steps.build.outputs.version }}
-          signing-key-pem: ${{ secrets.OLLA_SIGNING_KEY_PEM }}
-          signing-key-id: ${{ secrets.OLLA_SIGNING_KEY_ID }}
