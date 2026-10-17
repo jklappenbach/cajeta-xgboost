@@ -1,0 +1,118 @@
+package dev.cajeta.xgboost.selftest;
+
+import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
+import cajeta.time.Clock;
+import cajeta.xpu.KernelBuffer;
+import dev.cajeta.xgboost.gpu.GpuSplitFinder;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+
+/**
+ * int64-scan-verbs 6.1.2: the wave featureScan timed against the serial kernel
+ * at each fixture's root histogram, interleaved. Runs only with
+ * XGB_TIME_FEATURESCAN set, and prints the medians of launch plus sync.
+ */
+public class FeatureScanTiming {
+
+    public FeatureScanTiming() { return; }
+
+    static int64 median(int64[] xs, int64 n) {
+        int64 i = (int64) 1;
+        while (i < n) {
+            int64 v = xs[i];
+            int64 j = i - (int64) 1;
+            while (j >= (int64) 0 && xs[j] > v) {
+                xs[j + (int64) 1] = xs[j];
+                j = j - (int64) 1;
+            }
+            xs[j + (int64) 1] = v;
+            i = i + (int64) 1;
+        }
+        return xs[n / (int64) 2];
+    }
+
+    static void timeFixture(String fixture, int64 reps) {
+        FixtureLoader fx #= FixtureLoader.open(fixture);
+        float64[] g #= fx.gradRound((int32) 0);
+        float64[] h #= fx.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        Tensor<int64> cutPtrs #= fx.cutPtrs();
+        Histogram hist #= Histogram.buildAll(fx.bins(), cutPtrs, q, g, h, n);
+
+        KernelBuffer<int32> rcpTab = SfuMath.deviceRcpTable();
+        int64 nf = hist.nf;
+        int32[] cutOffH = heap int32[nf + (int64) 1];
+        int64 f = (int64) 0;
+        while (f <= nf) {
+            cutOffH[f] = (int32) cutPtrs.flatGet(f);
+            f = f + (int64) 1;
+        }
+        int64[] parentsH = heap int64[2];
+        parentsH[0] = hist.totalG;
+        parentsH[1] = hist.totalH;
+        KernelBuffer<int64> dHistG = heap KernelBuffer<int64>(hist.nbins);
+        KernelBuffer<int64> dHistH = heap KernelBuffer<int64>(hist.nbins);
+        KernelBuffer<int32> dCut = heap KernelBuffer<int32>(nf + (int64) 1);
+        KernelBuffer<int64> dParents = heap KernelBuffer<int64>(2);
+        dHistG.upload(hist.g);
+        dHistH.upload(hist.h);
+        dCut.upload(cutOffH);
+        dParents.upload(parentsH);
+        KernelBuffer<float32> oGain = heap KernelBuffer<float32>(nf);
+        KernelBuffer<int32> oMeta = heap KernelBuffer<int32>(nf * (int64) 3);
+        KernelBuffer<int64> oStats = heap KernelBuffer<int64>(nf * (int64) 4);
+
+        int64[] waveNs = heap int64[reps];
+        int64[] serialNs = heap int64[reps];
+        int64 r = (int64) -3;
+        while (r < reps) {
+            int64 tw = (int64) 0;
+            int64 ts = (int64) 0;
+            int32 k = (int32) 0;
+            while (k < (int32) 2) {
+                boolean waveTurn = (k == (int32) 0) == (r % (int64) 2 == (int64) 0);
+                int64 t0 = Clock.nanoTime();
+                if (waveTurn) {
+                    GpuSplitFinder.launchScan(oGain, oMeta, oStats, dHistG, dHistH, dCut,
+                        dParents, rcpTab, q.toFloatGrad, q.toFloatHess, (float64) 1.0,
+                        (float64) 0.0, (float64) 1.0, (uint32) nf);
+                    tw = Clock.nanoTime() - t0;
+                } else {
+                    SerialFeatureScan.run(oGain, oMeta, oStats, dHistG, dHistH, dCut,
+                        dParents, rcpTab, q.toFloatGrad, q.toFloatHess, (float64) 1.0,
+                        (float64) 0.0, (float64) 1.0, (uint32) nf);
+                    ts = Clock.nanoTime() - t0;
+                }
+                k = k + (int32) 1;
+            }
+            if (r >= (int64) 0) {
+                waveNs[r] = tw;
+                serialNs[r] = ts;
+            }
+            r = r + (int64) 1;
+        }
+        int64 mw = FeatureScanTiming.median(waveNs, reps);
+        int64 ms = FeatureScanTiming.median(serialNs, reps);
+        System.stdout.println("featureScan " + fixture + " nf " + nf + " nbins " + hist.nbins
+            + ": wave " + mw + " ns, serial " + ms + " ns, median of " + reps);
+        return;
+    }
+
+    @Test
+    public void waveAgainstSerialAtTheFixtureShapes() {
+        if (System.env.get("XGB_TIME_FEATURESCAN") == null) { return; }
+        if (!SfuMath.hasRcpTable()) { return; }
+        int64 reps = (int64) 31;
+        timeFixture("tiny_reg", reps);
+        timeFixture("tiny_reg_missing", reps);
+        timeFixture("tiny_binary", reps);
+        timeFixture("tiny_multi", reps);
+        timeFixture("large_reg", reps);
+        timeFixture("large_binary", reps);
+        timeFixture("large_multi", reps);
+        timeFixture("covertype", reps);
+        return;
+    }
+}

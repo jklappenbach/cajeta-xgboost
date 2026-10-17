@@ -3,6 +3,7 @@ package dev.cajeta.xgboost.selftest;
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import cajeta.math.sfu.SfuMath;
+import cajeta.xpu.KernelBuffer;
 import dev.cajeta.xgboost.gpu.GpuSplitFinder;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
@@ -102,6 +103,122 @@ public class GpuSplitFinderTest {
         Split gpu #= GpuSplitFinder.findBest(h1, f.cutPtrs(), f.cutValues(), q,
                                             (float64) 1.0, (float64) 0.0, (float64) 1.0);
         assertSameSplit(cpu, gpu);
+        return;
+    }
+
+    /** Runs the wave and the serial featureScan on `hist` and fails at the first record that differs. */
+    static void compareRecords(String label, Histogram hist, Tensor<int64> cutPtrs,
+                               GradientQuantiser q, float64 mcw) {
+        KernelBuffer<int32> rcpTab = SfuMath.deviceRcpTable();
+        int64 nf = hist.nf;
+        int32[] cutOffH = heap int32[nf + (int64) 1];
+        int64 f = (int64) 0;
+        while (f <= nf) {
+            cutOffH[f] = (int32) cutPtrs.flatGet(f);
+            f = f + (int64) 1;
+        }
+        int64[] parentsH = heap int64[2];
+        parentsH[0] = hist.totalG;
+        parentsH[1] = hist.totalH;
+        KernelBuffer<int64> dHistG = heap KernelBuffer<int64>(hist.nbins);
+        KernelBuffer<int64> dHistH = heap KernelBuffer<int64>(hist.nbins);
+        KernelBuffer<int32> dCut = heap KernelBuffer<int32>(nf + (int64) 1);
+        KernelBuffer<int64> dParents = heap KernelBuffer<int64>(2);
+        dHistG.upload(hist.g);
+        dHistH.upload(hist.h);
+        dCut.upload(cutOffH);
+        dParents.upload(parentsH);
+
+        KernelBuffer<float32> wGain = heap KernelBuffer<float32>(nf);
+        KernelBuffer<int32> wMeta = heap KernelBuffer<int32>(nf * (int64) 3);
+        KernelBuffer<int64> wStats = heap KernelBuffer<int64>(nf * (int64) 4);
+        KernelBuffer<float32> sGain = heap KernelBuffer<float32>(nf);
+        KernelBuffer<int32> sMeta = heap KernelBuffer<int32>(nf * (int64) 3);
+        KernelBuffer<int64> sStats = heap KernelBuffer<int64>(nf * (int64) 4);
+        GpuSplitFinder.launchScan(wGain, wMeta, wStats, dHistG, dHistH, dCut, dParents,
+            rcpTab, q.toFloatGrad, q.toFloatHess, (float64) 1.0, (float64) 0.0, mcw,
+            (uint32) nf);
+        SerialFeatureScan.run(sGain, sMeta, sStats, dHistG, dHistH, dCut, dParents,
+            rcpTab, q.toFloatGrad, q.toFloatHess, (float64) 1.0, (float64) 0.0, mcw,
+            (uint32) nf);
+
+        float32[] wg = heap float32[nf];
+        int32[] wm = heap int32[nf * (int64) 3];
+        int64[] ws = heap int64[nf * (int64) 4];
+        float32[] sg = heap float32[nf];
+        int32[] sm = heap int32[nf * (int64) 3];
+        int64[] ss = heap int64[nf * (int64) 4];
+        wGain.download(wg);
+        wMeta.download(wm);
+        wStats.download(ws);
+        sGain.download(sg);
+        sMeta.download(sm);
+        sStats.download(ss);
+
+        f = (int64) 0;
+        while (f < nf) {
+            boolean same = Cajeta.f32ToBits(wg[f]) == Cajeta.f32ToBits(sg[f]);
+            int64 k = (int64) 0;
+            while (k < (int64) 3) {
+                same = same && wm[f * (int64) 3 + k] == sm[f * (int64) 3 + k];
+                k = k + (int64) 1;
+            }
+            k = (int64) 0;
+            while (k < (int64) 4) {
+                same = same && ws[f * (int64) 4 + k] == ss[f * (int64) 4 + k];
+                k = k + (int64) 1;
+            }
+            if (!same) {
+                Assert.fail(label + ": feature " + f + " differs: wave gain "
+                    + wg[f] + " p " + wm[f * (int64) 3 + (int64) 2]
+                    + ", serial gain " + sg[f] + " p " + sm[f * (int64) 3 + (int64) 2]);
+            }
+            f = f + (int64) 1;
+        }
+        return;
+    }
+
+    static void compareRootRecords(String fixture, float64 mcw) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        Histogram hist #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        GpuSplitFinderTest.compareRecords(fixture, hist, f.cutPtrs(), q, mcw);
+        return;
+    }
+
+    // int64-scan-verbs 6.1.1 and 6.2.1: the wave featureScan's per-feature
+    // records equal the serial kernel's on every fixture, ties included.
+    @Test
+    public void waveRecordsEqualTheSerialKernelOnEveryFixture() {
+        if (!SfuMath.hasRcpTable()) { return; }
+        compareRootRecords("tiny_reg", (float64) 1.0);
+        compareRootRecords("tiny_reg_missing", (float64) 1.0);
+        compareRootRecords("tiny_reg_mcw10", (float64) 10.0);
+        compareRootRecords("tiny_binary", (float64) 1.0);
+        compareRootRecords("tiny_multi", (float64) 1.0);
+        compareRootRecords("large_reg", (float64) 1.0);
+        compareRootRecords("large_binary", (float64) 1.0);
+        compareRootRecords("large_multi", (float64) 1.0);
+        compareRootRecords("covertype", (float64) 1.0);
+
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_missing");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        int64[] position = heap int64[n];
+        int64 r = (int64) 0;
+        while (r < n) {
+            position[r] = (int64) 1 + r % (int64) 2;
+            r = r + (int64) 1;
+        }
+        Histogram h1 #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h,
+                                          position, (int64) 1, n);
+        GpuSplitFinderTest.compareRecords("tiny_reg_missing node 1", h1, f.cutPtrs(), q,
+                                          (float64) 1.0);
         return;
     }
 }
