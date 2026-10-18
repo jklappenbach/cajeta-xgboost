@@ -141,7 +141,7 @@ public class GpuBinnerTest {
         Model gpu #= GBDT.fit(x, label, n, nf, p);
         Assert.equals(GpuTrainState.processCellUploads() - cells0, (int64) 1);
         Assert.equals(GpuTrainState.processRowUploads() - rows0,
-                      (int64) 1 + p.rounds + DeviceStateTest.splitsOf(gpu));
+                      (int64) 1 + p.rounds + DeviceStateTest.perSplitRows(gpu));
         GrowDeviceTest.assertSameModel(cpu, gpu, p.rounds, n);
         return;
     }

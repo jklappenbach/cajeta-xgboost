@@ -105,6 +105,119 @@ public final class GpuPartition {
         }
     }
 
+    /** Words per split in a level's split table: begin, count, first block, findex, local split, default left. */
+    public static int64 tableWords() { return (int64) 6; }
+
+    /** Workgroup `j` marks each block of split `j`'s segment with `j` in `blockSplit`. */
+    @Kernel
+    public static void levelBlocks(KernelBuffer<int32> blockSplit, KernelBuffer<int32> tab) {
+        uint32 j = Workgroup.x();
+        uint32 first = (uint32) tab[j * 6 + 2];
+        uint32 blocks = ((uint32) tab[j * 6 + 1] + 255) / 256;
+        uint32 b = KernelThread.x();
+        while (b < blocks) {
+            blockSplit[first + b] = (int32) j;
+            b = b + Workgroup.dimX();
+        }
+    }
+
+    /** segmentCount over every split of a level: block `w` counts the left rows of its split's block. */
+    @Kernel
+    @Wave(width = 32)
+    public static void levelCount(KernelBuffer<int32> blockCounts, KernelBuffer<int32> bins,
+                                  KernelBuffer<int32> ridx, KernelBuffer<int32> tab,
+                                  KernelBuffer<int32> blockSplit, uint32 nf) {
+        uint32 w = Workgroup.x();
+        uint32 t = (uint32) blockSplit[w] * 6;
+        uint32 slot = (w - (uint32) tab[t + 2]) * Workgroup.dimX() + KernelThread.x();
+        int32 flag = GpuPartition.leftFlag(bins, ridx, (uint32) tab[t], slot, (uint32) tab[t + 1], nf,
+                                           tab[t + 3], tab[t + 4], tab[t + 5]);
+        int32 total = Workgroup.reduce(GroupOp.Add, flag);
+        if (KernelThread.x() == 0) { blockCounts[w] = total; }
+    }
+
+    /** Workgroup `j` turns split `j`'s block counts into block bases in place and stores its left count. */
+    @Kernel
+    @Wave(width = 32)
+    public static void levelBases(KernelBuffer<int32> blockCounts, KernelBuffer<int64> lefts,
+                                  KernelBuffer<int32> tab) {
+        uint32 t = Workgroup.x() * 6;
+        uint32 first = (uint32) tab[t + 2];
+        uint32 blocks = ((uint32) tab[t + 1] + 255) / 256;
+        int32 carry = 0;
+        uint32 k = 0;
+        while (k < blocks) {
+            uint32 b = k + KernelThread.x();
+            int32 v = 0;
+            if (b < blocks) { v = blockCounts[first + b]; }
+            int32 before = Workgroup.scan(GroupOp.Add, v);
+            int32 total = Workgroup.reduce(GroupOp.Add, v);
+            if (b < blocks) { blockCounts[first + b] = carry + before; }
+            carry = carry + total;
+            k = k + Workgroup.dimX();
+        }
+        if (KernelThread.x() == 0) { lefts[Workgroup.x()] = (int64) carry; }
+    }
+
+    /** segmentPlace over every split of a level, into `scratch`. */
+    @Kernel
+    @Wave(width = 32)
+    public static void levelPlace(KernelBuffer<int32> scratch, KernelBuffer<int32> blockBase,
+                                  KernelBuffer<int64> lefts, KernelBuffer<int32> bins,
+                                  KernelBuffer<int32> ridx, KernelBuffer<int32> tab,
+                                  KernelBuffer<int32> blockSplit, uint32 nf) {
+        uint32 w = Workgroup.x();
+        uint32 j = (uint32) blockSplit[w];
+        uint32 t = j * 6;
+        uint32 begin = (uint32) tab[t];
+        uint32 count = (uint32) tab[t + 1];
+        uint32 slot = (w - (uint32) tab[t + 2]) * Workgroup.dimX() + KernelThread.x();
+        int32 flag = GpuPartition.leftFlag(bins, ridx, begin, slot, count, nf,
+                                           tab[t + 3], tab[t + 4], tab[t + 5]);
+        int32 before = Workgroup.scan(GroupOp.Add, flag);
+        if (slot < count) {
+            uint32 leftBefore = (uint32) blockBase[w] + (uint32) before;
+            uint32 dst = (uint32) lefts[j] + (slot - leftBefore);
+            if (flag == 1) { dst = leftBefore; }
+            scratch[begin + dst] = ridx[begin + slot];
+        }
+    }
+
+    /** Copies every split's segment of a level from `scratch` back into `ridx`. */
+    @Kernel
+    public static void levelCopy(KernelBuffer<int32> ridx, KernelBuffer<int32> scratch,
+                                 KernelBuffer<int32> tab, KernelBuffer<int32> blockSplit) {
+        uint32 w = Workgroup.x();
+        uint32 t = (uint32) blockSplit[w] * 6;
+        uint32 slot = (w - (uint32) tab[t + 2]) * Workgroup.dimX() + KernelThread.x();
+        if (slot < (uint32) tab[t + 1]) {
+            uint32 i = (uint32) tab[t] + slot;
+            ridx[i] = scratch[i];
+        }
+    }
+
+    /**
+     * Splits every segment of the level's `splits`-row table `tab` stably, in five
+     * launches and no sync; `blocks` is the table's total of 256-row blocks. Each
+     * split's left count lands in `lefts`.
+     */
+    static void splitLevel(KernelBuffer<int32> ridx, KernelBuffer<int32> scratch,
+                           KernelBuffer<int32> blockCounts, KernelBuffer<int32> blockSplit,
+                           KernelBuffer<int64> lefts, KernelBuffer<int32> bins,
+                           KernelBuffer<int32> tab, int64 splits, int64 blocks, int64 nf) {
+        KernelStream st #= KernelStream.current();
+        uint32 us = (uint32) splits;
+        uint32 ub = (uint32) blocks;
+        uint32 unf = (uint32) nf;
+        levelBlocks.launch(st, grid: [us], block: [256])(blockSplit, tab);
+        levelCount.launch(st, grid: [ub], block: [256])(blockCounts, bins, ridx, tab, blockSplit, unf);
+        levelBases.launch(st, grid: [us], block: [256])(blockCounts, lefts, tab);
+        levelPlace.launch(st, grid: [ub], block: [256])
+            (scratch, blockCounts, lefts, bins, ridx, tab, blockSplit, unf);
+        levelCopy.launch(st, grid: [ub], block: [256])(ridx, scratch, tab, blockSplit);
+        return;
+    }
+
     /** Copies the segment `[begin, begin + count)` of `src` into `dst`. */
     @Kernel
     public static void copySegment(KernelBuffer<int32> dst, KernelBuffer<int32> src,

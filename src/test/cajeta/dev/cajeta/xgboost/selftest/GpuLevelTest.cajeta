@@ -1,0 +1,222 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuPartition;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.objective.Objective;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
+
+/** xgboost-device-training Unit 6: the level-batched partition and histogram build. */
+public class GpuLevelTest {
+
+    public GpuLevelTest() { return; }
+
+    /** Node `nid`'s device histogram equals the CPU histogram of its rows in `position`. */
+    static void assertHistogram(GpuTrainState st, FixtureLoader f, GradientQuantiser q,
+                                float64[] g, float64[] h, int64[] position, int64 nid, int64 n) {
+        Histogram cpu #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, nid, n);
+        int64[] hg = heap int64[cpu.nbins];
+        int64[] hh = heap int64[cpu.nbins];
+        int64[] tg = heap int64[nid + (int64) 1];
+        int64[] th = heap int64[nid + (int64) 1];
+        st.readNode(nid, hg, hh, tg, th, (int64) 0);
+        int64 b = (int64) 0;
+        while (b < cpu.nbins) {
+            Assert.equals(cpu.g[b], hg[b]);
+            Assert.equals(cpu.h[b], hh[b]);
+            b = b + (int64) 1;
+        }
+        Assert.equals(cpu.totalG, tg[nid]);
+        Assert.equals(cpu.totalH, th[nid]);
+        return;
+    }
+
+    /**
+     * Grows `fixture`'s round-0 tree to depth 4 by the CPU finder, partitioning and
+     * building each level's splits on the device in one batch, and checks each
+     * child's count, segment and histogram against the CPU builder's.
+     */
+    static void compareLevels(String fixture, int64 minSplits) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        int64 cap = (int64) 32;
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginTree(q, g, h, cap);
+        st.buildSlot((int64) 0);
+        int64[] position = heap int64[n];
+        int64[] level = heap int64[cap];
+        int64[] next = heap int64[cap];
+        int64[] cpuCounts = heap int64[cap];
+        int64 count = (int64) 1;
+        int64 nodeCount = (int64) 1;
+        int64 widest = (int64) 0;
+        int64 depth = (int64) 0;
+        while (depth < (int64) 4 && count > (int64) 0) {
+            int64 nc = (int64) 0;
+            int64 j = (int64) 0;
+            while (j < count) {
+                int64 nid = level[j];
+                Histogram hn #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, nid, n);
+                Split s #= SplitFinder.findBest(hn, f.cutPtrs(), f.cutValues(), q,
+                                               (float64) 1.0, (float64) 0.0, (float64) 1.0);
+                if (s.valid && s.leftH != (int64) 0 && s.rightH != (int64) 0) {
+                    int64 li = nodeCount;
+                    int64 ri = nodeCount + (int64) 1;
+                    nodeCount = nodeCount + (int64) 2;
+                    st.addSplit(s, f.cutPtrs(), nid, li, ri);
+                    int64[] c #= GpuPartitionTest.cpuPartition(f.bins(), f.cutPtrs(), s, position,
+                                                              nid, li, ri, nf, n);
+                    cpuCounts[nc] = c[0];
+                    cpuCounts[nc + (int64) 1] = c[1];
+                    next[nc] = li;
+                    next[nc + (int64) 1] = ri;
+                    nc = nc + (int64) 2;
+                } else {
+                    st.release(nid);
+                }
+                j = j + (int64) 1;
+            }
+            if (nc > (int64) 0) {
+                st.partitionLevel();
+                st.buildLevel();
+                int64[] got #= st.levelCounts();
+                int64 k = (int64) 0;
+                while (k < nc) {
+                    Assert.equals(cpuCounts[k], got[k]);
+                    GpuPartitionTest.assertSegment(st, position, next[k], n);
+                    GpuLevelTest.assertHistogram(st, f, q, g, h, position, next[k], n);
+                    k = k + (int64) 1;
+                }
+                if (nc / (int64) 2 > widest) { widest = nc / (int64) 2; }
+            }
+            j = (int64) 0;
+            while (j < nc) { level[j] = next[j]; j = j + (int64) 1; }
+            count = nc;
+            depth = depth + (int64) 1;
+        }
+        Assert.isTrue(widest >= minSplits);
+        return;
+    }
+
+    // 6.1.1: a level's splits partitioned and built at once give each child the CPU rows, ascending, and histogram.
+    @Test
+    public void aLevelOfSeveralSplitsMatchesTheCpuBuilder() {
+        GpuLevelTest.compareLevels("tiny_reg", (int64) 2);
+        GpuLevelTest.compareLevels("tiny_reg_missing", (int64) 2);
+        GpuLevelTest.compareLevels("large_reg", (int64) 8);
+        return;
+    }
+
+    /** A valid split on feature `findex` at global bin `gidx`. */
+    static #Split splitOn(int64 findex, int64 gidx, boolean defaultLeft) {
+        Split s = heap Split();
+        s.valid = true;
+        s.findex = findex;
+        s.splitGidx = gidx;
+        s.defaultLeft = defaultLeft;
+        return #s;
+    }
+
+    // 6.2.2: a split of more than 256 blocks carries its block bases across the scan's chunks.
+    @Test
+    public void segmentsOfMoreThan256BlocksKeepTheirOrder() {
+        int64 n = (int64) 600 * GpuPartition.segmentBlock() + (int64) 17;
+        int64 nf = (int64) 2;
+        int32[] b = heap int32[n * nf];
+        float64[] g = heap float64[n];
+        float64[] h = heap float64[n];
+        int64 r = (int64) 0;
+        while (r < n) {
+            b[r * nf] = (int32) ((r * (int64) 37 + r / (int64) 7) % (int64) 256);
+            if (r % (int64) 13 == (int64) 0) { b[r * nf] = (int32) -1; }
+            b[r * nf + (int64) 1] = (int32) ((r * (int64) 11 + r / (int64) 3) % (int64) 256);
+            g[r] = (float64) 1.0;
+            h[r] = (float64) 1.0;
+            r = r + (int64) 1;
+        }
+        int64[] shape = heap int64[2];
+        shape[0] = n;
+        shape[1] = nf;
+        Tensor<int32> bins #= Tensor.of<int32>(b, shape);
+        int64[] cpA = heap int64[3];
+        cpA[1] = (int64) 256;
+        cpA[2] = (int64) 512;
+        int64[] cpShape = heap int64[1];
+        cpShape[0] = (int64) 3;
+        Tensor<int64> cp #= Tensor.of<int64>(cpA, cpShape);
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        GpuTrainState st #= GpuTrainState.create(bins, cp, n);
+        st.beginTree(q, g, h, (int64) 8);
+        int64[] position = heap int64[n];
+
+        Split root #= GpuLevelTest.splitOn((int64) 0, (int64) 200, true);
+        st.addSplit(root, cp, (int64) 0, (int64) 1, (int64) 2);
+        int64[] c0 #= GpuPartitionTest.cpuPartition(bins, cp, root, position, (int64) 0, (int64) 1,
+                                                   (int64) 2, nf, n);
+        st.partitionLevel();
+        int64[] got0 #= st.levelCounts();
+        Assert.equals(c0[0], got0[0]);
+        Assert.equals(c0[1], got0[1]);
+        Assert.isTrue(got0[0] > (int64) 256 * GpuPartition.segmentBlock());
+        GpuPartitionTest.assertSegment(st, position, (int64) 1, n);
+        GpuPartitionTest.assertSegment(st, position, (int64) 2, n);
+
+        Split s1 #= GpuLevelTest.splitOn((int64) 1, (int64) 316, false);
+        Split s2 #= GpuLevelTest.splitOn((int64) 1, (int64) 456, true);
+        st.addSplit(s1, cp, (int64) 1, (int64) 3, (int64) 4);
+        st.addSplit(s2, cp, (int64) 2, (int64) 5, (int64) 6);
+        int64[] c1 #= GpuPartitionTest.cpuPartition(bins, cp, s1, position, (int64) 1, (int64) 3,
+                                                   (int64) 4, nf, n);
+        int64[] c2 #= GpuPartitionTest.cpuPartition(bins, cp, s2, position, (int64) 2, (int64) 5,
+                                                   (int64) 6, nf, n);
+        st.partitionLevel();
+        int64[] got1 #= st.levelCounts();
+        Assert.equals(c1[0], got1[0]);
+        Assert.equals(c1[1], got1[1]);
+        Assert.equals(c2[0], got1[2]);
+        Assert.equals(c2[1], got1[3]);
+        int64 nid = (int64) 3;
+        while (nid <= (int64) 6) {
+            GpuPartitionTest.assertSegment(st, position, nid, n);
+            nid = nid + (int64) 1;
+        }
+        return;
+    }
+
+    /** Synchronizations allowed per level of a tree. */
+    static int64 perLevel() { return (int64) 1; }
+
+    /** Synchronizations allowed per tree beyond the levels: the root, the slot pool's growth, the leaves. */
+    static int64 perTree() { return (int64) 8; }
+
+    // 6.1.2: a depth-6 tree on large_reg syncs at most perLevel * 6 + perTree times.
+    @Test
+    public void aDepthSixTreeSyncsAFewTimesPerLevel() {
+        if (!SfuMath.hasRcpTable()) { return; }
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        float32[] mh = heap float32[n];
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model m #= Booster.train(null, f.cutPtrs(), f.cutValues(), label,
+                                n, (int64) 1, (int64) 6, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                Objective.SQUARED_ERROR, (int64) 1, mh, true, st);
+        Assert.isTrue(m.nodeCount[0] > (int64) 64);
+        Assert.isTrue(st.maxTreeSyncs() <= GpuLevelTest.perLevel() * (int64) 6 + GpuLevelTest.perTree());
+        return;
+    }
+}

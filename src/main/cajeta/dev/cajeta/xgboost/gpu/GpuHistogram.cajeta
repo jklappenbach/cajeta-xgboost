@@ -114,10 +114,127 @@ public final class GpuHistogram {
     }
 
     /**
-     * Builds the histogram of the segment `[begin, begin + count)` of `ridx` into
-     * the slot of `hist` at word `base` (`2 * nbins + 2` words: G and H per bin,
-     * then the totals) and waits.
+     * Per split `j` of a level: the smaller child is built in the new slot of
+     * `slotTab` (parent base, new base, first cell) and the larger derived in the
+     * parent's; `plan` gets built base, begin, count and derived base, and `bases`
+     * the two children's slot bases, left then right.
      */
+    @Kernel
+    public static void childSlots(KernelBuffer<int64> plan, KernelBuffer<int64> bases,
+                                  KernelBuffer<int64> slotTab, KernelBuffer<int64> lefts,
+                                  KernelBuffer<int32> tab, uint32 splits) {
+        uint32 j = KernelThread.globalIdX();
+        if (j < splits) {
+            int64 left = lefts[j];
+            int64 count = (int64) tab[j * 6 + 1];
+            int64 begin = (int64) tab[j * 6];
+            int64 parent = slotTab[j * 3];
+            int64 fresh = slotTab[j * 3 + 1];
+            plan[j * 4] = fresh;
+            plan[j * 4 + 3] = parent;
+            if (left <= count - left) {
+                plan[j * 4 + 1] = begin;
+                plan[j * 4 + 2] = left;
+                bases[j * 2] = fresh;
+                bases[j * 2 + 1] = parent;
+            } else {
+                plan[j * 4 + 1] = begin + left;
+                plan[j * 4 + 2] = count - left;
+                bases[j * 2] = parent;
+                bases[j * 2 + 1] = fresh;
+            }
+        }
+    }
+
+    /** Zeroes the built slot of every split in `plan`. */
+    @Kernel
+    public static void zeroLevel(KernelBuffer<int64> store, KernelBuffer<int64> plan,
+                                 uint32 splits, uint32 words) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < splits * words) {
+            uint32 j = i / words;
+            store[(uint32) plan[j * 4] + (i - j * words)] = (int64) 0;
+        }
+    }
+
+    /**
+     * histSegment over every built child of a level: cell `i` belongs to the last
+     * split whose first cell in `slotTab` is at most `i`, and cells past the
+     * child's rows do nothing.
+     */
+    @Kernel
+    public static void histLevel(KernelBuffer<int64> hist, KernelBuffer<int32> bins,
+                                 KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
+                                 KernelBuffer<int32> ridx, KernelBuffer<int64> plan,
+                                 KernelBuffer<int64> slotTab, uint32 splits, uint32 cells,
+                                 uint32 nf, uint32 nbins) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < cells) {
+            uint32 lo = 0;
+            uint32 hi = splits;
+            while (hi - lo > 1) {
+                uint32 mid = (lo + hi) / 2;
+                if ((uint32) slotTab[mid * 3 + 2] <= i) { lo = mid; } else { hi = mid; }
+            }
+            uint32 local = i - (uint32) slotTab[lo * 3 + 2];
+            uint32 slot = local / nf;
+            if (slot < (uint32) plan[lo * 4 + 2]) {
+                uint32 f = local - slot * nf;
+                uint32 base = (uint32) plan[lo * 4];
+                uint32 r = (uint32) ridx[(uint32) plan[lo * 4 + 1] + slot];
+                if (f == 0) {
+                    hist.atomicAdd(base + nbins * 2, q[r * 2]);
+                    hist.atomicAdd(base + nbins * 2 + 1, q[r * 2 + 1]);
+                }
+                int32 b = bins[r * nf + f];
+                if (b >= 0) {
+                    uint32 gb = base + ((uint32) cutOff[f] + (uint32) b) * 2;
+                    hist.atomicAdd(gb, q[r * 2]);
+                    hist.atomicAdd(gb + 1, q[r * 2 + 1]);
+                }
+            }
+        }
+    }
+
+    /** The derived slot of every split in `plan`, in place: parent minus built. */
+    @Kernel
+    public static void subtractLevel(KernelBuffer<int64> store, KernelBuffer<int64> plan,
+                                     uint32 splits, uint32 words) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < splits * words) {
+            uint32 j = i / words;
+            uint32 k = i - j * words;
+            uint32 out = (uint32) plan[j * 4 + 3] + k;
+            store[out] = store[out] - store[(uint32) plan[j * 4] + k];
+        }
+    }
+
+    /**
+     * Builds the smaller child of each of a level's `splits` splits and derives the
+     * larger, in four launches and no sync; `cells` is the sum of each split's
+     * half-segment times `nf`.
+     */
+    static void buildLevel(KernelBuffer<int64> store, KernelBuffer<int32> bins,
+                           KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
+                           KernelBuffer<int32> ridx, KernelBuffer<int32> tab,
+                           KernelBuffer<int64> lefts, KernelBuffer<int64> slotTab,
+                           KernelBuffer<int64> plan, KernelBuffer<int64> bases,
+                           int64 splits, int64 cells, int64 nf, int64 nbins) {
+        KernelStream s #= KernelStream.current();
+        uint32 us = (uint32) splits;
+        uint32 words = (uint32) ((int64) 2 * nbins + (int64) 2);
+        uint32 all = us * words;
+        uint32 uc = (uint32) cells;
+        childSlots.launch(s, grid: [(us + 63) / 64], block: [64])(plan, bases, slotTab, lefts, tab, us);
+        zeroLevel.launch(s, grid: [(all + 255) / 256], block: [256])(store, plan, us, words);
+        if (uc > 0) {
+            histLevel.launch(s, grid: [(uc + 63) / 64], block: [64])
+                (store, bins, cutOff, q, ridx, plan, slotTab, us, uc, (uint32) nf, (uint32) nbins);
+        }
+        subtractLevel.launch(s, grid: [(all + 255) / 256], block: [256])(store, plan, us, words);
+        return;
+    }
+
     /** Derives the slot at `out` as the slot at `parent` minus the slot at `built`, and waits. */
     static void subtract(KernelBuffer<int64> store, int64 parent, int64 built, int64 out,
                          int64 words, TransferLog log) {
@@ -138,6 +255,11 @@ public final class GpuHistogram {
         return;
     }
 
+    /**
+     * Builds the histogram of the segment `[begin, begin + count)` of `ridx` into
+     * the slot of `hist` at word `base` (`2 * nbins + 2` words: G and H per bin,
+     * then the totals) and waits.
+     */
     static void buildSegment(KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
                              KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
                              KernelBuffer<int32> ridx, int64 begin, int64 count,

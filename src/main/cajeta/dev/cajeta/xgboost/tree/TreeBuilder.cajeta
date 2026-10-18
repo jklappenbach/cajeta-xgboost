@@ -132,6 +132,7 @@ public final class TreeBuilder {
      * The device form over a run's {@link GpuTrainState}: each node's rows are
      * a segment of the state's row index, so a split moves only that node's
      * rows and a histogram reads only them, and nothing is uploaded per node.
+     * With the SFU capture the tree grows a level at a time ({@link #growLevels}).
      * With `device` true and `st` null the per-node kernels serve instead,
      * which upload the rows and scan all of them for every node; that form is
      * kept to time the segment path against.
@@ -145,9 +146,12 @@ public final class TreeBuilder {
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
                              float32[] lossChg, float64[] sumHess,
                              int64[] leafOf, boolean device, GpuTrainState st) {
+        if (st != null && SfuMath.hasRcpTable()) {
+            return TreeBuilder.growLevels(st, bins, cutPtrs, cutValues, grad, hess, n, maxDepth,
+                                          maxLeaves, lambda, alpha, gamma, minChildWeight, eta,
+                                          si, sc, dl, lc, rc, bw, leaf, lossChg, sumHess, leafOf);
+        }
         boolean deviceQ = st != null && st.hasDeviceGradients();
-        boolean deviceEval = st != null && SfuMath.hasRcpTable();
-        int64[] oneNode = heap int64[1];
         GradientQuantiser q;
         if (deviceQ) { q #= st.quantise(); }
         else { q #= GradientQuantiser.build(grad, hess, n); }
@@ -198,31 +202,20 @@ public final class TreeBuilder {
             if (dumpDir != null) {
                 String dumpNid = System.env.get("XGBOOST_NODE_DUMP_NID");
                 if (dumpNid != null && dumpNid.equals(Int64.of(nid).toString())) {
-                    if (deviceEval) { st.readNode(nid, histG, histH, totGof, totHof, base); }
                     TreeBuilder.dumpNode(dumpDir, histG, histH, base, nbins, nf, cutPtrs, q,
                                          totGof[nid], totHof[nid], lambda, alpha, minChildWeight);
                 }
             }
 
-            int64 totG;
-            int64 totH;
+            // This node's histogram is already resident in the store.
+            Histogram hist #= Histogram.fromStore(histG, histH, base, nbins, nf, totGof[nid], totHof[nid]);
+            int64 totG = hist.totalG;
+            int64 totH = hist.totalH;
             Split s;
-            if (deviceEval) {
-                oneNode[0] = nid;
-                int64[] rec #= st.evaluate(oneNode, (int64) 1, q, lambda, alpha, minChildWeight);
-                totG = rec[GpuTrainState.recordTotalG()];
-                totH = rec[GpuTrainState.recordTotalH()];
-                s #= GpuTrainState.splitFrom(rec, (int64) 0, cutPtrs, cutValues);
+            if (device && SfuMath.hasRcpTable()) {
+                s #= GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
             } else {
-                // This node's histogram is already resident in the store.
-                Histogram hist #= Histogram.fromStore(histG, histH, base, nbins, nf, totGof[nid], totHof[nid]);
-                totG = hist.totalG;
-                totH = hist.totalH;
-                if (device && SfuMath.hasRcpTable()) {
-                    s #= GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
-                } else {
-                    s #= SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
-                }
+                s #= SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
             }
             // Raw node weight (XGBoost's base_weight — no shrinkage).
             float32 rawW = SplitFinder.leafWeight(q, totG, totH, lambda, alpha, minChildWeight);
@@ -302,9 +295,7 @@ public final class TreeBuilder {
                 if (cntL <= cntR) {
                     TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, li * nbins, li,
                                               bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
-                    if (deviceEval) {
-                        st.deriveSlot(nid, li, ri);
-                    } else if (st != null) {
+                    if (st != null) {
                         st.deriveNode(nid, li, ri, histG, histH, totGof, totHof, ri * nbins);
                     } else {
                         TreeBuilder.subtractInto(histG, histH, totGof, totHof,
@@ -313,9 +304,7 @@ public final class TreeBuilder {
                 } else {
                     TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, ri * nbins, ri,
                                               bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
-                    if (deviceEval) {
-                        st.deriveSlot(nid, ri, li);
-                    } else if (st != null) {
+                    if (st != null) {
                         st.deriveNode(nid, ri, li, histG, histH, totGof, totHof, li * nbins);
                     } else {
                         TreeBuilder.subtractInto(histG, histH, totGof, totHof,
@@ -342,6 +331,115 @@ public final class TreeBuilder {
         }
         int64 rr = (int64) 0;
         while (rr < n) { leafOf[rr] = position[rr]; rr = rr + (int64) 1; }
+        return nodeCount;
+    }
+
+    /**
+     * The device form a level at a time: each level is one evaluation, one
+     * partition and one histogram pass over all of its nodes, with one sync, and
+     * the host decides the splits from the level's records in node order.
+     */
+    static int64 growLevels(GpuTrainState st, Tensor<int32> bins, Tensor<int64> cutPtrs,
+                            Tensor<float64> cutValues, float64[] grad, float64[] hess, int64 n,
+                            int64 maxDepth, int64 maxLeaves,
+                            float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
+                            float64 eta,
+                            int64[] si, float32[] sc, boolean[] dl,
+                            int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
+                            float32[] lossChg, float64[] sumHess, int64[] leafOf) {
+        GradientQuantiser q;
+        if (st.hasDeviceGradients()) { q #= st.quantise(); }
+        else { q #= GradientQuantiser.build(grad, hess, n); }
+        int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
+        int64 nbins = cutPtrs.flatGet(nf);
+        int64 cap = TreeBuilder.capacity(maxDepth);
+        int64 i = (int64) 0;
+        while (i < cap) { lc[i] = (int64) -1; rc[i] = (int64) -1; si[i] = (int64) -1;
+                          leaf[i] = true; i = i + (int64) 1; }
+        if (st.hasDeviceGradients()) { st.beginTree(cap); }
+        else { st.beginTree(q, grad, hess, cap); }
+        st.buildSlot((int64) 0);
+
+        String dumpDir = System.env.get("XGBOOST_NODE_DUMP");
+        String dumpNid = System.env.get("XGBOOST_NODE_DUMP_NID");
+
+        int64[] level = heap int64[cap];
+        int64[] next = heap int64[cap];
+        int64 count = (int64) 1;
+        level[0] = (int64) 0;
+        int64 nodeCount = (int64) 1;
+        int64 numLeaves = (int64) 1;
+        int64 depth = (int64) 0;
+        while (count > (int64) 0) {
+            int64[] rec #= st.evaluate(level, count, q, lambda, alpha, minChildWeight);
+            int64 nc = (int64) 0;
+            int64 j = (int64) 0;
+            while (j < count) {
+                int64 nid = level[j];
+                int64 r = j * GpuSplitFinder.recordWords();
+                int64 totG = rec[r + GpuTrainState.recordTotalG()];
+                int64 totH = rec[r + GpuTrainState.recordTotalH()];
+                if (dumpDir != null && dumpNid != null && dumpNid.equals(Int64.of(nid).toString())) {
+                    int64[] hg = heap int64[nbins];
+                    int64[] hh = heap int64[nbins];
+                    int64[] tg = heap int64[nid + (int64) 1];
+                    int64[] th = heap int64[nid + (int64) 1];
+                    st.readNode(nid, hg, hh, tg, th, (int64) 0);
+                    TreeBuilder.dumpNode(dumpDir, hg, hh, (int64) 0, nbins, nf, cutPtrs, q,
+                                         totG, totH, lambda, alpha, minChildWeight);
+                }
+                Split s #= GpuTrainState.splitFrom(rec, j, cutPtrs, cutValues);
+                float32 rawW = SplitFinder.leafWeight(q, totG, totH, lambda, alpha, minChildWeight);
+                sumHess[nid] = q.floatHess(totH);
+                boolean canSplit = false;
+                float32 splitLoss = (float32) 0.0;
+                if (s.valid) {
+                    float32 parentGain = SplitFinder.calcGain(q, totG, totH,
+                                                              lambda, alpha, minChildWeight);
+                    splitLoss = s.gain - parentGain;
+                    boolean hessOk = s.leftH != (int64) 0 && s.rightH != (int64) 0;
+                    boolean leavesOk = maxLeaves <= (int64) 0 || numLeaves < maxLeaves;
+                    canSplit = splitLoss > TreeBuilder.kRtEps()
+                            && hessOk
+                            && splitLoss >= (float32) gamma
+                            && depth < maxDepth
+                            && leavesOk;
+                }
+                if (canSplit) {
+                    numLeaves = numLeaves + (int64) 1;
+                    int64 li = nodeCount;
+                    int64 ri = nodeCount + (int64) 1;
+                    nodeCount = nodeCount + (int64) 2;
+                    leaf[nid] = false;
+                    bw[nid] = rawW;
+                    lossChg[nid] = splitLoss;
+                    si[nid] = s.findex;
+                    sc[nid] = s.fvalue;
+                    dl[nid] = s.defaultLeft;
+                    lc[nid] = li;
+                    rc[nid] = ri;
+                    st.addSplit(s, cutPtrs, nid, li, ri);
+                    next[nc] = li;
+                    next[nc + (int64) 1] = ri;
+                    nc = nc + (int64) 2;
+                } else {
+                    leaf[nid] = true;
+                    bw[nid] = (float32) (rawW * (float32) eta);
+                    sc[nid] = bw[nid];
+                    st.release(nid);
+                }
+                j = j + (int64) 1;
+            }
+            if (nc > (int64) 0) {
+                st.partitionLevel();
+                st.buildLevel();
+            }
+            j = (int64) 0;
+            while (j < nc) { level[j] = next[j]; j = j + (int64) 1; }
+            count = nc;
+            depth = depth + (int64) 1;
+        }
+        st.leafOf(leafOf, leaf, nodeCount);
         return nodeCount;
     }
 
@@ -412,10 +510,6 @@ public final class TreeBuilder {
                               Tensor<int32> bins, Tensor<int64> cutPtrs, GradientQuantiser q,
                               float64[] grad, float64[] hess, int64[] position, int64 nf, int64 n,
                               int64 nbins) {
-        if (st != null && SfuMath.hasRcpTable()) {
-            st.buildSlot(nid);
-            return;
-        }
         if (st != null) {
             st.buildNode(nid, histG, histH, totGof, totHof, base);
             return;

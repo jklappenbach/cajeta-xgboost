@@ -2,6 +2,7 @@ package dev.cajeta.xgboost.gpu;
 
 import cajeta.math.Tensor;
 import cajeta.xpu.KernelBuffer;
+import cajeta.xpu.KernelStream;
 import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Split;
@@ -38,7 +39,25 @@ public final class GpuTrainState {
     int64 evalCap;
     KernelBuffer<int64> qWords;
     KernelBuffer<float64> qSums;
+    KernelBuffer<int32> levelTab;
+    KernelBuffer<int32> blockSplit;
+    KernelBuffer<int64> lefts;
+    KernelBuffer<int64> slotTab;
+    KernelBuffer<int64> plan;
     TransferLog log;
+    int32[] tabH;
+    int64[] slotTabH;
+    int64[] leftsH;
+    int64[] lvParent;
+    int64[] lvLeft;
+    int64[] lvRight;
+    int64[] lvFresh;
+    int64[] lvParentSlot;
+    int64 lvCount;
+    int64 lvBlocks;
+    int64 lvCells;
+    boolean lvPending;
+    boolean lvBuilt;
     int32[] blockH;
     int64[] histWords;
     int64 slotWords;
@@ -202,6 +221,12 @@ public final class GpuTrainState {
             this.segCount = heap int64[cap];
         }
         if ((int64) this.slotOf.count() < cap) { this.slotOf = heap int64[cap]; }
+        if (this.lvParent == null || (int64) this.lvParent.count() < cap) { this.sizeLevel(cap); }
+        this.lvCount = (int64) 0;
+        this.lvBlocks = (int64) 0;
+        this.lvCells = (int64) 0;
+        this.lvPending = false;
+        this.lvBuilt = false;
         int64 i = (int64) 0;
         while (i < (int64) this.slotOf.count()) { this.slotOf[i] = (int64) -1; i = i + (int64) 1; }
         i = (int64) 0;
@@ -212,9 +237,35 @@ public final class GpuTrainState {
         this.segCount[0] = this.n;
     }
 
-    /** Node `nid`'s slot, taking a free one (and doubling the store when none is) if it has none. */
+    /** Sizes the level tables for up to `cap` splits of a level. */
+    void sizeLevel(int64 cap) {
+        int64 blocks = (this.n + GpuPartition.segmentBlock() - (int64) 1) / GpuPartition.segmentBlock();
+        this.blockCounts = heap KernelBuffer<int32>(blocks + cap);
+        this.blockSplit = heap KernelBuffer<int32>(blocks + cap);
+        this.levelTab = heap KernelBuffer<int32>(cap * GpuPartition.tableWords());
+        this.lefts = heap KernelBuffer<int64>(cap);
+        this.slotTab = heap KernelBuffer<int64>(cap * (int64) 3);
+        this.plan = heap KernelBuffer<int64>(cap * (int64) 4);
+        this.tabH = heap int32[cap * GpuPartition.tableWords()];
+        this.slotTabH = heap int64[cap * (int64) 3];
+        this.leftsH = heap int64[cap];
+        this.lvParent = heap int64[cap];
+        this.lvLeft = heap int64[cap];
+        this.lvRight = heap int64[cap];
+        this.lvFresh = heap int64[cap];
+        this.lvParentSlot = heap int64[cap];
+    }
+
+    /** Node `nid`'s slot, taking a free one if it has none. */
     int64 slotFor(int64 nid) {
         if (this.slotOf[nid] >= (int64) 0) { return this.slotOf[nid]; }
+        int64 slot = this.takeSlot();
+        this.slotOf[nid] = slot;
+        return slot;
+    }
+
+    /** A free slot, doubling the store when none is. */
+    int64 takeSlot() {
         if (this.freeTop == (int64) 0) {
             int64 cap2 = this.slotCap * (int64) 2;
             KernelBuffer<int64> grown = heap KernelBuffer<int64>(cap2 * this.slotWords);
@@ -229,7 +280,6 @@ public final class GpuTrainState {
         }
         this.freeTop = this.freeTop - (int64) 1;
         int64 slot = this.freeSlots[this.freeTop];
-        this.slotOf[nid] = slot;
         this.slotsLive = this.slotsLive + (int64) 1;
         if (this.slotsLive > this.slotsPeak) { this.slotsPeak = this.slotsLive; }
         return slot;
@@ -320,6 +370,32 @@ public final class GpuTrainState {
      */
     public #int64[] evaluate(int64[] nids, int64 count, GradientQuantiser q,
                              float64 lambda, float64 alpha, float64 minChildWeight) {
+        boolean onDevice = this.lvPending && this.lvBuilt && this.childrenAre(nids, count);
+        if (this.lvPending && !onDevice) { this.waitLevel(); }
+        this.ensureEval(count);
+        if (!onDevice) {
+            int64[] bases = heap int64[count];
+            int64 j = (int64) 0;
+            while (j < count) {
+                bases[j] = this.slotOf[nids[j]] * this.slotWords;
+                j = j + (int64) 1;
+            }
+            this.slotBase.upload(bases, count);
+            this.log.upSmalls((int64) 1);
+        }
+        GpuSplitFinder.evaluateLevel(this.evalRec, this.evalGain, this.evalMeta, this.evalStats,
+                                     this.store, this.slotBase, this.cutPtr, q,
+                                     lambda, alpha, minChildWeight, this.nf, count, this.nbins,
+                                     this.log);
+        int64[] rec = heap int64[count * GpuSplitFinder.recordWords()];
+        this.evalRec.download(rec, count * GpuSplitFinder.recordWords());
+        this.log.downSmalls((int64) 1);
+        if (this.lvPending) { this.finishLevel(); }
+        return #rec;
+    }
+
+    /** Sizes the evaluation buffers for `count` nodes. */
+    void ensureEval(int64 count) {
         if (count > this.evalCap) {
             int64 c = count;
             if (c < (int64) 8) { c = (int64) 8; }
@@ -330,22 +406,18 @@ public final class GpuTrainState {
             this.evalRec = heap KernelBuffer<int64>(c * GpuSplitFinder.recordWords());
             this.evalCap = c;
         }
-        int64[] bases = heap int64[count];
+    }
+
+    /** True when `nids` are the queued level's children, left then right per split. */
+    boolean childrenAre(int64[] nids, int64 count) {
+        if (count != (int64) 2 * this.lvCount) { return false; }
         int64 j = (int64) 0;
-        while (j < count) {
-            bases[j] = this.slotOf[nids[j]] * this.slotWords;
+        while (j < this.lvCount) {
+            if (nids[(int64) 2 * j] != this.lvLeft[j]) { return false; }
+            if (nids[(int64) 2 * j + (int64) 1] != this.lvRight[j]) { return false; }
             j = j + (int64) 1;
         }
-        this.slotBase.upload(bases, count);
-        this.log.upSmalls((int64) 1);
-        GpuSplitFinder.evaluateLevel(this.evalRec, this.evalGain, this.evalMeta, this.evalStats,
-                                     this.store, this.slotBase, this.cutPtr, q,
-                                     lambda, alpha, minChildWeight, this.nf, count, this.nbins,
-                                     this.log);
-        int64[] rec = heap int64[count * GpuSplitFinder.recordWords()];
-        this.evalRec.download(rec, count * GpuSplitFinder.recordWords());
-        this.log.downSmalls((int64) 1);
-        return #rec;
+        return true;
     }
 
     /** Record `j` of `rec` as a {@link Split}, its threshold read from `cutValues`. */
@@ -386,8 +458,122 @@ public final class GpuTrainState {
         return #counts;
     }
 
+    /** Queues the split of node `nid` into `li` and `ri` by `s` for the level's batched partition. */
+    public void addSplit(Split s, Tensor<int64> cutPtrs, int64 nid, int64 li, int64 ri) {
+        int64 j = this.lvCount;
+        int64 t = j * GpuPartition.tableWords();
+        int64 count = this.segCount[nid];
+        this.tabH[t] = (int32) this.segBegin[nid];
+        this.tabH[t + (int64) 1] = (int32) count;
+        this.tabH[t + (int64) 2] = (int32) this.lvBlocks;
+        this.tabH[t + (int64) 3] = (int32) s.findex;
+        this.tabH[t + (int64) 4] = (int32) (s.splitGidx - cutPtrs.flatGet(s.findex));
+        this.tabH[t + (int64) 5] = s.defaultLeft ? (int32) 1 : (int32) 0;
+        this.slotTabH[j * (int64) 3 + (int64) 2] = this.lvCells;
+        this.lvBlocks = this.lvBlocks
+            + (count + GpuPartition.segmentBlock() - (int64) 1) / GpuPartition.segmentBlock();
+        this.lvCells = this.lvCells + (count / (int64) 2) * this.nf;
+        this.lvParent[j] = nid;
+        this.lvLeft[j] = li;
+        this.lvRight[j] = ri;
+        this.lvCount = j + (int64) 1;
+    }
+
+    /** Partitions every queued split's segment stably, with no sync. */
+    public void partitionLevel() {
+        if (this.lvCount == (int64) 0) { return; }
+        this.levelTab.upload(this.tabH, this.lvCount * GpuPartition.tableWords());
+        this.log.upSmalls((int64) 1);
+        GpuPartition.splitLevel(this.ridx, this.scratch, this.blockCounts, this.blockSplit, this.lefts,
+                                this.bins, this.levelTab, this.lvCount, this.lvBlocks, this.nf);
+        this.lvPending = true;
+    }
+
+    /**
+     * Builds each partitioned split's smaller child into a new slot and derives the
+     * larger in its parent's slot, with no sync; the children's slot bases are left
+     * on the device for the next {@link #evaluate}.
+     */
+    public void buildLevel() {
+        if (!this.lvPending) { return; }
+        this.ensureEval((int64) 2 * this.lvCount);
+        int64 j = (int64) 0;
+        while (j < this.lvCount) {
+            int64 parentSlot = this.slotOf[this.lvParent[j]];
+            int64 fresh = this.takeSlot();
+            this.lvParentSlot[j] = parentSlot;
+            this.lvFresh[j] = fresh;
+            this.slotOf[this.lvParent[j]] = (int64) -1;
+            this.slotTabH[j * (int64) 3] = parentSlot * this.slotWords;
+            this.slotTabH[j * (int64) 3 + (int64) 1] = fresh * this.slotWords;
+            j = j + (int64) 1;
+        }
+        this.slotTab.upload(this.slotTabH, this.lvCount * (int64) 3);
+        this.log.upSmalls((int64) 1);
+        GpuHistogram.buildLevel(this.store, this.bins, this.cutOff, this.q, this.ridx, this.levelTab,
+                                this.lefts, this.slotTab, this.plan, this.slotBase,
+                                this.lvCount, this.lvCells, this.nf, this.nbins);
+        this.lvBuilt = true;
+    }
+
+    /** Waits for the queued level and answers its `[cntL, cntR]` per split. */
+    public #int64[] levelCounts() {
+        int64 k = this.lvCount;
+        this.waitLevel();
+        int64[] counts = heap int64[(int64) 2 * k];
+        int64 j = (int64) 0;
+        while (j < k) {
+            counts[(int64) 2 * j] = this.segCount[this.lvLeft[j]];
+            counts[(int64) 2 * j + (int64) 1] = this.segCount[this.lvRight[j]];
+            j = j + (int64) 1;
+        }
+        return #counts;
+    }
+
+    /** Waits for a queued level and applies it. */
+    void waitLevel() {
+        if (!this.lvPending) { return; }
+        this.log.sync(KernelStream.current());
+        this.finishLevel();
+    }
+
+    /** Reads a finished level's left counts and sets its children's segments and slots. */
+    void finishLevel() {
+        this.lefts.download(this.leftsH, this.lvCount);
+        this.log.downSmalls((int64) 1);
+        int64 j = (int64) 0;
+        while (j < this.lvCount) {
+            int64 parent = this.lvParent[j];
+            int64 begin = this.segBegin[parent];
+            int64 count = this.segCount[parent];
+            int64 left = this.leftsH[j];
+            int64 li = this.lvLeft[j];
+            int64 ri = this.lvRight[j];
+            this.segBegin[li] = begin;
+            this.segCount[li] = left;
+            this.segBegin[ri] = begin + left;
+            this.segCount[ri] = count - left;
+            if (this.lvBuilt) {
+                if (left <= count - left) {
+                    this.slotOf[li] = this.lvFresh[j];
+                    this.slotOf[ri] = this.lvParentSlot[j];
+                } else {
+                    this.slotOf[li] = this.lvParentSlot[j];
+                    this.slotOf[ri] = this.lvFresh[j];
+                }
+            }
+            j = j + (int64) 1;
+        }
+        this.lvCount = (int64) 0;
+        this.lvBlocks = (int64) 0;
+        this.lvCells = (int64) 0;
+        this.lvPending = false;
+        this.lvBuilt = false;
+    }
+
     /** Each row's leaf, read once from the leaves' segments. */
     public void leafOf(int64[] leafOf, boolean[] leaf, int64 nodeCount) {
+        this.waitLevel();
         int32[] rows = heap int32[this.n];
         this.ridx.download(rows);
         this.log.downRow();

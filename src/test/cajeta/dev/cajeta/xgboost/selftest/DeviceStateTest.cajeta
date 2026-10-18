@@ -2,6 +2,7 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.gpu.GpuTrainState;
@@ -21,6 +22,12 @@ public class DeviceStateTest {
             t = t + (int64) 1;
         }
         return s;
+    }
+
+    /** The row transfers per split each way: none a level at a time, one per split without the SFU capture. */
+    static int64 perSplitRows(Model m) {
+        if (SfuMath.hasRcpTable()) { return (int64) 0; }
+        return DeviceStateTest.splitsOf(m);
     }
 
     /** A device fit over the lent state `st`, depth 4, eta 0.3. */
@@ -43,13 +50,13 @@ public class DeviceStateTest {
         GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
         Model m #= DeviceStateTest.fitOn(st, f, obj, K, rounds);
         int64 trees = rounds * K;
-        int64 splits = DeviceStateTest.splitsOf(m);
+        int64 splits = DeviceStateTest.perSplitRows(m);
         Assert.equals(st.trees(), trees);
         Assert.equals(st.cellUploads(), (int64) 1);
         Assert.equals(st.cellDownloads(), (int64) 0);
-        // Labels and base margins once; per later round the margins; per split the block bases.
+        // Labels and base margins once; per later round the margins.
         Assert.equals(st.rowUploads(), (int64) 2 + (rounds - (int64) 1) + splits);
-        // Per tree the leaf rows; per split the block counts.
+        // Per tree the leaf rows.
         Assert.equals(st.rowDownloads(), trees + splits);
         Assert.isTrue(st.smallUploads() >= (int64) 1);
         Assert.isTrue(st.syncs() >= trees);
