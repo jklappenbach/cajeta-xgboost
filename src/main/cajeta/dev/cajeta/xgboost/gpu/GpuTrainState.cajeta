@@ -4,7 +4,6 @@ import cajeta.math.Tensor;
 import cajeta.xpu.KernelBuffer;
 import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
-import dev.cajeta.xgboost.tree.Histogram;
 import dev.cajeta.xgboost.tree.Split;
 
 /**
@@ -30,6 +29,13 @@ public final class GpuTrainState {
     KernelBuffer<float32> margins;
     KernelBuffer<float32> gradG;
     KernelBuffer<float32> gradH;
+    KernelBuffer<int32> cutPtr;
+    KernelBuffer<int64> slotBase;
+    KernelBuffer<float32> evalGain;
+    KernelBuffer<int32> evalMeta;
+    KernelBuffer<int64> evalStats;
+    KernelBuffer<int64> evalRec;
+    int64 evalCap;
     KernelBuffer<int64> qWords;
     KernelBuffer<float64> qSums;
     TransferLog log;
@@ -83,7 +89,12 @@ public final class GpuTrainState {
         this.qWords = heap KernelBuffer<int64>((int64) 8 * GpuQuantiser.words() + (int64) 1);
         this.qSums = heap KernelBuffer<float64>((int64) 4);
         this.cutOff.upload(cutH);
-        this.log.upSmalls((int64) 1);
+        int32[] ptrH = heap int32[this.nf + (int64) 1];
+        f = (int64) 0;
+        while (f <= this.nf) { ptrH[f] = (int32) cutPtrs.flatGet(f); f = f + (int64) 1; }
+        this.cutPtr = heap KernelBuffer<int32>(this.nf + (int64) 1);
+        this.cutPtr.upload(ptrH);
+        this.log.upSmalls((int64) 2);
     }
 
     /** A run's device state over `n` rows of `bins`; the bin matrix is uploaded here, once. */
@@ -253,14 +264,34 @@ public final class GpuTrainState {
         totHof[nid] = this.histWords[this.nbins * (int64) 2 + (int64) 1];
     }
 
-    /** Node `nid`'s histogram, built into its slot from its segment, then into the host store slice at `base`. */
-    public void buildNode(int64 nid, int64[] histG, int64[] histH,
-                          int64[] totGof, int64[] totHof, int64 base) {
+    /** Node `nid`'s histogram, built into its slot from its segment. */
+    public void buildSlot(int64 nid) {
         int64 slot = this.slotFor(nid);
         GpuHistogram.buildSegment(this.store, slot * this.slotWords, this.bins, this.cutOff, this.q,
                                   this.ridx, this.segBegin[nid], this.segCount[nid], this.nf,
                                   this.nbins, this.log);
+    }
+
+    /** Node `nid`'s histogram, built into its slot from its segment, then into the host store slice at `base`. */
+    public void buildNode(int64 nid, int64[] histG, int64[] histH,
+                          int64[] totGof, int64[] totHof, int64 base) {
+        this.buildSlot(nid);
         this.readSlot(nid, histG, histH, totGof, totHof, base);
+    }
+
+    /** Node `nid`'s slot into the host store slice at `base` and its totals. */
+    public void readNode(int64 nid, int64[] histG, int64[] histH, int64[] totGof, int64[] totHof,
+                         int64 base) {
+        this.readSlot(nid, histG, histH, totGof, totHof, base);
+    }
+
+    /** Node `derived`'s histogram as `parent` minus `built` on the device; `parent`'s slot returns to the pool. */
+    public void deriveSlot(int64 parent, int64 built, int64 derived) {
+        int64 out = this.slotFor(derived);
+        GpuHistogram.subtract(this.store, this.slotOf[parent] * this.slotWords,
+                              this.slotOf[built] * this.slotWords, out * this.slotWords,
+                              this.slotWords, this.log);
+        this.release(parent);
     }
 
     /**
@@ -275,6 +306,67 @@ public final class GpuTrainState {
                               this.slotWords, this.log);
         this.readSlot(derived, histG, histH, totGof, totHof, base);
         this.release(parent);
+    }
+
+    /** Index of a record's node total G. */
+    public static int64 recordTotalG() { return (int64) 9; }
+    /** Index of a record's node total H. */
+    public static int64 recordTotalH() { return (int64) 10; }
+
+    /**
+     * Evaluates the `count` nodes `nids` from their slots in one Stage A and one
+     * Stage B launch, and answers their split records
+     * (`GpuSplitFinder.recordWords()` each).
+     */
+    public #int64[] evaluate(int64[] nids, int64 count, GradientQuantiser q,
+                             float64 lambda, float64 alpha, float64 minChildWeight) {
+        if (count > this.evalCap) {
+            int64 c = count;
+            if (c < (int64) 8) { c = (int64) 8; }
+            this.slotBase = heap KernelBuffer<int64>(c);
+            this.evalGain = heap KernelBuffer<float32>(c * this.nf);
+            this.evalMeta = heap KernelBuffer<int32>(c * this.nf * (int64) 3);
+            this.evalStats = heap KernelBuffer<int64>(c * this.nf * (int64) 4);
+            this.evalRec = heap KernelBuffer<int64>(c * GpuSplitFinder.recordWords());
+            this.evalCap = c;
+        }
+        int64[] bases = heap int64[count];
+        int64 j = (int64) 0;
+        while (j < count) {
+            bases[j] = this.slotOf[nids[j]] * this.slotWords;
+            j = j + (int64) 1;
+        }
+        this.slotBase.upload(bases, count);
+        this.log.upSmalls((int64) 1);
+        GpuSplitFinder.evaluateLevel(this.evalRec, this.evalGain, this.evalMeta, this.evalStats,
+                                     this.store, this.slotBase, this.cutPtr, q,
+                                     lambda, alpha, minChildWeight, this.nf, count, this.nbins,
+                                     this.log);
+        int64[] rec = heap int64[count * GpuSplitFinder.recordWords()];
+        this.evalRec.download(rec, count * GpuSplitFinder.recordWords());
+        this.log.downSmalls((int64) 1);
+        return #rec;
+    }
+
+    /** Record `j` of `rec` as a {@link Split}, its threshold read from `cutValues`. */
+    public static #Split splitFrom(int64[] rec, int64 j, Tensor<int64> cutPtrs,
+                                   Tensor<float64> cutValues) {
+        int64 r = j * GpuSplitFinder.recordWords();
+        Split s = heap Split();
+        if (rec[r] == (int64) 0) { return #s; }
+        s.valid = true;
+        s.findex = rec[r + (int64) 1];
+        s.splitGidx = rec[r + (int64) 2];
+        s.gain = Cajeta.bitsToF32((int32) rec[r + (int64) 3]);
+        s.defaultLeft = rec[r + (int64) 4] != (int64) 0;
+        s.leftG = rec[r + (int64) 5];
+        s.leftH = rec[r + (int64) 6];
+        s.rightG = rec[r + (int64) 7];
+        s.rightH = rec[r + (int64) 8];
+        if (s.splitGidx >= cutPtrs.flatGet(s.findex)) {
+            s.fvalue = (float32) cutValues.flatGet(s.splitGidx);
+        }
+        return #s;
     }
 
     /** Splits node `nid` into `li` and `ri` by `s` and answers `[cntL, cntR]`. */
@@ -403,14 +495,6 @@ public final class GpuTrainState {
             hess[i] = (float64) h[i];
             i = i + (int64) 1;
         }
-    }
-
-    /** {@link GpuSplitFinder#findBest} on `hist`, counted in this fit's log. */
-    public #Split findBest(Histogram hist, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
-                           GradientQuantiser q, float64 lambda, float64 alpha,
-                           float64 minChildWeight) {
-        return GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight,
-                                       this.log);
     }
 
     /** Uploads of n*nf cells: the bin matrix or the raw values. */

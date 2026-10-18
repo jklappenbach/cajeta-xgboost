@@ -1,0 +1,145 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
+
+/** xgboost-device-training Unit 5: split evaluation on the device, from the histogram store. */
+public class GpuEvalTest {
+
+    public GpuEvalTest() { return; }
+
+    /** The root's device record against `SplitFinder.findBest`, totals included. */
+    static void assertRoot(String fixture, float64 mcw) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginTree(q, g, h, (int64) 8);
+        st.buildSlot((int64) 0);
+        int64[] nids = heap int64[1];
+        int64[] rec #= st.evaluate(nids, (int64) 1, q, (float64) 1.0, (float64) 0.0, mcw);
+        Split dev #= GpuTrainState.splitFrom(rec, (int64) 0, f.cutPtrs(), f.cutValues());
+        Histogram root #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Split cpu #= SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
+                                         (float64) 1.0, (float64) 0.0, mcw);
+        GpuSplitFinderTest.assertSameSplit(cpu, dev);
+        Assert.equals(root.totalG, rec[GpuTrainState.recordTotalG()]);
+        Assert.equals(root.totalH, rec[GpuTrainState.recordTotalH()]);
+        return;
+    }
+
+    @Test
+    public void rootRecordsAreTheCpuFindersOnEveryFixture() {
+        if (!SfuMath.hasRcpTable()) { return; }
+        GpuEvalTest.assertRoot("tiny_reg", (float64) 1.0);
+        GpuEvalTest.assertRoot("tiny_reg_missing", (float64) 1.0);
+        GpuEvalTest.assertRoot("tiny_reg_d2", (float64) 1.0);
+        GpuEvalTest.assertRoot("tiny_reg_d6", (float64) 1.0);
+        GpuEvalTest.assertRoot("tiny_reg_gamma1", (float64) 1.0);
+        GpuEvalTest.assertRoot("tiny_reg_mcw10", (float64) 10.0);
+        GpuEvalTest.assertRoot("tiny_binary", (float64) 1.0);
+        GpuEvalTest.assertRoot("large_reg", (float64) 1.0);
+        GpuEvalTest.assertRoot("large_binary", (float64) 1.0);
+        return;
+    }
+
+    /** Two identical features tie on every boundary, and the split keeps the lower one. */
+    @Test
+    public void aTieBetweenFeaturesGoesToTheLowerOne() {
+        if (!SfuMath.hasRcpTable()) { return; }
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        Tensor<int32> b1 #= f.bins();
+        Tensor<int64> p1 #= f.cutPtrs();
+        Tensor<float64> v1 #= f.cutValues();
+        int64 nf1 = p1.shapeAt(0) - (int64) 1;
+        int64 c = p1.flatGet((int64) 1);
+        int32[] bz = heap int32[n * (int64) 2];
+        int64 r = (int64) 0;
+        while (r < n) {
+            bz[r * (int64) 2] = b1.flatGet(r * nf1);
+            bz[r * (int64) 2 + (int64) 1] = b1.flatGet(r * nf1);
+            r = r + (int64) 1;
+        }
+        int64[] bs = heap int64[2]; bs[0] = n; bs[1] = (int64) 2;
+        Tensor<int32> bins #= Tensor.of<int32>(bz, bs);
+        int64[] cp = heap int64[3]; cp[0] = (int64) 0; cp[1] = c; cp[2] = (int64) 2 * c;
+        int64[] cs = heap int64[1]; cs[0] = (int64) 3;
+        Tensor<int64> cutPtrs #= Tensor.of<int64>(cp, cs);
+        float64[] cv = heap float64[(int64) 2 * c];
+        int64 k = (int64) 0;
+        while (k < c) { cv[k] = v1.flatGet(k); cv[c + k] = v1.flatGet(k); k = k + (int64) 1; }
+        int64[] vs = heap int64[1]; vs[0] = (int64) 2 * c;
+        Tensor<float64> cutValues #= Tensor.of<float64>(cv, vs);
+
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        GpuTrainState st #= GpuTrainState.create(bins, cutPtrs, n);
+        st.beginTree(q, g, h, (int64) 8);
+        st.buildSlot((int64) 0);
+        int64[] nids = heap int64[1];
+        int64[] rec #= st.evaluate(nids, (int64) 1, q, (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Split dev #= GpuTrainState.splitFrom(rec, (int64) 0, cutPtrs, cutValues);
+        Histogram root #= Histogram.buildAll(bins, cutPtrs, q, g, h, n);
+        Split cpu #= SplitFinder.findBest(root, cutPtrs, cutValues, q,
+                                         (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Assert.isTrue(cpu.valid);
+        Assert.equals((int64) 0, cpu.findex);
+        GpuSplitFinderTest.assertSameSplit(cpu, dev);
+        return;
+    }
+
+    /** A level of both root children: one sync, one small upload and one small download, two records. */
+    @Test
+    public void aLevelOfTwoNodesIsOneEvaluationWithTwoRecords() {
+        if (!SfuMath.hasRcpTable()) { return; }
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_missing");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginTree(q, g, h, (int64) 8);
+        st.buildSlot((int64) 0);
+        Histogram root #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Split s #= SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
+                                       (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        int64[] cnts #= st.split(s, f.cutPtrs(), (int64) 0, (int64) 1, (int64) 2);
+        st.buildSlot((int64) 1);
+        st.buildSlot((int64) 2);
+        int64[] nids = heap int64[2];
+        nids[0] = (int64) 1;
+        nids[1] = (int64) 2;
+        int64 syncs0 = st.syncs();
+        int64 up0 = st.smallUploads();
+        int64 down0 = st.smallDownloads();
+        int64[] rec #= st.evaluate(nids, (int64) 2, q, (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Assert.equals((int64) 1, st.syncs() - syncs0);
+        Assert.equals((int64) 1, st.smallUploads() - up0);
+        Assert.equals((int64) 1, st.smallDownloads() - down0);
+
+        int64[] position = heap int64[n];
+        int64[] cpuCnts #= GpuPartitionTest.cpuPartition(f.bins(), f.cutPtrs(), s, position,
+                                                        (int64) 0, (int64) 1, (int64) 2, nf, n);
+        int64 j = (int64) 0;
+        while (j < (int64) 2) {
+            Histogram hc #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, j + (int64) 1, n);
+            Split cpu #= SplitFinder.findBest(hc, f.cutPtrs(), f.cutValues(), q,
+                                             (float64) 1.0, (float64) 0.0, (float64) 1.0);
+            Split dev #= GpuTrainState.splitFrom(rec, j, f.cutPtrs(), f.cutValues());
+            GpuSplitFinderTest.assertSameSplit(cpu, dev);
+            j = j + (int64) 1;
+        }
+        return;
+    }
+}

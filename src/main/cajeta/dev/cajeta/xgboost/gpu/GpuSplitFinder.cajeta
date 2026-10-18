@@ -192,6 +192,229 @@ public final class GpuSplitFinder {
         }
     }
 
+    /**
+     * {@link #featureScan} for a level: one 32-lane wave per (node, feature),
+     * reading node `j`'s slot of the device store at word `slotBase[j]`
+     * (interleaved G and H per bin, then the totals).
+     */
+    @Kernel
+    @Wave(width = 32)
+    public static void levelScan(KernelBuffer<float32> outGain,
+                                 KernelBuffer<int32> outMeta,
+                                 KernelBuffer<int64> outStats,
+                                 KernelBuffer<int64> store,
+                                 KernelBuffer<int64> slotBase,
+                                 KernelBuffer<int32> cutOff,
+                                 KernelBuffer<int32> rcpTab,
+                                 float64 toFloatGrad, float64 toFloatHess,
+                                 float64 lambda, float64 alpha,
+                                 float64 minChildWeight, uint32 nf, uint32 nodes, uint32 nbins) {
+        uint32 wg = Workgroup.x();
+        uint32 j = wg / nf;
+        uint32 f = wg - j * nf;
+        uint32 lane = Wave.laneId();
+        if (j < nodes) {
+            int64 base = slotBase[j];
+            uint32 o = wg;
+            int64 b0 = (int64) cutOff[f];
+            int64 b1 = (int64) cutOff[f + 1];
+            int64 parentG = store[base + (int64) nbins * 2];
+            int64 parentH = store[base + (int64) nbins * 2 + 1];
+
+            int64 partG = 0;
+            int64 partH = 0;
+            int64 sb = b0;
+            while (sb < b1) {
+                int64 q = sb + (int64) lane;
+                if (q < b1) {
+                    partG = partG + store[base + q * 2];
+                    partH = partH + store[base + q * 2 + 1];
+                }
+                sb = sb + 32;
+            }
+            int64 missG = parentG - Wave.reduceSumI64(partG);
+            int64 missH = parentH - Wave.reduceSumI64(partH);
+
+            boolean featHas = false;
+            float32 featGain = (float32) 0.0;
+            int64 featP = 0;
+            int64 featScanG = 0;
+            int64 featScanH = 0;
+            boolean featMissLeft = true;
+
+            int64 carryG = 0;
+            int64 carryH = 0;
+            int64 tileStart = b0 + 1;
+            while (tileStart < b1) {
+                int64 p = tileStart + (int64) lane;
+                boolean live = p < b1;
+                int64 hg = 0;
+                int64 hh = 0;
+                if (live) {
+                    hg = store[base + p * 2];
+                    hh = store[base + p * 2 + 1];
+                }
+                int64 scanG = carryG + Wave.prefixSumI64(hg);
+                int64 scanH = carryH + Wave.prefixSumI64(hh);
+
+                float32 gainL = GpuSplitFinder.laneGain(scanG + missG, scanH + missH,
+                    parentG, parentH, rcpTab, toFloatGrad, toFloatHess, lambda, alpha);
+                float32 gainR = GpuSplitFinder.laneGain(scanG, scanH,
+                    parentG, parentH, rcpTab, toFloatGrad, toFloatHess, lambda, alpha);
+                boolean missLeft = gainL > gainR;
+                float32 gain = gainR;
+                if (missLeft) { gain = gainL; }
+
+                float32 first = Wave.shuffleSyncF32(gain, 0);
+                float32 cand = first;
+                if (live) { cand = gain; }
+                float32 top = Wave.reduceMaxF32(cand);
+                uint32 win = Bits.trailingZeros(Wave.ballotSync(live && gain == top));
+
+                uint32 mlBit = 0;
+                if (missLeft) { mlBit = 1; }
+                float32 tileGain = Wave.shuffleSyncF32(gain, win);
+                boolean tileMissLeft = Wave.shuffleSync(mlBit, win) != 0;
+                int64 tileScanG = Wave.shuffleSyncI64(scanG, win);
+                int64 tileScanH = Wave.shuffleSyncI64(scanH, win);
+
+                int64 cLH = tileScanH;
+                if (tileMissLeft) { cLH = tileScanH + missH; }
+                int64 cRH = parentH - cLH;
+                boolean valid = (float64) cLH * toFloatHess >= minChildWeight
+                             && (float64) cRH * toFloatHess >= minChildWeight;
+                if (valid && (!featHas || tileGain > featGain)) {
+                    featHas = true;
+                    featGain = tileGain;
+                    featP = tileStart + (int64) win;
+                    featScanG = tileScanG;
+                    featScanH = tileScanH;
+                    featMissLeft = tileMissLeft;
+                }
+
+                carryG = carryG + Wave.reduceSumI64(hg);
+                carryH = carryH + Wave.reduceSumI64(hh);
+                tileStart = tileStart + 32;
+            }
+
+            if (lane == 0) {
+                outGain[o] = featGain;
+                int32 hasI = 0;
+                if (featHas) { hasI = 1; }
+                int32 mlI = 0;
+                if (featMissLeft) { mlI = 1; }
+                outMeta[o * 3] = hasI;
+                outMeta[o * 3 + 1] = mlI;
+                outMeta[o * 3 + 2] = (int32) featP;
+                outStats[o * 4] = featScanG;
+                outStats[o * 4 + 1] = featScanH;
+                outStats[o * 4 + 2] = missG;
+                outStats[o * 4 + 3] = missH;
+            }
+        }
+    }
+
+    /** Words per split record of {@link #levelPick}. */
+    public static int64 recordWords() { return (int64) 12; }
+
+    /**
+     * Stage B for a level, a thread per node: `SplitFinder.findBest`'s
+     * cross-feature update over the node's records (strict `>` after the
+     * min_child_weight gate, so ties keep the lowest feature). Record `j` is
+     * valid, feature, boundary, gain bits, default-left, the child sums
+     * (lG, lH, rG, rH) and the node's totals.
+     */
+    @Kernel
+    public static void levelPick(KernelBuffer<int64> rec, KernelBuffer<float32> featGain,
+                                 KernelBuffer<int32> featMeta, KernelBuffer<int64> featStats,
+                                 KernelBuffer<int64> store, KernelBuffer<int64> slotBase,
+                                 float64 toFloatHess, float64 minChildWeight,
+                                 uint32 nf, uint32 nodes, uint32 nbins) {
+        uint32 j = KernelThread.globalIdX();
+        if (j < nodes) {
+            int64 base = slotBase[j];
+            int64 parentG = store[base + (int64) nbins * 2];
+            int64 parentH = store[base + (int64) nbins * 2 + 1];
+            boolean haveBest = false;
+            float32 bestGain = (float32) 0.0;
+            int64 bf = (int64) -1;
+            int64 bp = (int64) 0;
+            int64 bml = (int64) 1;
+            int64 blG = (int64) 0;
+            int64 blH = (int64) 0;
+            uint32 f = 0;
+            while (f < nf) {
+                uint32 o = j * nf + f;
+                if (featMeta[o * 3] != 0) {
+                    boolean missLeft = featMeta[o * 3 + 1] != 0;
+                    int64 lG = featStats[o * 4];
+                    int64 lH = featStats[o * 4 + 1];
+                    if (missLeft) {
+                        lG = lG + featStats[o * 4 + 2];
+                        lH = lH + featStats[o * 4 + 3];
+                    }
+                    int64 rH = parentH - lH;
+                    float32 fGain = featGain[o];
+                    boolean okW = (float64) lH * toFloatHess >= minChildWeight
+                               && (float64) rH * toFloatHess >= minChildWeight;
+                    if (okW && (!haveBest || fGain > bestGain)) {
+                        haveBest = true;
+                        bestGain = fGain;
+                        bf = (int64) f;
+                        bp = (int64) featMeta[o * 3 + 2];
+                        bml = (int64) 0;
+                        if (missLeft) { bml = (int64) 1; }
+                        blG = lG;
+                        blH = lH;
+                    }
+                }
+                f = f + 1;
+            }
+            uint32 r = j * 12;
+            rec[r] = (int64) 0;
+            if (haveBest) { rec[r] = (int64) 1; }
+            rec[r + 1] = bf;
+            rec[r + 2] = bp - (int64) 1;
+            rec[r + 3] = (int64) Cajeta.f32ToBits(bestGain);
+            rec[r + 4] = bml;
+            rec[r + 5] = blG;
+            rec[r + 6] = blH;
+            rec[r + 7] = (int64) 0;
+            rec[r + 8] = (int64) 0;
+            if (haveBest) {
+                rec[r + 7] = parentG - blG;
+                rec[r + 8] = parentH - blH;
+            }
+            rec[r + 9] = parentG;
+            rec[r + 10] = parentH;
+            rec[r + 11] = (int64) 0;
+        }
+    }
+
+    /**
+     * Evaluates `nodes` nodes whose slots start at `slotBase`: one Stage A and
+     * one Stage B launch and one sync; their records land in `rec`.
+     */
+    static void evaluateLevel(KernelBuffer<int64> rec, KernelBuffer<float32> gain,
+                              KernelBuffer<int32> meta, KernelBuffer<int64> stats,
+                              KernelBuffer<int64> store, KernelBuffer<int64> slotBase,
+                              KernelBuffer<int32> cutPtr, GradientQuantiser q,
+                              float64 lambda, float64 alpha, float64 minChildWeight,
+                              int64 nf, int64 nodes, int64 nbins, TransferLog log) {
+        KernelBuffer<int32> rcpTab = SfuMath.deviceRcpTable();
+        KernelStream s #= KernelStream.current();
+        uint32 un = (uint32) nodes;
+        levelScan.launch(s, grid: [(uint32) (nodes * nf)], block: [32])
+            (gain, meta, stats, store, slotBase, cutPtr, rcpTab, q.toFloatGrad, q.toFloatHess,
+             lambda, alpha, minChildWeight, (uint32) nf, un, (uint32) nbins);
+        levelPick.launch(s, grid: [(un + 63) / 64], block: [64])
+            (rec, gain, meta, stats, store, slotBase, q.toFloatHess, minChildWeight,
+             (uint32) nf, un, (uint32) nbins);
+        s.sync();
+        log.synced();
+        return;
+    }
+
     /** Launches featureScan over `nf` features, one 32-lane workgroup each, and waits for it. */
     public static void launchScan(KernelBuffer<float32> outGain, KernelBuffer<int32> outMeta,
                                   KernelBuffer<int64> outStats, KernelBuffer<int64> histG,
