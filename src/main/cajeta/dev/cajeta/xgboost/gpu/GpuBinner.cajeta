@@ -13,7 +13,7 @@ import cajeta.xpu.KernelThread;
  * compared as integer order keys, in which -0 and +0 are one key, so the
  * kernel is integer-only and gives the same bins on every backend.
  */
-public final class GpuBinner {
+final class GpuBinner {
 
     /** Order key of float32 bits `b` (not NaN): float order, with both zeros equal. */
     @Device
