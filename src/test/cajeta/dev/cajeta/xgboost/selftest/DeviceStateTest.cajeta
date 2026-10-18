@@ -1,0 +1,110 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.objective.Objective;
+
+/** xgboost-device-training Unit 1: the fit's device state, its transfer log and its release. */
+public class DeviceStateTest {
+
+    public DeviceStateTest() { return; }
+
+    /** The splits across every tree of `m`. */
+    static int64 splitsOf(Model m) {
+        int64 s = (int64) 0;
+        int64 t = (int64) 0;
+        while (t < (int64) m.nodeCount.count()) {
+            s = s + (m.nodeCount[t] - (int64) 1) / (int64) 2;
+            t = t + (int64) 1;
+        }
+        return s;
+    }
+
+    /** A device fit over the lent state `st`, depth 4, eta 0.3. */
+    static #Model fitOn(GpuTrainState st, FixtureLoader f, Objective obj, int64 K, int64 rounds) {
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        float32[] mh = heap float32[rounds * n * K];
+        return Booster.train(null, f.cutPtrs(), f.cutValues(), label,
+                             n, rounds, (int64) 4, (int64) 0,
+                             (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                             (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                             obj, K, mh, true, st);
+    }
+
+    static void assertTraffic(String fixture, Objective obj, int64 K, int64 rounds) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model m #= DeviceStateTest.fitOn(st, f, obj, K, rounds);
+        int64 trees = rounds * K;
+        int64 splits = DeviceStateTest.splitsOf(m);
+        Assert.equals(st.trees(), trees);
+        Assert.equals(st.cellUploads(), (int64) 1);
+        Assert.equals(st.cellDownloads(), (int64) 0);
+        // Labels and base margins once; per tree the quantized pairs; per split the block bases.
+        Assert.equals(st.rowUploads(), (int64) 2 + trees + splits);
+        // Per tree the leaf rows; per split the block counts.
+        Assert.equals(st.rowDownloads(), trees + splits);
+        Assert.isTrue(st.smallUploads() >= (int64) 1);
+        Assert.isTrue(st.syncs() >= trees);
+        Assert.isTrue(st.maxTreeSyncs() >= (int64) 1);
+        return;
+    }
+
+    @Test
+    public void aRegressionFitUploadsTheBinsAndLabelsOnce() {
+        DeviceStateTest.assertTraffic("tiny_reg", Objective.SQUARED_ERROR, (int64) 1, (int64) 3);
+        return;
+    }
+
+    @Test
+    public void aSoftmaxFitUploadsTheBinsAndLabelsOnce() {
+        DeviceStateTest.assertTraffic("tiny_multi", Objective.SOFTMAX, (int64) 4, (int64) 2);
+        return;
+    }
+
+    /** Fits once on a state of its own and answers the live objects while the state was held. */
+    static int64 liveDuringAFit(FixtureLoader f, int64 n) {
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model m #= DeviceStateTest.fitOn(st, f, Objective.SQUARED_ERROR, (int64) 1, (int64) 2);
+        Assert.equals(st.cellUploads(), (int64) 1);
+        return Cajeta.liveCount();
+    }
+
+    @Test
+    public void eachFitStartsFromNothingAndReleasesItsState() {
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        int64 warm = DeviceStateTest.liveDuringAFit(f, n);
+        int64 base = Cajeta.liveCount();
+        int64 first = DeviceStateTest.liveDuringAFit(f, n);
+        Assert.equals(Cajeta.liveCount(), base);
+        int64 second = DeviceStateTest.liveDuringAFit(f, n);
+        Assert.equals(Cajeta.liveCount(), base);
+        Assert.equals(second, first);
+        // The state, its log and its eleven device buffers were live during the fit.
+        Assert.isTrue(first - base >= (int64) 13);
+        return;
+    }
+
+    @Test
+    public void twoFitsInOneProcessGiveTheSameModel() {
+        FixtureLoader f #= FixtureLoader.open("tiny_reg");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        GpuTrainState a #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model ma #= DeviceStateTest.fitOn(a, f, Objective.SQUARED_ERROR, (int64) 1, (int64) 3);
+        GpuTrainState b #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model mb #= DeviceStateTest.fitOn(b, f, Objective.SQUARED_ERROR, (int64) 1, (int64) 3);
+        GrowDeviceTest.assertSameModel(ma, mb, (int64) 3, n);
+        Assert.equals(b.rowUploads(), a.rowUploads());
+        return;
+    }
+}

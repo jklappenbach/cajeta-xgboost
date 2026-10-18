@@ -3,28 +3,20 @@ package dev.cajeta.xgboost.gpu;
 import cajeta.math.Tensor;
 import cajeta.xpu.KernelBuffer;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
 import dev.cajeta.xgboost.tree.Split;
 
 /**
- * The device side of a training run (int64-scan-verbs spec 6.3): the bin
- * matrix, uploaded once per run or binned on the device from the raw values
- * ({@link #fromValues}), the quantized gradient pairs, uploaded once
- * per tree, and a row-index buffer `ridx` in which each node's rows are one
- * contiguous segment in ascending row order, the CPU builder's order.
- * Splitting a node partitions its segment in place; a node's histogram reads
- * only its segment.
+ * The device side of a fit: the bin matrix, uploaded once or binned on the
+ * device ({@link #fromValues}); the labels, margins and gradient pairs
+ * ({@link #beginFit}); the quantized pairs, uploaded once per tree; and `ridx`,
+ * in which each node's rows are one contiguous segment in ascending row order.
+ * Every upload, download and sync is counted in the fit's transfer log.
  *
  * Bit-identical to the CPU builder: the partition is a stable function of
  * each row's own bin, and the histograms are integer atomics, which commute.
  */
 public final class GpuTrainState {
-
-    /** Bin-matrix uploads since the process started; a test-only counter. */
-    public static int64 binUploads;
-    /** Gradient-pair uploads since the process started; a test-only counter. */
-    public static int64 gpairUploads;
-    /** Raw-value uploads for device binning since the process started; a test-only counter. */
-    public static int64 valueUploads;
 
     KernelBuffer<int32> bins;
     KernelBuffer<int32> cutOff;
@@ -33,6 +25,11 @@ public final class GpuTrainState {
     KernelBuffer<int32> scratch;
     KernelBuffer<int32> blockCounts;
     KernelBuffer<int64> hist;
+    KernelBuffer<float64> labels;
+    KernelBuffer<float32> margins;
+    KernelBuffer<float32> gradG;
+    KernelBuffer<float32> gradH;
+    TransferLog log;
     int32[] blockH;
     int64[] histWords;
     int64[] qFixed;
@@ -41,6 +38,7 @@ public final class GpuTrainState {
     int64 n;
     int64 nf;
     int64 nbins;
+    int64 groups;
 
     GpuTrainState(Tensor<int64> cutPtrs, int64 n) {
         this.n = n;
@@ -65,7 +63,9 @@ public final class GpuTrainState {
         this.qFixed = heap int64[n * (int64) 2];
         this.segBegin = heap int64[1];
         this.segCount = heap int64[1];
+        this.log = heap TransferLog();
         this.cutOff.upload(cutH);
+        this.log.upSmalls((int64) 1);
     }
 
     /** A run's device state over `n` rows of `bins`; the bin matrix is uploaded here, once. */
@@ -81,7 +81,7 @@ public final class GpuTrainState {
             c = c + (int64) 1;
         }
         st.bins.upload(binsH);
-        GpuTrainState.binUploads = GpuTrainState.binUploads + (int64) 1;
+        st.log.upCell();
         return #st;
     }
 
@@ -97,7 +97,7 @@ public final class GpuTrainState {
         int32[] bits #= GpuBinner.valueBits(x, n, nf);
         KernelBuffer<int32> vals = heap KernelBuffer<int32>(cells);
         vals.upload(bits);
-        GpuTrainState.valueUploads = GpuTrainState.valueUploads + (int64) 1;
+        st.log.upCell();
         int64 total = cutPtrs.flatGet(nf);
         int32[] cutBits = heap int32[total];
         int64 c = (int64) 0;
@@ -115,7 +115,8 @@ public final class GpuTrainState {
         KernelBuffer<int32> ptrD = heap KernelBuffer<int32>(nf + (int64) 1);
         cutsD.upload(cutBits);
         ptrD.upload(ptrH);
-        GpuBinner.binInto(st.bins, vals, cutsD, ptrD, cells, nf);
+        st.log.upSmalls((int64) 2);
+        GpuBinner.binInto(st.bins, vals, cutsD, ptrD, cells, nf, st.log);
         return #st;
     }
 
@@ -123,7 +124,28 @@ public final class GpuTrainState {
     public #int32[] deviceBins() {
         int32[] out = heap int32[this.n * this.nf];
         this.bins.download(out);
+        this.log.downCell();
         return #out;
+    }
+
+    /**
+     * Starts a fit of `groups` output groups over `label`: uploads the labels
+     * and the `base` margins once, and allocates the gradient pairs.
+     */
+    public void beginFit(float64[] label, float32 base, int64 groups) {
+        this.groups = groups;
+        int64 rows = this.n * groups;
+        float32[] m = heap float32[rows];
+        int64 i = (int64) 0;
+        while (i < rows) { m[i] = base; i = i + (int64) 1; }
+        this.labels = heap KernelBuffer<float64>(this.n);
+        this.margins = heap KernelBuffer<float32>(rows);
+        this.gradG = heap KernelBuffer<float32>(rows);
+        this.gradH = heap KernelBuffer<float32>(rows);
+        this.labels.upload(label, this.n);
+        this.log.upRow();
+        this.margins.upload(m);
+        this.log.upRow();
     }
 
     /**
@@ -137,9 +159,10 @@ public final class GpuTrainState {
             this.qFixed[r * (int64) 2 + (int64) 1] = quant.fixedHess(hess[r]);
             r = r + (int64) 1;
         }
+        this.log.beginTree();
         this.q.upload(this.qFixed);
-        GpuTrainState.gpairUploads = GpuTrainState.gpairUploads + (int64) 1;
-        GpuPartition.resetSegments(this.ridx, this.n);
+        this.log.upRow();
+        GpuPartition.resetSegments(this.ridx, this.n, this.log);
         if ((int64) this.segBegin.count() < cap) {
             this.segBegin = heap int64[cap];
             this.segCount = heap int64[cap];
@@ -152,8 +175,10 @@ public final class GpuTrainState {
     public void buildNode(int64 nid, int64[] histG, int64[] histH,
                           int64[] totGof, int64[] totHof, int64 base) {
         GpuHistogram.buildSegment(this.hist, this.bins, this.cutOff, this.q, this.ridx,
-                                  this.segBegin[nid], this.segCount[nid], this.nf, this.nbins);
+                                  this.segBegin[nid], this.segCount[nid], this.nf, this.nbins,
+                                  this.log);
         this.hist.download(this.histWords);
+        this.log.downSmalls((int64) 1);
         int64 b = (int64) 0;
         while (b < this.nbins) {
             histG[base + b] = this.histWords[b * (int64) 2];
@@ -170,7 +195,7 @@ public final class GpuTrainState {
         int64 count = this.segCount[nid];
         int64 left = GpuPartition.splitSegment(this.ridx, this.scratch, this.blockCounts,
                                                this.blockH, this.bins, cutPtrs, s,
-                                               begin, count, this.nf);
+                                               begin, count, this.nf, this.log);
         this.segBegin[li] = begin;
         this.segCount[li] = left;
         this.segBegin[ri] = begin + left;
@@ -185,6 +210,7 @@ public final class GpuTrainState {
     public void leafOf(int64[] leafOf, boolean[] leaf, int64 nodeCount) {
         int32[] rows = heap int32[this.n];
         this.ridx.download(rows);
+        this.log.downRow();
         int64 nid = (int64) 0;
         while (nid < nodeCount) {
             if (leaf[nid]) {
@@ -203,6 +229,7 @@ public final class GpuTrainState {
     public #int32[] segmentRows(int64 nid) {
         int32[] all = heap int32[this.n];
         this.ridx.download(all);
+        this.log.downRow();
         int64 count = this.segCount[nid];
         int32[] rows = heap int32[count];
         int64 k = (int64) 0;
@@ -212,4 +239,35 @@ public final class GpuTrainState {
         }
         return #rows;
     }
+
+    /** {@link GpuSplitFinder#findBest} on `hist`, counted in this fit's log. */
+    public #Split findBest(Histogram hist, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                           GradientQuantiser q, float64 lambda, float64 alpha,
+                           float64 minChildWeight) {
+        return GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight,
+                                       this.log);
+    }
+
+    /** Uploads of n*nf cells: the bin matrix or the raw values. */
+    public int64 cellUploads() { return this.log.upCells; }
+    /** Uploads proportional to n. */
+    public int64 rowUploads() { return this.log.upRows; }
+    /** Uploads independent of n. */
+    public int64 smallUploads() { return this.log.upSmall; }
+    /** Downloads of n*nf cells. */
+    public int64 cellDownloads() { return this.log.downCells; }
+    /** Downloads proportional to n. */
+    public int64 rowDownloads() { return this.log.downRows; }
+    /** Downloads independent of n. */
+    public int64 smallDownloads() { return this.log.downSmall; }
+    /** Stream synchronizations. */
+    public int64 syncs() { return this.log.syncs; }
+    /** Trees begun. */
+    public int64 trees() { return this.log.trees; }
+    /** The most synchronizations any one tree made. */
+    public int64 maxTreeSyncs() { return this.log.maxTreeSyncs(); }
+    /** Cell uploads by every state since the process started. */
+    public static int64 processCellUploads() { return TransferLog.processUpCells; }
+    /** Row uploads by every state since the process started. */
+    public static int64 processRowUploads() { return TransferLog.processUpRows; }
 }

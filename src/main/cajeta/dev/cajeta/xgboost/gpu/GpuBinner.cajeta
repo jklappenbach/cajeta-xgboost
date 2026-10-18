@@ -85,15 +85,15 @@ final class GpuBinner {
     }
 
     /** Bins `cells` values (float32 bits, row-major over `nf` features) into `out` and waits. */
-    public static void binInto(KernelBuffer<int32> out, KernelBuffer<int32> vals,
-                               KernelBuffer<int32> cuts, KernelBuffer<int32> ptr,
-                               int64 cells, int64 nf) {
+    static void binInto(KernelBuffer<int32> out, KernelBuffer<int32> vals,
+                        KernelBuffer<int32> cuts, KernelBuffer<int32> ptr,
+                        int64 cells, int64 nf, TransferLog log) {
         KernelStream s #= KernelStream.current();
         uint32 c = (uint32) cells;
         if (c > 0) {
             binCells.launch(s, grid: [(c + 255) / 256], block: [256])(out, vals, cuts, ptr, c, (uint32) nf);
         }
-        s.sync();
+        log.sync(s);
         return;
     }
 }

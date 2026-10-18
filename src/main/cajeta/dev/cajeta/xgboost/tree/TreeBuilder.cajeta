@@ -210,7 +210,9 @@ public final class TreeBuilder {
             sumHess[nid] = q.floatHess(hist.totalH);
 
             Split s;
-            if (device && SfuMath.hasRcpTable()) {
+            if (st != null && SfuMath.hasRcpTable()) {
+                s #= st.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
+            } else if (device && SfuMath.hasRcpTable()) {
                 s #= GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
             } else {
                 s #= SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);

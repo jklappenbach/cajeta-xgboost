@@ -124,11 +124,11 @@ public final class GpuPartition {
     public static int64 segmentBlock() { return (int64) 256; }
 
     /** Sets `ridx` to the identity over `n` rows and waits. */
-    public static void resetSegments(KernelBuffer<int32> ridx, int64 n) {
+    static void resetSegments(KernelBuffer<int32> ridx, int64 n, TransferLog log) {
         KernelStream s #= KernelStream.current();
         uint32 un = (uint32) n;
         identity.launch(s, grid: [(un + 255) / 256], block: [256])(ridx, un);
-        s.sync();
+        log.sync(s);
         return;
     }
 
@@ -138,10 +138,10 @@ public final class GpuPartition {
      * count. `blockCounts` holds one int32 per 256 rows of the segment;
      * `blockH` is its host twin.
      */
-    public static int64 splitSegment(KernelBuffer<int32> ridx, KernelBuffer<int32> scratch,
-                                     KernelBuffer<int32> blockCounts, int32[] blockH,
-                                     KernelBuffer<int32> bins, Tensor<int64> cutPtrs,
-                                     Split s, int64 begin, int64 count, int64 nf) {
+    static int64 splitSegment(KernelBuffer<int32> ridx, KernelBuffer<int32> scratch,
+                              KernelBuffer<int32> blockCounts, int32[] blockH,
+                              KernelBuffer<int32> bins, Tensor<int64> cutPtrs,
+                              Split s, int64 begin, int64 count, int64 nf, TransferLog log) {
         int64 b0 = cutPtrs.flatGet(s.findex);
         int32 localSplit = (int32) (s.splitGidx - b0);
         int32 defLeft = s.defaultLeft ? (int32) 1 : (int32) 0;
@@ -151,8 +151,9 @@ public final class GpuPartition {
         KernelStream st #= KernelStream.current();
         segmentCount.launch(st, grid: [(uint32) blocks], block: [256])
             (blockCounts, bins, ridx, ub, uc, (uint32) nf, (int32) s.findex, localSplit, defLeft);
-        st.sync();
+        log.sync(st);
         blockCounts.download(blockH, blocks);
+        log.downRow();
 
         int64 left = (int64) 0;
         int64 k = (int64) 0;
@@ -163,12 +164,13 @@ public final class GpuPartition {
             k = k + (int64) 1;
         }
         blockCounts.upload(blockH, blocks);
+        log.upRow();
 
         segmentPlace.launch(st, grid: [(uint32) blocks], block: [256])
             (scratch, blockCounts, bins, ridx, ub, uc, (uint32) left, (uint32) nf,
              (int32) s.findex, localSplit, defLeft);
         copySegment.launch(st, grid: [(uc + 255) / 256], block: [256])(ridx, scratch, ub, uc);
-        st.sync();
+        log.sync(st);
         return left;
     }
 

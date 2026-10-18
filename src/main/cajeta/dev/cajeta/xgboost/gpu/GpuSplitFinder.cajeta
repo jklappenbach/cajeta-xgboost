@@ -200,11 +200,25 @@ public final class GpuSplitFinder {
                                   float64 toFloatGrad, float64 toFloatHess,
                                   float64 lambda, float64 alpha,
                                   float64 minChildWeight, uint32 nf) {
+        TransferLog log = heap TransferLog();
+        GpuSplitFinder.launchScan(outGain, outMeta, outStats, histG, histH, cutOff, parents, rcpTab,
+                                  toFloatGrad, toFloatHess, lambda, alpha, minChildWeight, nf, log);
+        return;
+    }
+
+    /** {@link #launchScan}, with its sync counted in `log`. */
+    static void launchScan(KernelBuffer<float32> outGain, KernelBuffer<int32> outMeta,
+                           KernelBuffer<int64> outStats, KernelBuffer<int64> histG,
+                           KernelBuffer<int64> histH, KernelBuffer<int32> cutOff,
+                           KernelBuffer<int64> parents, KernelBuffer<int32> rcpTab,
+                           float64 toFloatGrad, float64 toFloatHess,
+                           float64 lambda, float64 alpha,
+                           float64 minChildWeight, uint32 nf, TransferLog log) {
         KernelStream s #= KernelStream.current();
         featureScan.launch(s, grid: [nf], block: [32])
             (outGain, outMeta, outStats, histG, histH, cutOff, parents, rcpTab,
              toFloatGrad, toFloatHess, lambda, alpha, minChildWeight, nf);
-        s.sync();
+        log.sync(s);
         return;
     }
 
@@ -223,6 +237,14 @@ public final class GpuSplitFinder {
                                   GradientQuantiser q,
                                   float64 lambda, float64 alpha,
                                   float64 minChildWeight) {
+        TransferLog log = heap TransferLog();
+        return GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight, log);
+    }
+
+    /** {@link #findBest}, with its transfers and sync counted in `log`. */
+    static #Split findBest(Histogram hist, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                           GradientQuantiser q, float64 lambda, float64 alpha,
+                           float64 minChildWeight, TransferLog log) {
         KernelBuffer<int32> rcpTab = SfuMath.deviceRcpTable();
         if (rcpTab == null) {
             throw heap RecoverableException("GpuSplitFinder.findBest: the SFU "
@@ -259,10 +281,11 @@ public final class GpuSplitFinder {
         dHistH.upload(hist.h);
         dCut.upload(cutOffH);
         dParents.upload(parentsH);
+        log.upSmalls((int64) 7);
 
         GpuSplitFinder.launchScan(dGain, dMeta, dStats, dHistG, dHistH, dCut, dParents,
             rcpTab, q.toFloatGrad, q.toFloatHess, lambda, alpha, minChildWeight,
-            (uint32) nf);
+            (uint32) nf, log);
 
         float32[] featGain = heap float32[nf];
         int32[] featMeta = heap int32[nf * (int64) 3];
@@ -270,6 +293,7 @@ public final class GpuSplitFinder {
         dGain.download(featGain);
         dMeta.download(featMeta);
         dStats.download(featStats);
+        log.downSmalls((int64) 3);
 
         // Stage B — verbatim from SplitFinder.findBest.
         Split best = heap Split();

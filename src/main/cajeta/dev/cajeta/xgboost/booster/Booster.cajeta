@@ -137,6 +137,7 @@ public final class Booster {
         boolean onDevice = device || prepared != null;
         if (prepared != null) { st #= prepared; }
         else if (device) { st #= GpuTrainState.create(bins, cutPtrs, n); }
+        if (st != null) { st.beginFit(label, base, K); }
 
         int64 r = (int64) 0;
         while (r < rounds) {

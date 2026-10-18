@@ -1,0 +1,59 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.xpu.KernelStream;
+
+/** One fit's host-device transfers by size class (n*nf cells, n-proportional rows, small) and its stream syncs. */
+final class TransferLog {
+
+    static int64 processUpCells;
+    static int64 processUpRows;
+
+    int64 upCells;
+    int64 upRows;
+    int64 upSmall;
+    int64 downCells;
+    int64 downRows;
+    int64 downSmall;
+    int64 syncs;
+    int64 trees;
+    int64 treeStart;
+    int64 treeMax;
+
+    TransferLog() { return; }
+
+    void upCell() {
+        this.upCells = this.upCells + (int64) 1;
+        TransferLog.processUpCells = TransferLog.processUpCells + (int64) 1;
+    }
+
+    void upRow() {
+        this.upRows = this.upRows + (int64) 1;
+        TransferLog.processUpRows = TransferLog.processUpRows + (int64) 1;
+    }
+
+    void upSmalls(int64 k) { this.upSmall = this.upSmall + k; }
+    void downCell() { this.downCells = this.downCells + (int64) 1; }
+    void downRow() { this.downRows = this.downRows + (int64) 1; }
+    void downSmalls(int64 k) { this.downSmall = this.downSmall + k; }
+
+    /** Waits on `s` and counts the synchronization. */
+    void sync(KernelStream s) {
+        s.sync();
+        this.syncs = this.syncs + (int64) 1;
+    }
+
+    /** Opens a tree's sync window, closing the previous one. */
+    void beginTree() {
+        this.treeMax = this.maxTreeSyncs();
+        this.trees = this.trees + (int64) 1;
+        this.treeStart = this.syncs;
+    }
+
+    /** The most syncs any tree has made so far, the open tree included. */
+    int64 maxTreeSyncs() {
+        if (this.trees == (int64) 0) { return (int64) 0; }
+        int64 open = this.syncs - this.treeStart;
+        if (open > this.treeMax) { return open; }
+        return this.treeMax;
+    }
+}

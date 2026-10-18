@@ -95,10 +95,10 @@ public final class GpuHistogram {
      * Builds the histogram of the segment `[begin, begin + count)` of `ridx` into
      * `hist` (`2 * nbins + 2` words: G and H per bin, then the totals) and waits.
      */
-    public static void buildSegment(KernelBuffer<int64> hist, KernelBuffer<int32> bins,
-                                    KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
-                                    KernelBuffer<int32> ridx, int64 begin, int64 count,
-                                    int64 nf, int64 nbins) {
+    static void buildSegment(KernelBuffer<int64> hist, KernelBuffer<int32> bins,
+                             KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
+                             KernelBuffer<int32> ridx, int64 begin, int64 count,
+                             int64 nf, int64 nbins, TransferLog log) {
         KernelStream s #= KernelStream.current();
         uint32 words = (uint32) ((int64) 2 * nbins + (int64) 2);
         zeroWords.launch(s, grid: [(words + 255) / 256], block: [256])(hist, words);
@@ -108,7 +108,7 @@ public final class GpuHistogram {
                 (hist, bins, cutOff, q, ridx, (uint32) begin, (uint32) count,
                  (uint32) nf, (uint32) nbins);
         }
-        s.sync();
+        log.sync(s);
         return;
     }
 
