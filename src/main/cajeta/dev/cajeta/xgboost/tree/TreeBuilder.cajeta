@@ -42,6 +42,11 @@ public final class TreeBuilder {
 
     static float32 kRtEps() { return (float32) 0.000001; }   // 1e-6f (include/xgboost/base.h)
 
+    static boolean perNode;
+
+    /** With `on`, a device fit grows node by node as 0.5.0 did instead of a level at a time; a timing hook. */
+    public static void usePerNodePath(boolean on) { TreeBuilder.perNode = on; }
+
     /** Backing-array size needed for a tree of the given `maxDepth`. */
     public static int64 capacity(int64 maxDepth) { return ((int64) 1) << (maxDepth + (int64) 1); }
 
@@ -146,7 +151,7 @@ public final class TreeBuilder {
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
                              float32[] lossChg, float64[] sumHess,
                              int64[] leafOf, boolean device, GpuTrainState st) {
-        if (st != null && SfuMath.hasRcpTable()) {
+        if (st != null && SfuMath.hasRcpTable() && !TreeBuilder.perNode) {
             return TreeBuilder.growLevels(st, bins, cutPtrs, cutValues, grad, hess, n, maxDepth,
                                           maxLeaves, lambda, alpha, gamma, minChildWeight, eta,
                                           si, sc, dl, lc, rc, bw, leaf, lossChg, sumHess, leafOf);

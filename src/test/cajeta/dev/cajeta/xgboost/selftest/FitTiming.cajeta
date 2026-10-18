@@ -1,0 +1,119 @@
+package dev.cajeta.xgboost.selftest;
+
+import cajeta.math.Tensor;
+import cajeta.time.Clock;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
+import dev.cajeta.xgboost.sketch.Binner;
+import dev.cajeta.xgboost.sketch.Sketch;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+
+/**
+ * xgboost-device-training 9.1.1: a whole device `Booster.train` (10 rounds,
+ * depth 6, eta 0.3, lambda 1), a level at a time against 0.5.0's node at a
+ * time, interleaved, on the large fixtures and generated 200k and 1M x 50
+ * sets. Runs only with XGB_TIME_FIT set, and prints medians.
+ */
+public class FitTiming {
+
+    public FitTiming() { return; }
+
+    /** One device fit's wall time in nanoseconds, per node when `perNode`. */
+    static int64 fitOnce(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                         float64[] label, int64 n, Objective obj, int64 K, boolean perNode) {
+        TreeBuilder.usePerNodePath(perNode);
+        int64 t0 = Clock.nanoTime();
+        Model m #= Booster.train(bins, cutPtrs, cutValues, label, n, (int64) 10,
+                                (int64) 6, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                (float64) 0.3, (float64) 0.5, obj, K, null, true);
+        int64 ns = Clock.nanoTime() - t0;
+        TreeBuilder.usePerNodePath(false);
+        return ns;
+    }
+
+    static void timeFit(String label, Tensor<int32> bins, Tensor<int64> cutPtrs,
+                        Tensor<float64> cutValues, float64[] y, int64 n, Objective obj, int64 K,
+                        int64 reps) {
+        int64[] lv = heap int64[reps];
+        int64[] pn = heap int64[reps];
+        int64 r = (int64) -1;
+        while (r < reps) {
+            int64 tl = (int64) 0;
+            int64 tp = (int64) 0;
+            if (r % (int64) 2 == (int64) 0) {
+                tl = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, false);
+                tp = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, true);
+            } else {
+                tp = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, true);
+                tl = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, false);
+            }
+            if (r >= (int64) 0) {
+                lv[r] = tl;
+                pn[r] = tp;
+            }
+            r = r + (int64) 1;
+        }
+        System.stdout.println("fit " + label + " n " + n + ": levels "
+            + FeatureScanTiming.median(lv, reps) / (int64) 1000000 + " ms, per-node "
+            + FeatureScanTiming.median(pn, reps) / (int64) 1000000 + " ms, median of " + reps);
+        return;
+    }
+
+    static void timeFixture(String fixture, Objective obj, int64 K, int64 reps) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.shapeAt(0);
+        float64[] y #= ApiTest.labelOf(f, n);
+        FitTiming.timeFit(fixture, f.bins(), f.cutPtrs(), f.cutValues(), y, n, obj, K, reps);
+        return;
+    }
+
+    /** A generated `n x 50` regression set, binned on the host, timed like a fixture. */
+    static void timeGenerated(int64 n, int64 reps) {
+        int64 nf = (int64) 50;
+        Tensor<float64> x #= PrepTiming.generated(n, nf);
+        int64[] cutPtrsA = heap int64[nf + (int64) 1];
+        float32[] cuts #= Sketch.cuts(x, n, nf, (int64) 256, cutPtrsA);
+        int64 total = cutPtrsA[nf];
+        float64[] cv = heap float64[total];
+        int64 c = (int64) 0;
+        while (c < total) { cv[c] = (float64) cuts[c]; c = c + (int64) 1; }
+        int64[] cvShape = heap int64[1];
+        cvShape[0] = total;
+        Tensor<float64> cutValues #= Tensor.of<float64>(cv, cvShape);
+        int64[] cpShape = heap int64[1];
+        cpShape[0] = nf + (int64) 1;
+        Tensor<int64> cutPtrs #= Tensor.of<int64>(cutPtrsA, cpShape);
+        int32[] binsA #= Binner.bin(x, cutPtrs, cutValues, n, nf);
+        int64[] bShape = heap int64[2];
+        bShape[0] = n;
+        bShape[1] = nf;
+        Tensor<int32> bins #= Tensor.of<int32>(binsA, bShape);
+        float64[] y = heap float64[n];
+        int64 r = (int64) 0;
+        while (r < n) {
+            float64 a = x.flatGet(r * nf);
+            float64 b = x.flatGet(r * nf + (int64) 1);
+            if (a != a) { a = (float64) 0.0; }
+            if (b != b) { b = (float64) 0.0; }
+            y[r] = a - (float64) 0.5 * b;
+            r = r + (int64) 1;
+        }
+        FitTiming.timeFit("generated", bins, cutPtrs, cutValues, y, n, Objective.SQUARED_ERROR,
+                          (int64) 1, reps);
+        return;
+    }
+
+    @Test
+    public void levelsAgainstPerNodeAtTheBenchmarkShapes() {
+        if (System.env.get("XGB_TIME_FIT") == null) { return; }
+        FitTiming.timeFixture("large_reg", Objective.SQUARED_ERROR, (int64) 1, (int64) 5);
+        FitTiming.timeFixture("large_binary", Objective.LOGISTIC, (int64) 1, (int64) 5);
+        FitTiming.timeFixture("large_multi", Objective.SOFTMAX, (int64) 4, (int64) 3);
+        FitTiming.timeGenerated((int64) 200000, (int64) 3);
+        FitTiming.timeGenerated((int64) 1000000, (int64) 3);
+        return;
+    }
+}
