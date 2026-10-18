@@ -1,0 +1,48 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.objective.Objective;
+
+/** xgboost-device-training Unit 8: a `maxLeaves` fit on the device. */
+public class GpuMaxLeavesTest {
+
+    public GpuMaxLeavesTest() { return; }
+
+    /** A depth-6, 3-round fit capped at `maxLeaves`, on `st` when it is not null. */
+    static #Model fit(FixtureLoader f, GpuTrainState st, int64 maxLeaves, int64 n, float64[] label) {
+        float32[] mh = heap float32[(int64) 3 * n];
+        return Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, (int64) 3,
+                             (int64) 6, maxLeaves,
+                             (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                             (float64) 0.3, (float64) 0.5, Objective.SQUARED_ERROR, (int64) 1,
+                             mh, st != null, st);
+    }
+
+    /** The device and CPU models agree, and the cap binds: the first tree has `maxLeaves` leaves. */
+    static void assertCapped(String fixture, int64 maxLeaves) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        Model cpu #= GpuMaxLeavesTest.fit(f, null, maxLeaves, n, label);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model gpu #= GpuMaxLeavesTest.fit(f, st, maxLeaves, n, label);
+        Assert.equals((cpu.nodeCount[0] + (int64) 1) / (int64) 2, maxLeaves);
+        GrowDeviceTest.assertSameModel(cpu, gpu, (int64) 3, n);
+        return;
+    }
+
+    // 8.1.1: maxLeaves 8 and 31 on tiny_reg and large_reg give the CPU builder's model.
+    @Test
+    public void aMaxLeavesFitOnTheDeviceIsTheCpuModel() {
+        GpuMaxLeavesTest.assertCapped("tiny_reg", (int64) 8);
+        GpuMaxLeavesTest.assertCapped("tiny_reg", (int64) 31);
+        GpuMaxLeavesTest.assertCapped("large_reg", (int64) 8);
+        GpuMaxLeavesTest.assertCapped("large_reg", (int64) 31);
+        return;
+    }
+}
