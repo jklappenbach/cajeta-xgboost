@@ -7,7 +7,8 @@ import dev.cajeta.xgboost.tree.Split;
 
 /**
  * The device side of a training run (int64-scan-verbs spec 6.3): the bin
- * matrix, uploaded once per run, the quantized gradient pairs, uploaded once
+ * matrix, uploaded once per run or binned on the device from the raw values
+ * ({@link #fromValues}), the quantized gradient pairs, uploaded once
  * per tree, and a row-index buffer `ridx` in which each node's rows are one
  * contiguous segment in ascending row order, the CPU builder's order.
  * Splitting a node partitions its segment in place; a node's histogram reads
@@ -22,6 +23,8 @@ public final class GpuTrainState {
     public static int64 binUploads;
     /** Gradient-pair uploads since the process started; a test-only counter. */
     public static int64 gpairUploads;
+    /** Raw-value uploads for device binning since the process started; a test-only counter. */
+    public static int64 valueUploads;
 
     KernelBuffer<int32> bins;
     KernelBuffer<int32> cutOff;
@@ -39,17 +42,10 @@ public final class GpuTrainState {
     int64 nf;
     int64 nbins;
 
-    GpuTrainState(Tensor<int32> binsT, Tensor<int64> cutPtrs, int64 n) {
+    GpuTrainState(Tensor<int64> cutPtrs, int64 n) {
         this.n = n;
         this.nf = cutPtrs.shapeAt(0) - (int64) 1;
         this.nbins = cutPtrs.flatGet(this.nf);
-        int64 cells = n * this.nf;
-        int32[] binsH = heap int32[cells];
-        int64 c = (int64) 0;
-        while (c < cells) {
-            binsH[c] = binsT.flatGet(c);
-            c = c + (int64) 1;
-        }
         int32[] cutH = heap int32[this.nf];
         int64 f = (int64) 0;
         while (f < this.nf) {
@@ -57,7 +53,7 @@ public final class GpuTrainState {
             f = f + (int64) 1;
         }
         int64 blocks = (n + GpuPartition.segmentBlock() - (int64) 1) / GpuPartition.segmentBlock();
-        this.bins = heap KernelBuffer<int32>(cells);
+        this.bins = heap KernelBuffer<int32>(n * this.nf);
         this.cutOff = heap KernelBuffer<int32>(this.nf);
         this.q = heap KernelBuffer<int64>(n * (int64) 2);
         this.ridx = heap KernelBuffer<int32>(n);
@@ -69,15 +65,65 @@ public final class GpuTrainState {
         this.qFixed = heap int64[n * (int64) 2];
         this.segBegin = heap int64[1];
         this.segCount = heap int64[1];
-        this.bins.upload(binsH);
-        GpuTrainState.binUploads = GpuTrainState.binUploads + (int64) 1;
         this.cutOff.upload(cutH);
     }
 
     /** A run's device state over `n` rows of `bins`; the bin matrix is uploaded here, once. */
     public static #GpuTrainState create(Tensor<int32> bins, Tensor<int64> cutPtrs, int64 n) {
-        GpuTrainState st = heap GpuTrainState(bins, cutPtrs, n);
+        GpuTrainState st = heap GpuTrainState(cutPtrs, n);
+        int64 cells = n * st.nf;
+        int32[] binsH = heap int32[cells];
+        int32[] hb = bins.hostBuffer();
+        int64 ho = bins.hostBase();
+        int64 c = (int64) 0;
+        while (c < cells) {
+            binsH[c] = hb[ho + c];
+            c = c + (int64) 1;
+        }
+        st.bins.upload(binsH);
+        GpuTrainState.binUploads = GpuTrainState.binUploads + (int64) 1;
         return #st;
+    }
+
+    /**
+     * A run's device state over the raw `[n, nf]` values `x`: the values go up
+     * once as float32 and are binned on the device by `cuts` (`cutPtrs`
+     * offsets), so no bin matrix crosses the bus.
+     */
+    public static #GpuTrainState fromValues(Tensor<float64> x, Tensor<int64> cutPtrs, float32[] cuts, int64 n) {
+        GpuTrainState st = heap GpuTrainState(cutPtrs, n);
+        int64 nf = st.nf;
+        int64 cells = n * nf;
+        int32[] bits #= GpuBinner.valueBits(x, n, nf);
+        KernelBuffer<int32> vals = heap KernelBuffer<int32>(cells);
+        vals.upload(bits);
+        GpuTrainState.valueUploads = GpuTrainState.valueUploads + (int64) 1;
+        int64 total = cutPtrs.flatGet(nf);
+        int32[] cutBits = heap int32[total];
+        int64 c = (int64) 0;
+        while (c < total) {
+            cutBits[c] = Cajeta.f32ToBits(cuts[c]);
+            c = c + (int64) 1;
+        }
+        int32[] ptrH = heap int32[nf + (int64) 1];
+        int64 f = (int64) 0;
+        while (f <= nf) {
+            ptrH[f] = (int32) cutPtrs.flatGet(f);
+            f = f + (int64) 1;
+        }
+        KernelBuffer<int32> cutsD = heap KernelBuffer<int32>(total);
+        KernelBuffer<int32> ptrD = heap KernelBuffer<int32>(nf + (int64) 1);
+        cutsD.upload(cutBits);
+        ptrD.upload(ptrH);
+        GpuBinner.binInto(st.bins, vals, cutsD, ptrD, cells, nf);
+        return #st;
+    }
+
+    /** The device bin matrix, downloaded; a test hook. */
+    public #int32[] deviceBins() {
+        int32[] out = heap int32[this.n * this.nf];
+        this.bins.download(out);
+        return #out;
     }
 
     /**

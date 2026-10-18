@@ -85,6 +85,23 @@ public final class Booster {
                                float64 eta, float64 baseScore,
                                Objective objective, int64 numClass,
                                float32[] marginHistory, boolean device) {
+        return Booster.train(bins, cutPtrs, cutValues, label, n, rounds,
+                             maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
+                             eta, baseScore, objective, numClass, marginHistory, device, null);
+    }
+
+    /**
+     * The device form over a `prepared` state (`GpuTrainState.fromValues`), which
+     * holds the bins already, so `bins` may be null; with `prepared` null it is
+     * the form above.
+     */
+    public static #Model train(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                               float64[] label, int64 n, int64 rounds,
+                               int64 maxDepth, int64 maxLeaves,
+                               float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
+                               float64 eta, float64 baseScore,
+                               Objective objective, int64 numClass,
+                               float32[] marginHistory, boolean device, GpuTrainState prepared) {
         int64 cap = TreeBuilder.capacity(maxDepth);
         // Output groups per round. K trees are grown per round, one per class,
         // each over ITS OWN gradient slice — the objective is the only thing
@@ -117,7 +134,9 @@ public final class Booster {
         int64[] leafOf = heap int64[n];
         // The device side of the run: the bin matrix goes up once, here.
         GpuTrainState st = null;
-        if (device) { st #= GpuTrainState.create(bins, cutPtrs, n); }
+        boolean onDevice = device || prepared != null;
+        if (prepared != null) { st #= prepared; }
+        else if (device) { st #= GpuTrainState.create(bins, cutPtrs, n); }
 
         int64 r = (int64) 0;
         while (r < rounds) {
@@ -148,7 +167,7 @@ public final class Booster {
                 int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, gradK, hessK, n,
                                             maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
                                             eta, si, sc, dl, lc, rc, bw, lf, lch, shs, leafOf,
-                                            device, st);
+                                            onDevice, st);
                 // Tree index is round-major: r*K + g, so class g's trees are
                 // every K-th tree — XGBoost's own layout.
                 int64 t = r * K + g;

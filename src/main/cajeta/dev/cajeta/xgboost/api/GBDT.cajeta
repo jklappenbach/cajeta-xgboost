@@ -10,6 +10,7 @@ import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.predict.TreeWalker;
 import dev.cajeta.xgboost.sketch.Sketch;
 import dev.cajeta.xgboost.sketch.Binner;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
 
 /**
  * The public `fit`/`predict` surface for `reg:squarederror` (spec §1.7). It ties the
@@ -86,18 +87,28 @@ public final class GBDT {
         int64[] cvShape = heap int64[1]; cvShape[0] = total;
         Tensor<float64> cutValuesT #= Tensor.of<float64>(cutVals, cvShape);
 
+        int64 K = p.outputGroups();
+        float32[] marginHistory = heap float32[p.rounds * n * K];
+        if (p.deviceGpu()) {
+            // The values go up once and are binned on the device (data-prep spec 4).
+            GpuTrainState st #= GpuTrainState.fromValues(x, cutPtrsT, cuts, n);
+            Model md #= Booster.train(null, cutPtrsT, cutValuesT, label, n, p.rounds,
+                                     p.maxDepth, p.maxLeaves,
+                                     p.lambda, p.alpha, p.gamma, p.minChildWeight,
+                                     p.eta, p.baseScore, p.objective, p.numClass,
+                                     marginHistory, true, st);
+            md.deterministic = deterministic;
+            return #md;
+        }
+
         int32[] binsA #= Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
         int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
         Tensor<int32> binsT #= Tensor.of<int32>(binsA, bShape);
-
-        // Boosting loop over the binned matrix.
-        int64 K = p.outputGroups();
-        float32[] marginHistory = heap float32[p.rounds * n * K];
         Model m #= Booster.train(binsT, cutPtrsT, cutValuesT, label, n, p.rounds,
                                 p.maxDepth, p.maxLeaves,
                                 p.lambda, p.alpha, p.gamma, p.minChildWeight,
                                 p.eta, p.baseScore, p.objective, p.numClass,
-                                marginHistory, p.deviceGpu());
+                                marginHistory, false);
         m.deterministic = deterministic;
         return #m;
     }

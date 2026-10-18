@@ -1,0 +1,99 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.concurrent.Carriers;
+import cajeta.math.Tensor;
+import cajeta.xpu.KernelBuffer;
+import cajeta.xpu.KernelStream;
+import cajeta.xpu.KernelThread;
+
+/**
+ * The device binner (xgboost-data-prep spec 4): one thread per (row, feature)
+ * cell computes `min(upper_bound(cuts, v), nbins - 1)`, or -1 for NaN, the
+ * same bin as `Binner.bin`. Values and cuts arrive as float32 bits and are
+ * compared as integer order keys, in which -0 and +0 are one key, so the
+ * kernel is integer-only and gives the same bins on every backend.
+ */
+public final class GpuBinner {
+
+    /** Order key of float32 bits `b` (not NaN): float order, with both zeros equal. */
+    @Device
+    static int32 orderKey(int32 b) {
+        if (b >= 0) { return b; }
+        return (int32) 0 - (b & (int32) 0x7FFFFFFF);
+    }
+
+    @Kernel
+    public static void binCells(KernelBuffer<int32> out,
+                                KernelBuffer<int32> vals,
+                                KernelBuffer<int32> cuts,
+                                KernelBuffer<int32> ptr,
+                                uint32 cells, uint32 nf) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < cells) {
+            int32 b = vals[i];
+            if ((b & (int32) 0x7FFFFFFF) > (int32) 0x7F800000) {
+                out[i] = (int32) -1;
+            } else {
+                int32 k = GpuBinner.orderKey(b);
+                uint32 r = i / nf;
+                uint32 f = i - r * nf;
+                int32 b0 = ptr[f];
+                int32 b1 = ptr[f + 1];
+                int32 lo = b0;
+                int32 hi = b1;
+                while (lo < hi) {
+                    int32 mid = lo + (hi - lo) / 2;
+                    if (GpuBinner.orderKey(cuts[mid]) > k) { hi = mid; }
+                    else { lo = mid + 1; }
+                }
+                int32 idx = lo - b0;
+                if (idx > b1 - b0 - 1) { idx = b1 - b0 - 1; }
+                out[i] = idx;
+            }
+        }
+    }
+
+    /** Narrows rows `[r0, r1)` of the contiguous host tensor `x` to float32 bits in `out`. */
+    static async int32 narrowRows(Tensor<float64> x, int32[] out, int64 r0, int64 r1, int64 nf) {
+        float64[] xb = x.hostBuffer();
+        int64 xo = x.hostBase();
+        int64 c = r0 * nf;
+        int64 end = r1 * nf;
+        while (c < end) {
+            out[c] = Cajeta.f32ToBits((float32) xb[xo + c]);
+            c = c + (int64) 1;
+        }
+        return (int32) 0;
+    }
+
+    /** The `[n, nf]` values of `x` as float32 bits, row-major, narrowed across the carriers. */
+    public static #int32[] valueBits(Tensor<float64> x, int64 n, int64 nf) {
+        int32[] out = heap int32[n * nf];
+        int64 parts = (int64) Carriers.count() * (int64) 2;
+        int64 step = (n + parts - (int64) 1) / parts;
+        if (step < (int64) 1) { step = (int64) 1; }
+        scope {
+            int64 r0 = (int64) 0;
+            while (r0 < n) {
+                int64 r1 = r0 + step;
+                if (r1 > n) { r1 = n; }
+                spawn narrowRows(x, out, r0, r1, nf);
+                r0 = r1;
+            }
+        }
+        return #out;
+    }
+
+    /** Bins `cells` values (float32 bits, row-major over `nf` features) into `out` and waits. */
+    public static void binInto(KernelBuffer<int32> out, KernelBuffer<int32> vals,
+                               KernelBuffer<int32> cuts, KernelBuffer<int32> ptr,
+                               int64 cells, int64 nf) {
+        KernelStream s #= KernelStream.current();
+        uint32 c = (uint32) cells;
+        if (c > 0) {
+            binCells.launch(s, grid: [(c + 255) / 256], block: [256])(out, vals, cuts, ptr, c, (uint32) nf);
+        }
+        s.sync();
+        return;
+    }
+}
