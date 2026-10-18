@@ -2,6 +2,7 @@ package dev.cajeta.xgboost.gpu;
 
 import cajeta.math.Tensor;
 import cajeta.xpu.KernelBuffer;
+import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
 import dev.cajeta.xgboost.tree.Split;
@@ -238,6 +239,35 @@ public final class GpuTrainState {
             k = k + (int64) 1;
         }
         return #rows;
+    }
+
+    /** Uploads the host margins, `n * groups` row-major. */
+    public void uploadMargins(float32[] margin) {
+        this.margins.upload(margin);
+        this.log.upRow();
+    }
+
+    /** Computes the gradient pairs of `o` from the device margins into the device G and H. */
+    public void gradients(Objective o) {
+        GpuObjective.launch(o, this.gradG, this.gradH, this.margins, this.labels,
+                            this.n, this.groups, this.log);
+    }
+
+    /** Downloads the device G and H into `grad` and `hess`, `n * groups` row-major. */
+    public void downloadGradients(float64[] grad, float64[] hess) {
+        int64 rows = this.n * this.groups;
+        float32[] g = heap float32[rows];
+        float32[] h = heap float32[rows];
+        this.gradG.download(g);
+        this.log.downRow();
+        this.gradH.download(h);
+        this.log.downRow();
+        int64 i = (int64) 0;
+        while (i < rows) {
+            grad[i] = (float64) g[i];
+            hess[i] = (float64) h[i];
+            i = i + (int64) 1;
+        }
     }
 
     /** {@link GpuSplitFinder#findBest} on `hist`, counted in this fit's log. */

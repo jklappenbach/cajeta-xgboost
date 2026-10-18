@@ -1,0 +1,184 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.objective.Logistic;
+import dev.cajeta.xgboost.objective.Objective;
+import dev.cajeta.xgboost.objective.Softmax;
+import dev.cajeta.xgboost.objective.SquaredError;
+
+/** xgboost-device-training Unit 2: each objective's device gradient pairs equal the host's bit for bit. */
+public class GpuObjectiveTest {
+
+    public GpuObjectiveTest() { return; }
+
+    static float32 baseOf(Objective o) {
+        if (o == Objective.LOGISTIC) { return Logistic.baseMargin((float64) 0.5); }
+        if (o == Objective.SOFTMAX) { return Softmax.baseMargin((float64) 0.5); }
+        return SquaredError.baseMargin((float64) 0.5);
+    }
+
+    static void hostGrads(Objective o, float32[] m, float64[] label, int64 n, int64 K,
+                          float64[] g, float64[] h) {
+        if (o == Objective.LOGISTIC) { Logistic.gradHess(m, label, n, g, h); return; }
+        if (o == Objective.SOFTMAX) { Softmax.gradHess(m, label, n, K, g, h); return; }
+        SquaredError.gradHess(m, label, n, g, h);
+    }
+
+    static void assertSameBits(String what, float64[] want, float64[] got, int64 count) {
+        int64 t = (int64) 0;
+        while (t < count) {
+            if (Cajeta.f64ToBits(got[t]) != Cajeta.f64ToBits(want[t])) {
+                Assert.fail(what + ": entry " + Int64.of(t).toString() + " has bits "
+                            + Int64.of(Cajeta.f64ToBits(got[t])).toString() + " on the device, "
+                            + Int64.of(Cajeta.f64ToBits(want[t])).toString() + " on the host");
+            }
+            t = t + (int64) 1;
+        }
+    }
+
+    /** Rounds 0 to 2 of `o` on `fixture`, from a host fit's margin history. */
+    static void assertRounds(String fixture, Objective o, int64 K) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        int64 rounds = (int64) 3;
+        int64 rows = n * K;
+        float32[] mh = heap float32[rounds * rows];
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
+                                n, rounds, (int64) 4, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                o, K, mh, false);
+        float32 base = GpuObjectiveTest.baseOf(o);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginFit(label, base, K);
+        float32[] margin = heap float32[rows];
+        float64[] hg = heap float64[rows];
+        float64[] hh = heap float64[rows];
+        float64[] dg = heap float64[rows];
+        float64[] dh = heap float64[rows];
+        int64 r = (int64) 0;
+        while (r < rounds) {
+            int64 t = (int64) 0;
+            while (t < rows) {
+                if (r == (int64) 0) { margin[t] = base; }
+                else { margin[t] = mh[(r - (int64) 1) * rows + t]; }
+                t = t + (int64) 1;
+            }
+            GpuObjectiveTest.hostGrads(o, margin, label, n, K, hg, hh);
+            st.uploadMargins(margin);
+            st.gradients(o);
+            st.downloadGradients(dg, dh);
+            String at = fixture + " round " + Int64.of(r).toString();
+            GpuObjectiveTest.assertSameBits(at + " grad", hg, dg, rows);
+            GpuObjectiveTest.assertSameBits(at + " hess", hh, dh, rows);
+            r = r + (int64) 1;
+        }
+        return;
+    }
+
+    /** A distinct margin for every (row, class) across [-30, 30], on `fixture`'s labels. */
+    static void assertSweep(String fixture, Objective o, int64 K) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        int64 rows = n * K;
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginFit(label, GpuObjectiveTest.baseOf(o), K);
+        float32[] margin = heap float32[rows];
+        int64 t = (int64) 0;
+        while (t < rows) {
+            margin[t] = (float32) ((float64) -30.0 + (float64) 60.0 * (float64) t / (float64) rows);
+            t = t + (int64) 1;
+        }
+        float64[] hg = heap float64[rows];
+        float64[] hh = heap float64[rows];
+        float64[] dg = heap float64[rows];
+        float64[] dh = heap float64[rows];
+        GpuObjectiveTest.hostGrads(o, margin, label, n, K, hg, hh);
+        st.uploadMargins(margin);
+        st.gradients(o);
+        st.downloadGradients(dg, dh);
+        GpuObjectiveTest.assertSameBits(fixture + " sweep grad", hg, dg, rows);
+        GpuObjectiveTest.assertSameBits(fixture + " sweep hess", hh, dh, rows);
+        return;
+    }
+
+    @Test
+    public void sweptMarginsGiveTheHostsGradients() {
+        GpuObjectiveTest.assertSweep("large_reg", Objective.SQUARED_ERROR, (int64) 1);
+        GpuObjectiveTest.assertSweep("large_binary", Objective.LOGISTIC, (int64) 1);
+        GpuObjectiveTest.assertSweep("large_multi", Objective.SOFTMAX, (int64) 4);
+        return;
+    }
+
+    @Test
+    public void squaredErrorGradientsAreTheHosts() {
+        GpuObjectiveTest.assertRounds("tiny_reg", Objective.SQUARED_ERROR, (int64) 1);
+        GpuObjectiveTest.assertRounds("large_reg", Objective.SQUARED_ERROR, (int64) 1);
+        return;
+    }
+
+    @Test
+    public void logisticGradientsAreTheHosts() {
+        GpuObjectiveTest.assertRounds("tiny_binary", Objective.LOGISTIC, (int64) 1);
+        GpuObjectiveTest.assertRounds("large_binary", Objective.LOGISTIC, (int64) 1);
+        return;
+    }
+
+    @Test
+    public void softmaxGradientsAreTheHosts() {
+        GpuObjectiveTest.assertRounds("tiny_multi", Objective.SOFTMAX, (int64) 4);
+        GpuObjectiveTest.assertRounds("large_multi", Objective.SOFTMAX, (int64) 4);
+        return;
+    }
+
+    /** The 4090's captured softmax pairs (`SoftmaxObjectiveTest`), from the device kernel. */
+    @Test
+    public void softmaxGradientsAreThe4090s() {
+        if (!SfuMath.hasEx2Table()) {
+            return;
+        }
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> yT #= f.y();
+        Tensor<float64> devGrad #= f.deviceGrad();
+        Tensor<float64> devHess #= f.deviceHess();
+        Tensor<float64> margins #= f.margins();
+        int64 n = yT.shapeAt(0);
+        int64 K = (int64) 4;
+        int64 rows = n * K;
+        int64 sets = devGrad.shapeAt(0);
+        float64[] label #= ApiTest.labelOf(f, n);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginFit(label, (float32) 0.5, K);
+        float32[] margin = heap float32[rows];
+        float64[] dg = heap float64[rows];
+        float64[] dh = heap float64[rows];
+        float64[] wg = heap float64[rows];
+        float64[] wh = heap float64[rows];
+        int64 r = (int64) 0;
+        while (r < sets) {
+            int64 t = (int64) 0;
+            while (t < rows) {
+                margin[t] = (float32) margins.flatGet(r * rows + t);
+                wg[t] = devGrad.flatGet(r * rows + t);
+                wh[t] = devHess.flatGet(r * rows + t);
+                t = t + (int64) 1;
+            }
+            st.uploadMargins(margin);
+            st.gradients(Objective.SOFTMAX);
+            st.downloadGradients(dg, dh);
+            GpuObjectiveTest.assertSameBits("4090 set " + Int64.of(r).toString() + " grad", wg, dg, rows);
+            GpuObjectiveTest.assertSameBits("4090 set " + Int64.of(r).toString() + " hess", wh, dh, rows);
+            r = r + (int64) 1;
+        }
+        return;
+    }
+}

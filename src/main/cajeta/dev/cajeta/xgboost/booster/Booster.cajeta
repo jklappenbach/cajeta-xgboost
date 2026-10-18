@@ -142,7 +142,13 @@ public final class Booster {
         int64 r = (int64) 0;
         while (r < rounds) {
             // (1) Per-row (per-class) gradient pair from the current margins.
-            Booster.gradHessOf(objective, margin, label, n, K, grad, hess);
+            if (st != null) {
+                if (r > (int64) 0) { st.uploadMargins(margin); }
+                st.gradients(objective);
+                st.downloadGradients(grad, hess);
+            } else {
+                Booster.gradHessOf(objective, margin, label, n, K, grad, hess);
+            }
             int64 g = (int64) 0;
             while (g < K) {
                 // This class's gradient slice: row-major [n*K], class g at

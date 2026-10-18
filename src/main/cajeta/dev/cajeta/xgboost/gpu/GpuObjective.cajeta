@@ -1,0 +1,187 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.math.sfu.SfuMath;
+import cajeta.xpu.KernelBuffer;
+import cajeta.xpu.KernelStream;
+import cajeta.xpu.KernelThread;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * The objectives' gradient pairs on the device (xgboost-device-training spec 3):
+ * one thread per row, or per (row, class) for softmax, in the host objectives'
+ * op order, with `expf` evaluated as `SfuMath.expf` against a device copy of its
+ * exp2 table, so every pair equals the host's bit for bit.
+ */
+final class GpuObjective {
+
+    private static KernelBuffer<int32> dEx2;
+    private static boolean dEx2Built;
+
+    /** `SfuMath.fmaf`: `a*b + c` rounded once to float32. */
+    @Device
+    static float32 fmafDev(float32 a, float32 b, float32 c) {
+        float64 p = (float64) a * (float64) b;
+        float64 cc = (float64) c;
+        float64 s = p + cc;
+        float64 bv = s - p;
+        float64 err = (p - (s - bv)) + (cc - bv);
+        if (err != (float64) 0.0) {
+            int64 sb = Cajeta.f64ToBits(s);
+            if ((sb & (int64) 1) == (int64) 0) {
+                boolean up = err > (float64) 0.0;
+                if (s >= (float64) 0.0) {
+                    if (up) { sb = sb + (int64) 1; } else { sb = sb - (int64) 1; }
+                } else {
+                    if (up) { sb = sb - (int64) 1; } else { sb = sb + (int64) 1; }
+                }
+                s = Cajeta.bitsToF64(sb);
+            }
+        }
+        return (float32) s;
+    }
+
+    /** `floor(v)` for any float64 `v`. */
+    @Device
+    static float64 floorDev(float64 v) {
+        if (!(v > (float64) -4503599627370496.0 && v < (float64) 4503599627370496.0)) { return v; }
+        int64 t = (int64) v;
+        if ((float64) t > v) { t = t - (int64) 1; }
+        return (float64) t;
+    }
+
+    /** `SfuMath.ex2Approx` against the device table `ex2`. */
+    @Device
+    static float32 ex2Dev(float32 y, KernelBuffer<int32> ex2) {
+        float64 yd = (float64) y;
+        float64 nf = GpuObjective.floorDev(yd);
+        float64 fr = yd - nf;
+        int64 idx = (int64) GpuObjective.floorDev(fr * (float64) 8388608.0);
+        if (idx < (int64) 0) { idx = (int64) 0; }
+        if (idx > (int64) 8388607) { idx = (int64) 8388607; }
+        float32 base = Cajeta.bitsToF32(ex2[(uint32) idx]);
+        if (nf == (float64) 0.0) { return base; }
+        if (nf < (float64) -1022.0) { return (float32) 0.0; }
+        if (nf > (float64) 1023.0) { return (float32) ((float64) base * (float64) 1.0e308 * (float64) 10.0); }
+        int64 e = (int64) nf;
+        float64 p2 = Cajeta.bitsToF64((e + (int64) 1023) << (int64) 52);
+        return (float32) ((float64) base * p2);
+    }
+
+    /** `SfuMath.expf`, the device `__nv_expf` model, against the device table `ex2`. */
+    @Device
+    static float32 expfDev(float32 x, KernelBuffer<int32> ex2) {
+        float32 hi = (float32) 1.442695021629333496;
+        float32 lo = (float32) 1.925962991460541939e-8;
+        float32 c = (float32) ((float64) hi / (float64) 252.0);
+        float32 j = GpuObjective.fmafDev(x, c, (float32) 0.5);
+        if (!(j >= (float32) 0.0)) { j = (float32) 0.0; }
+        if (j > (float32) 1.0) { j = (float32) 1.0; }
+        int32 k = (int32) ((float64) j * (float64) 252.0);
+        float32 n = (float32) (k - (int32) 126);
+        float32 s = Cajeta.bitsToF32((k + (int32) 1) << (int32) 23);
+        float32 f = GpuObjective.fmafDev(x, hi, (float32) 0.0 - n);
+        f = GpuObjective.fmafDev(x, lo, f);
+        return GpuObjective.ex2Dev(f, ex2) * s;
+    }
+
+    @Kernel
+    public static void squaredError(KernelBuffer<float32> g, KernelBuffer<float32> h,
+                                    KernelBuffer<float32> margin, KernelBuffer<float64> label,
+                                    uint32 n) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < n) {
+            g[i] = margin[i] - (float32) label[i];
+            h[i] = (float32) 1.0;
+        }
+    }
+
+    @Kernel
+    public static void logistic(KernelBuffer<float32> g, KernelBuffer<float32> h,
+                                KernelBuffer<float32> margin, KernelBuffer<float64> label,
+                                KernelBuffer<int32> ex2, uint32 n) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < n) {
+            float32 x = (float32) 0.0 - margin[i];
+            if (x > (float32) 88.7) { x = (float32) 88.7; }
+            float32 denom = GpuObjective.expfDev(x, ex2) + (float32) 1.0 + (float32) 0.0000000000000001;
+            float32 p = (float32) 1.0 / denom;
+            g[i] = p - (float32) label[i];
+            float32 hp = p * ((float32) 1.0 - p);
+            if (hp < (float32) 0.0000000000000001) { hp = (float32) 0.0000000000000001; }
+            h[i] = hp;
+        }
+    }
+
+    @Kernel
+    public static void softmax(KernelBuffer<float32> g, KernelBuffer<float32> h,
+                               KernelBuffer<float32> margin, KernelBuffer<float64> label,
+                               KernelBuffer<int32> ex2, uint32 n, uint32 nk) {
+        uint32 t = KernelThread.globalIdX();
+        if (t < n * nk) {
+            uint32 i = t / nk;
+            uint32 k = t - i * nk;
+            uint32 base = i * nk;
+            float32 wmax = Cajeta.bitsToF32((int32) 0x00800000);
+            uint32 c = 0;
+            while (c < nk) {
+                if (margin[base + c] > wmax) { wmax = margin[base + c]; }
+                c = c + 1;
+            }
+            float64 wsum = (float64) 0.0;
+            c = 0;
+            while (c < nk) {
+                wsum = wsum + (float64) GpuObjective.expfDev(margin[base + c] - wmax, ex2);
+                c = c + 1;
+            }
+            int64 yc = (int64) label[i];
+            float32 s = (float32) wsum;
+            float32 p = GpuObjective.expfDev(margin[base + k] - wmax, ex2) / s;
+            float32 hp = (float32) 2.0 * p * ((float32) 1.0 - p);
+            if (hp < (float32) 0.0000000000000001) { hp = (float32) 0.0000000000000001; }
+            float32 gv = p;
+            if ((int64) k == yc) { gv = p - (float32) 1.0; }
+            g[t] = gv;
+            h[t] = hp;
+        }
+    }
+
+    /** `SfuMath`'s exp2 table on the device, built once per process. */
+    static KernelBuffer<int32> ex2Table() {
+        if (!GpuObjective.dEx2Built) {
+            GpuObjective.dEx2Built = true;
+            int64 n = (int64) 8388608;
+            int32[] host = heap int32[n];
+            int64 i = (int64) 0;
+            while (i < n) {
+                host[i] = Cajeta.f32ToBits(SfuMath.ex2Mantissa((int32) i));
+                i = i + (int64) 1;
+            }
+            KernelBuffer<int32> d = heap KernelBuffer<int32>(n);
+            d.upload(host);
+            GpuObjective.dEx2 #= d;
+        }
+        return GpuObjective.dEx2;
+    }
+
+    /** Writes the gradient pairs of `o` for `n` rows of `groups` classes into `g` and `h`, and waits. */
+    static void launch(Objective o, KernelBuffer<float32> g, KernelBuffer<float32> h,
+                       KernelBuffer<float32> margin, KernelBuffer<float64> label,
+                       int64 n, int64 groups, TransferLog log) {
+        KernelStream s #= KernelStream.current();
+        uint32 un = (uint32) n;
+        KernelBuffer<int32> ex2 = null;
+        if (o != Objective.SQUARED_ERROR) { ex2 = GpuObjective.ex2Table(); }
+        if (o == Objective.SOFTMAX) {
+            uint32 cells = (uint32) (n * groups);
+            softmax.launch(s, grid: [(cells + 255) / 256], block: [256])
+                (g, h, margin, label, ex2, un, (uint32) groups);
+        } else if (o == Objective.LOGISTIC) {
+            logistic.launch(s, grid: [(un + 255) / 256], block: [256])(g, h, margin, label, ex2, un);
+        } else {
+            squaredError.launch(s, grid: [(un + 255) / 256], block: [256])(g, h, margin, label, un);
+        }
+        s.sync();
+        log.synced();
+        return;
+    }
+}

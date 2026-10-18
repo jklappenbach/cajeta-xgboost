@@ -47,10 +47,10 @@ public class DeviceStateTest {
         Assert.equals(st.trees(), trees);
         Assert.equals(st.cellUploads(), (int64) 1);
         Assert.equals(st.cellDownloads(), (int64) 0);
-        // Labels and base margins once; per tree the quantized pairs; per split the block bases.
-        Assert.equals(st.rowUploads(), (int64) 2 + trees + splits);
-        // Per tree the leaf rows; per split the block counts.
-        Assert.equals(st.rowDownloads(), trees + splits);
+        // Labels and base margins once; per later round the margins; per tree the quantized pairs; per split the block bases.
+        Assert.equals(st.rowUploads(), (int64) 2 + (rounds - (int64) 1) + trees + splits);
+        // Per round G and H; per tree the leaf rows; per split the block counts.
+        Assert.equals(st.rowDownloads(), (int64) 2 * rounds + trees + splits);
         Assert.isTrue(st.smallUploads() >= (int64) 1);
         Assert.isTrue(st.syncs() >= trees);
         Assert.isTrue(st.maxTreeSyncs() >= (int64) 1);

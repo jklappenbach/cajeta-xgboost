@@ -42,6 +42,9 @@ final class TransferLog {
         this.syncs = this.syncs + (int64) 1;
     }
 
+    /** Counts a synchronization the caller made itself. */
+    void synced() { this.syncs = this.syncs + (int64) 1; }
+
     /** Opens a tree's sync window, closing the previous one. */
     void beginTree() {
         this.treeMax = this.maxTreeSyncs();
