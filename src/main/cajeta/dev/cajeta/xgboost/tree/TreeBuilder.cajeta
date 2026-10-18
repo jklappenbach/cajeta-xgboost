@@ -326,7 +326,7 @@ public final class TreeBuilder {
 
         // Final leaf assignment per row (every row ends at a leaf node).
         if (st != null) {
-            st.leafOf(leafOf, leaf, nodeCount);
+            if (leafOf != null) { st.leafOf(leafOf, leaf, nodeCount); }
             return nodeCount;
         }
         int64 rr = (int64) 0;
@@ -439,7 +439,7 @@ public final class TreeBuilder {
             count = nc;
             depth = depth + (int64) 1;
         }
-        st.leafOf(leafOf, leaf, nodeCount);
+        if (leafOf != null) { st.leafOf(leafOf, leaf, nodeCount); }
         return nodeCount;
     }
 

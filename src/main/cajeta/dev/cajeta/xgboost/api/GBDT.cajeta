@@ -87,8 +87,6 @@ public final class GBDT {
         int64[] cvShape = heap int64[1]; cvShape[0] = total;
         Tensor<float64> cutValuesT #= Tensor.of<float64>(cutVals, cvShape);
 
-        int64 K = p.outputGroups();
-        float32[] marginHistory = heap float32[p.rounds * n * K];
         if (p.deviceGpu()) {
             // The values go up once and are binned on the device (data-prep spec 4).
             GpuTrainState st #= GpuTrainState.fromValues(x, cutPtrsT, cuts, n);
@@ -96,7 +94,7 @@ public final class GBDT {
                                      p.maxDepth, p.maxLeaves,
                                      p.lambda, p.alpha, p.gamma, p.minChildWeight,
                                      p.eta, p.baseScore, p.objective, p.numClass,
-                                     marginHistory, true, st);
+                                     null, true, st);
             md.deterministic = deterministic;
             return #md;
         }
@@ -108,7 +106,7 @@ public final class GBDT {
                                 p.maxDepth, p.maxLeaves,
                                 p.lambda, p.alpha, p.gamma, p.minChildWeight,
                                 p.eta, p.baseScore, p.objective, p.numClass,
-                                marginHistory, false);
+                                null, false);
         m.deterministic = deterministic;
         return #m;
     }

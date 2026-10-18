@@ -1,0 +1,113 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.objective.Objective;
+
+/** xgboost-device-training Unit 7: leaf values and margins on the device. */
+public class GpuMarginTest {
+
+    public GpuMarginTest() { return; }
+
+    /** A fit of `rounds` rounds, depth `maxDepth`, eta 0.3, on `st` when it is not null. */
+    static #Model fit(FixtureLoader f, GpuTrainState st, Objective obj, int64 K, int64 maxDepth,
+                      float64 gamma, float64 mcw, int64 rounds, float32[] history) {
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        return Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                             maxDepth, (int64) 0,
+                             (float64) 1.0, (float64) 0.0, gamma, mcw,
+                             (float64) 0.3, (float64) 0.5, obj, K, history, st != null, st);
+    }
+
+    /** The device margins after a fit equal the CPU fit's last round, bit for bit. */
+    static void assertDeviceMargins(String fixture, Objective obj, int64 K, int64 maxDepth,
+                                    float64 gamma, float64 mcw, int64 rounds) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float32[] cpu = heap float32[rounds * n * K];
+        Model mc #= GpuMarginTest.fit(f, null, obj, K, maxDepth, gamma, mcw, rounds, cpu);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        float32[] dh = heap float32[rounds * n * K];
+        Model md #= GpuMarginTest.fit(f, st, obj, K, maxDepth, gamma, mcw, rounds, dh);
+        float32[] dm #= st.deviceMargins();
+        int64 last = (rounds - (int64) 1) * n * K;
+        int64 i = (int64) 0;
+        while (i < n * K) {
+            Assert.equals(Cajeta.f32ToBits(cpu[last + i]), Cajeta.f32ToBits(dm[i]));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+
+    static int64 expRounds(int64 rounds) {
+        if (SfuMath.hasEx2Table()) { return rounds; }
+        return (int64) 1;
+    }
+
+    // 7.1.1: the device margins equal the host path's, on DeviceParityTest's fixtures.
+    @Test
+    public void deviceMarginsEqualTheHostPathsBitForBit() {
+        GpuMarginTest.assertDeviceMargins("tiny_reg_d2", Objective.SQUARED_ERROR, (int64) 1,
+                                          (int64) 2, (float64) 0.0, (float64) 1.0, (int64) 3);
+        GpuMarginTest.assertDeviceMargins("tiny_reg", Objective.SQUARED_ERROR, (int64) 1,
+                                          (int64) 4, (float64) 0.0, (float64) 1.0, (int64) 3);
+        GpuMarginTest.assertDeviceMargins("tiny_reg_d6", Objective.SQUARED_ERROR, (int64) 1,
+                                          (int64) 6, (float64) 0.0, (float64) 1.0, (int64) 3);
+        GpuMarginTest.assertDeviceMargins("large_reg", Objective.SQUARED_ERROR, (int64) 1,
+                                          (int64) 6, (float64) 0.0, (float64) 1.0, (int64) 3);
+        GpuMarginTest.assertDeviceMargins("tiny_reg_mcw10", Objective.SQUARED_ERROR, (int64) 1,
+                                          (int64) 4, (float64) 0.0, (float64) 10.0, (int64) 3);
+        GpuMarginTest.assertDeviceMargins("tiny_reg_gamma1", Objective.SQUARED_ERROR, (int64) 1,
+                                          (int64) 4, (float64) 1.0, (float64) 1.0, (int64) 3);
+        GpuMarginTest.assertDeviceMargins("tiny_reg_missing", Objective.SQUARED_ERROR, (int64) 1,
+                                          (int64) 4, (float64) 0.0, (float64) 1.0, (int64) 3);
+        GpuMarginTest.assertDeviceMargins("tiny_binary", Objective.LOGISTIC, (int64) 1,
+                                          (int64) 4, (float64) 0.0, (float64) 1.0,
+                                          GpuMarginTest.expRounds((int64) 3));
+        GpuMarginTest.assertDeviceMargins("large_binary", Objective.LOGISTIC, (int64) 1,
+                                          (int64) 6, (float64) 0.0, (float64) 1.0,
+                                          GpuMarginTest.expRounds((int64) 3));
+        GpuMarginTest.assertDeviceMargins("tiny_multi", Objective.SOFTMAX, (int64) 4,
+                                          (int64) 4, (float64) 0.0, (float64) 1.0,
+                                          GpuMarginTest.expRounds((int64) 3));
+        return;
+    }
+
+    // 7.1.2: with history requested, the margins come down once per round and nothing else n-sized does.
+    @Test
+    public void aFitWithHistoryDownloadsTheMarginsOncePerRound() {
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        float32[] dh = heap float32[(int64) 2 * n * (int64) 4];
+        Model m #= GpuMarginTest.fit(f, st, Objective.SOFTMAX, (int64) 4, (int64) 4,
+                                    (float64) 0.0, (float64) 1.0, (int64) 2, dh);
+        Assert.equals((int64) 2, st.rowDownloads());
+        Assert.equals((int64) 0, st.cellDownloads());
+        Assert.equals((int64) 2, st.rowUploads());
+        return;
+    }
+
+    // 7.1.2: with no history requested, a fit downloads nothing n-sized.
+    @Test
+    public void aFitWithoutHistoryDownloadsNoRows() {
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model m #= GpuMarginTest.fit(f, st, Objective.SQUARED_ERROR, (int64) 1, (int64) 6,
+                                    (float64) 0.0, (float64) 1.0, (int64) 3, null);
+        Assert.equals((int64) 0, st.rowDownloads());
+        Assert.equals((int64) 0, st.cellDownloads());
+        Assert.equals((int64) 2, st.rowUploads());
+        return;
+    }
+}

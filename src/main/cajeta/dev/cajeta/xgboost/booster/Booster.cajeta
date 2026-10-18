@@ -58,7 +58,8 @@ public final class Booster {
      * @param baseScore  initial score (identity link → base margin).
      * @param marginHistory out-param, length `rounds*n`: the cumulative margin of
      *                   every row after each round (`r*n + row`). The last round's
-     *                   slice is the final prediction. Pass a `rounds*n` array.
+     *                   slice is the final prediction. Pass a `rounds*n` array, or
+     *                   null for none.
      */
     public static #Model train(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
                                float64[] label, int64 n, int64 rounds,
@@ -75,8 +76,9 @@ public final class Booster {
     /**
      * The device-dispatch form: `device` selects {@link TreeBuilder}'s GPU
      * path for every tree — same model bit for bit (each device component is
-     * bit-identical to its CPU twin). Objectives and margin updates stay on
-     * the host either way.
+     * bit-identical to its CPU twin). On the device the gradients and margins
+     * stay there for the whole fit, and the margins come down once per round
+     * only when `marginHistory` is not null.
      */
     public static #Model train(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
                                float64[] label, int64 n, int64 rounds,
@@ -123,15 +125,6 @@ public final class Booster {
         float64[] fSH  = heap float64[trees * cap];   // per-node hessian cover
 
         float32 base = Booster.baseMarginOf(objective, baseScore);
-        float32[] margin = heap float32[n * K];
-        int64 i = (int64) 0;
-        while (i < n * K) { margin[i] = base; i = i + (int64) 1; }
-
-        float64[] grad = heap float64[n * K];
-        float64[] hess = heap float64[n * K];
-        float64[] gradK = heap float64[n];   // one class's slice
-        float64[] hessK = heap float64[n];
-        int64[] leafOf = heap int64[n];
         // The device side of the run: the bin matrix goes up once, here.
         GpuTrainState st = null;
         boolean onDevice = device || prepared != null;
@@ -139,11 +132,22 @@ public final class Booster {
         else if (device) { st #= GpuTrainState.create(bins, cutPtrs, n); }
         if (st != null) { st.beginFit(label, base, K); }
 
+        int64 hostRows = n;
+        if (st != null) { hostRows = (int64) 0; }
+        float32[] margin = heap float32[hostRows * K];
+        int64 i = (int64) 0;
+        while (i < hostRows * K) { margin[i] = base; i = i + (int64) 1; }
+        float64[] grad = heap float64[hostRows * K];
+        float64[] hess = heap float64[hostRows * K];
+        float64[] gradK = heap float64[hostRows];   // one class's slice
+        float64[] hessK = heap float64[hostRows];
+        int64[] leafOf = null;
+        if (st == null) { leafOf = heap int64[n]; }
+
         int64 r = (int64) 0;
         while (r < rounds) {
             // (1) Per-row (per-class) gradient pair from the current margins.
             if (st != null) {
-                if (r > (int64) 0) { st.uploadMargins(margin); }
                 st.gradients(objective);
             } else {
                 Booster.gradHessOf(objective, margin, label, n, K, grad, hess);
@@ -194,14 +198,24 @@ public final class Booster {
                 // (4) Accumulate each row's leaf value into THIS CLASS's margin,
                 //     and record the cumulative margin for this round.
                 int64 hoff = r * n * K;
-                i = (int64) 0;
-                while (i < n) {
-                    float32 leafVal = bw[leafOf[i]];   // leafOf[i] is a leaf → shrunk value
-                    margin[i * K + g] = margin[i * K + g] + leafVal;
-                    marginHistory[hoff + i * K + g] = margin[i * K + g];
-                    i = i + (int64) 1;
+                if (st != null) {
+                    st.addLeaves(bw, lf, nc);
+                } else {
+                    i = (int64) 0;
+                    while (i < n) {
+                        float32 leafVal = bw[leafOf[i]];   // leafOf[i] is a leaf → shrunk value
+                        margin[i * K + g] = margin[i * K + g] + leafVal;
+                        if (marginHistory != null) { marginHistory[hoff + i * K + g] = margin[i * K + g]; }
+                        i = i + (int64) 1;
+                    }
                 }
                 g = g + (int64) 1;
+            }
+            if (st != null && marginHistory != null) {
+                float32[] cur #= st.deviceMargins();
+                int64 hoff = r * n * K;
+                i = (int64) 0;
+                while (i < n * K) { marginHistory[hoff + i] = cur[i]; i = i + (int64) 1; }
             }
             r = r + (int64) 1;
         }

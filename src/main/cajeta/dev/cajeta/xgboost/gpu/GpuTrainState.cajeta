@@ -44,6 +44,8 @@ public final class GpuTrainState {
     KernelBuffer<int64> lefts;
     KernelBuffer<int64> slotTab;
     KernelBuffer<int64> plan;
+    KernelBuffer<int64> leafTab;
+    int64[] leafTabH;
     TransferLog log;
     int32[] tabH;
     int64[] slotTabH;
@@ -246,6 +248,8 @@ public final class GpuTrainState {
         this.lefts = heap KernelBuffer<int64>(cap);
         this.slotTab = heap KernelBuffer<int64>(cap * (int64) 3);
         this.plan = heap KernelBuffer<int64>(cap * (int64) 4);
+        this.leafTab = heap KernelBuffer<int64>(cap * (int64) 2);
+        this.leafTabH = heap int64[cap * (int64) 2];
         this.tabH = heap int32[cap * GpuPartition.tableWords()];
         this.slotTabH = heap int64[cap * (int64) 3];
         this.leftsH = heap int64[cap];
@@ -604,6 +608,45 @@ public final class GpuTrainState {
             k = k + (int64) 1;
         }
         return #rows;
+    }
+
+    /**
+     * Adds each row's leaf value from `bw` (the leaves among `leaf`'s first
+     * `nodeCount` nodes) to its device margin of the selected group, with no sync;
+     * the leaf table is the only upload.
+     */
+    public void addLeaves(float32[] bw, boolean[] leaf, int64 nodeCount) {
+        this.waitLevel();
+        int64 k = (int64) 0;
+        int64 nid = (int64) 0;
+        while (nid < nodeCount) {
+            if (leaf[nid] && this.segCount[nid] > (int64) 0) {
+                int64 begin = this.segBegin[nid];
+                int64 bits = (int64) Cajeta.f32ToBits(bw[nid]);
+                int64 j = k;
+                while (j > (int64) 0 && this.leafTabH[(j - (int64) 1) * (int64) 2] > begin) {
+                    this.leafTabH[j * (int64) 2] = this.leafTabH[(j - (int64) 1) * (int64) 2];
+                    this.leafTabH[j * (int64) 2 + (int64) 1] = this.leafTabH[(j - (int64) 1) * (int64) 2 + (int64) 1];
+                    j = j - (int64) 1;
+                }
+                this.leafTabH[j * (int64) 2] = begin;
+                this.leafTabH[j * (int64) 2 + (int64) 1] = bits;
+                k = k + (int64) 1;
+            }
+            nid = nid + (int64) 1;
+        }
+        this.leafTab.upload(this.leafTabH, k * (int64) 2);
+        this.log.upSmalls((int64) 1);
+        GpuLeaves.add(this.margins, this.ridx, this.leafTab, k, this.n, this.groups, this.group);
+    }
+
+    /** Waits for the stream and downloads the device margins, `n * groups` row-major. */
+    public #float32[] deviceMargins() {
+        float32[] out = heap float32[this.n * this.groups];
+        this.log.sync(KernelStream.current());
+        this.margins.download(out);
+        this.log.downRow();
+        return #out;
     }
 
     /** Uploads the host margins, `n * groups` row-major. */
