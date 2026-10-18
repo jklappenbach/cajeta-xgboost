@@ -1,0 +1,58 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Sketch;
+
+/**
+ * xgboost-data-prep 2.1.1: the cuts are the same bits with 1, 4 and 64
+ * column tasks, and equal the NVIDIA reference's on the fixtures whose
+ * cuts the sketch tests already pin.
+ */
+public class SketchParallelTest {
+
+    public SketchParallelTest() { return; }
+
+    static void check(String fixture, boolean againstReference) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> x #= f.x();
+        int64 n = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        int64[] cp1 = heap int64[nf + (int64) 1];
+        float32[] c1 #= Sketch.cutsWith(x, n, nf, (int64) 256, cp1, (int64) 1);
+        int64 t = (int64) 4;
+        while (t <= (int64) 64) {
+            int64[] cpt = heap int64[nf + (int64) 1];
+            float32[] ct #= Sketch.cutsWith(x, n, nf, (int64) 256, cpt, t);
+            int64 i = (int64) 0;
+            while (i <= nf) { Assert.equals(cpt[i], cp1[i]); i = i + (int64) 1; }
+            i = (int64) 0;
+            while (i < cp1[nf]) {
+                Assert.equals((int64) Cajeta.f32ToBits(ct[i]), (int64) Cajeta.f32ToBits(c1[i]));
+                i = i + (int64) 1;
+            }
+            t = t * (int64) 16;
+        }
+        if (againstReference) {
+            Tensor<int64> refCp #= f.cutPtrs();
+            Tensor<float64> refCv #= f.cutValues();
+            int64 i = (int64) 0;
+            while (i <= nf) { Assert.equals(cp1[i], refCp.flatGet(i)); i = i + (int64) 1; }
+            i = (int64) 0;
+            while (i < cp1[nf]) {
+                Assert.thatFloat((float64) c1[i]).isEqualTo(refCv.flatGet(i));
+                i = i + (int64) 1;
+            }
+        }
+        return;
+    }
+
+    @Test
+    public void cutsDoNotDependOnTheTaskCount() {
+        SketchParallelTest.check("tiny_reg", true);
+        SketchParallelTest.check("tiny_reg_missing", false);
+        SketchParallelTest.check("large_reg", true);
+        SketchParallelTest.check("covertype", false);
+        return;
+    }
+}
