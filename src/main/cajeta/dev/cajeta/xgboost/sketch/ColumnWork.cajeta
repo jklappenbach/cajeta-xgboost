@@ -1,0 +1,65 @@
+package dev.cajeta.xgboost.sketch;
+
+/** One task's buffers for sketching columns in turn: the queue, the radix scratch, the summaries and the level tree. */
+final class ColumnWork {
+
+    int64 limit;
+    int64 slots;
+    float32[] qv;
+    float32[] qw;
+    int64[] key;
+    int64[] key2;
+    float32[] v2;
+    float32[] w2;
+    int64[] hist;
+    float32[] trm;
+    float32[] trx;
+    float32[] twm;
+    float32[] tv;
+    float32[] srm;
+    float32[] srx;
+    float32[] swm;
+    float32[] sv;
+    float32[] lrm;
+    float32[] lrx;
+    float32[] lwm;
+    float32[] lv;
+    int64[] lsize;
+
+    ColumnWork(int64 limit, int64 slots) {
+        int64 qcap = limit * (int64) 2;
+        this.limit = limit;
+        this.slots = slots;
+        this.qv = heap float32[qcap];
+        this.qw = heap float32[qcap];
+        this.key = heap int64[qcap];
+        this.key2 = heap int64[qcap];
+        this.v2 = heap float32[qcap];
+        this.w2 = heap float32[qcap];
+        this.hist = heap int64[2048];
+        this.trm = heap float32[qcap];
+        this.trx = heap float32[qcap];
+        this.twm = heap float32[qcap];
+        this.tv = heap float32[qcap];
+        this.srm = heap float32[qcap];
+        this.srx = heap float32[qcap];
+        this.swm = heap float32[qcap];
+        this.sv = heap float32[qcap];
+        this.lrm = heap float32[slots * limit];
+        this.lrx = heap float32[slots * limit];
+        this.lwm = heap float32[slots * limit];
+        this.lv = heap float32[slots * limit];
+        this.lsize = heap int64[slots];
+    }
+
+    /** Buffers for a queue of `2 * limit` entries and levels `0 .. slots - 1`. */
+    static #ColumnWork create(int64 limit, int64 slots) {
+        ColumnWork w = heap ColumnWork(limit, slots);
+        return #w;
+    }
+
+    /** True when these buffers hold a column needing `limit` and `slots`. */
+    boolean fits(int64 limit, int64 slots) {
+        return limit <= this.limit && slots <= this.slots;
+    }
+}

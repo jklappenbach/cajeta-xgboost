@@ -1,0 +1,178 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Sketch;
+
+/**
+ * xgboost-data-prep 3.1.1: the per-column step's queue summaries, its
+ * `GetSummary` over every level, and its cuts are the same bits as the step
+ * at aa0fffc (`SketchColumnOracle`), on every fixture column and on
+ * adversarial columns.
+ */
+public class SketchStepTest {
+
+    public SketchStepTest() { return; }
+
+    static int64 bits(float32 v) { return (int64) Cajeta.f32ToBits(v); }
+
+    /** A value's bits, with -0 read as +0: a run of equal zeros keeps whichever zero its sort put first, which the reference's unstable `std::sort` does not fix either. */
+    static int64 valueBits(float32 v) {
+        int64 b = (int64) Cajeta.f32ToBits(v);
+        if ((b & (int64) 2147483647) == (int64) 0) { return (int64) 0; }
+        return b;
+    }
+
+    /** The column's cuts and summary, new against the oracle, compared bit for bit; returns the summary size. */
+    static int64 compareColumn(float32[] col, int64 n, int64 maxBin) {
+        float32[] cutNew = heap float32[maxBin + (int64) 1];
+        float32[] cutOld = heap float32[maxBin + (int64) 1];
+        int64 m = n + (int64) 2;
+        float32[] arm = heap float32[m]; float32[] arx = heap float32[m];
+        float32[] awm = heap float32[m]; float32[] av = heap float32[m];
+        float32[] brm = heap float32[m]; float32[] brx = heap float32[m];
+        float32[] bwm = heap float32[m]; float32[] bv = heap float32[m];
+        int64[] gn = heap int64[1];
+        gn[0] = (int64) 0;
+        int64 kNew = Sketch.columnCuts(col, n, maxBin, cutNew);
+        int64 kOld = SketchColumnOracle.sketchColumn(col, n, maxBin, SketchColumnOracle.epsSentinel(), cutOld,
+                                                     brm, brx, bwm, bv, gn);
+        Assert.equals(kNew, kOld);
+        int64 i = (int64) 0;
+        while (i < kNew) { Assert.equals(SketchStepTest.valueBits(cutNew[i]), SketchStepTest.valueBits(cutOld[i])); i = i + (int64) 1; }
+        int64 gs = Sketch.columnSummary(col, n, maxBin, arm, arx, awm, av);
+        Assert.equals(gs, gn[0]);
+        i = (int64) 0;
+        while (i < gs) {
+            Assert.equals(SketchStepTest.bits(arm[i]), SketchStepTest.bits(brm[i]));
+            Assert.equals(SketchStepTest.bits(arx[i]), SketchStepTest.bits(brx[i]));
+            Assert.equals(SketchStepTest.bits(awm[i]), SketchStepTest.bits(bwm[i]));
+            Assert.equals(SketchStepTest.valueBits(av[i]), SketchStepTest.valueBits(bv[i]));
+            i = i + (int64) 1;
+        }
+        return gs;
+    }
+
+    static void fixture(String name) {
+        FixtureLoader f #= FixtureLoader.open(name);
+        Tensor<float64> x #= f.x();
+        int64 n = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        float32[] col = heap float32[n];
+        int64 j = (int64) 0;
+        while (j < nf) {
+            int64 r = (int64) 0;
+            while (r < n) { col[r] = (float32) x.flatGet(r * nf + j); r = r + (int64) 1; }
+            SketchStepTest.compareColumn(col, n, (int64) 256);
+            SketchStepTest.compareColumn(col, n, (int64) 16);
+            j = j + (int64) 1;
+        }
+        return;
+    }
+
+    @Test
+    public void columnsMatchTheOracleOnEveryFixture() {
+        SketchStepTest.fixture("tiny_reg");
+        SketchStepTest.fixture("tiny_reg_missing");
+        SketchStepTest.fixture("tiny_binary");
+        SketchStepTest.fixture("tiny_multi");
+        SketchStepTest.fixture("large_reg");
+        SketchStepTest.fixture("large_binary");
+        SketchStepTest.fixture("large_multi");
+        SketchStepTest.fixture("covertype");
+        return;
+    }
+
+    /** Column `kind` of `n` rows from an xorshift stream. */
+    static #float32[] adversarial(int64 kind, int64 n) {
+        float32[] c = heap float32[n];
+        float32 nan = Cajeta.bitsToF32((int32) 0x7FC00000);
+        uint64 s = (uint64) 88172645463325252;
+        int64 r = (int64) 0;
+        while (r < n) {
+            s = s ^ (s << (uint64) 13);
+            s = s ^ (s >> (uint64) 7);
+            s = s ^ (s << (uint64) 17);
+            int64 u = (int64) (s >> (uint64) 40);
+            float32 v = (float32) 0.0;
+            if (kind == (int64) 0) { v = (float32) (u % (int64) 7); }
+            else if (kind == (int64) 1) { v = (float32) 3.5; }
+            else if (kind == (int64) 2) { v = nan; }
+            else if (kind == (int64) 3) { v = (float32) r * (float32) 0.25; }
+            else if (kind == (int64) 4) { v = (float32) (n - r) * (float32) 0.25; }
+            else if (kind == (int64) 5) {
+                int64 run = r / (int64) 1500;
+                v = (float32) ((run * (int64) 7919) % (int64) 1013) - (float32) 500.0;
+            } else if (kind == (int64) 6) {
+                int64 k = u % (int64) 9;
+                if (k == (int64) 0) { v = nan; }
+                else if (k == (int64) 1) { v = (float32) -0.0; }
+                else if (k == (int64) 2) { v = (float32) 0.0; }
+                else { v = (float32) (u % (int64) 200001) / (float32) 1000.0 - (float32) 100.0; }
+            } else {
+                v = (float32) u / (float32) 16777216.0;
+            }
+            c[r] = v;
+            r = r + (int64) 1;
+        }
+        return #c;
+    }
+
+    @Test
+    public void adversarialColumnsMatchTheOracle() {
+        int64 n = (int64) 200000;
+        int64 kind = (int64) 0;
+        while (kind <= (int64) 7) {
+            float32[] c #= SketchStepTest.adversarial(kind, n);
+            SketchStepTest.compareColumn(c, n, (int64) 256);
+            SketchStepTest.compareColumn(c, n, (int64) 16);
+            SketchStepTest.compareColumn(c, n, (int64) 2);
+            SketchStepTest.compareColumn(c, (int64) 40, (int64) 256);
+            SketchStepTest.compareColumn(c, (int64) 1, (int64) 256);
+            kind = kind + (int64) 1;
+        }
+        return;
+    }
+
+    @Test
+    public void queueSummariesMatchTheOracle() {
+        int64 n = (int64) 5000;
+        int64 kind = (int64) 0;
+        while (kind <= (int64) 7) {
+            float32[] c #= SketchStepTest.adversarial(kind, n);
+            int64 m = (int64) 1;
+            while (m <= n) {
+                float32[] av = heap float32[m]; float32[] aw = heap float32[m];
+                float32[] bv = heap float32[m]; float32[] bw = heap float32[m];
+                int64 q = (int64) 0;
+                int64 i = (int64) 0;
+                while (i < m) {
+                    if (!SketchColumnOracle.isNaN(c[i])) {
+                        av[q] = c[i]; bv[q] = c[i];
+                        aw[q] = (float32) (i % (int64) 5 + (int64) 1); bw[q] = aw[q];
+                        q = q + (int64) 1;
+                    }
+                    i = i + (int64) 1;
+                }
+                float32[] arm = heap float32[m + (int64) 1]; float32[] arx = heap float32[m + (int64) 1];
+                float32[] awm = heap float32[m + (int64) 1]; float32[] avs = heap float32[m + (int64) 1];
+                float32[] brm = heap float32[m + (int64) 1]; float32[] brx = heap float32[m + (int64) 1];
+                float32[] bwm = heap float32[m + (int64) 1]; float32[] bvs = heap float32[m + (int64) 1];
+                int64 sa = Sketch.queueSummary(av, aw, q, arm, arx, awm, avs);
+                int64 sb = SketchColumnOracle.makeSummary(bv, bw, q, brm, brx, bwm, bvs);
+                Assert.equals(sa, sb);
+                i = (int64) 0;
+                while (i < sa) {
+                    Assert.equals(SketchStepTest.bits(arm[i]), SketchStepTest.bits(brm[i]));
+                    Assert.equals(SketchStepTest.bits(arx[i]), SketchStepTest.bits(brx[i]));
+                    Assert.equals(SketchStepTest.bits(awm[i]), SketchStepTest.bits(bwm[i]));
+                    Assert.equals(SketchStepTest.valueBits(avs[i]), SketchStepTest.valueBits(bvs[i]));
+                    i = i + (int64) 1;
+                }
+                m = m * (int64) 3 + (int64) 1;
+            }
+            kind = kind + (int64) 1;
+        }
+        return;
+    }
+}

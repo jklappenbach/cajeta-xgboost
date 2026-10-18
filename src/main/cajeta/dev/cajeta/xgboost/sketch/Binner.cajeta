@@ -54,14 +54,16 @@ public final class Binner {
         return (int32) idx;
     }
 
-    /** Bins rows `[r0, r1)` into their slice of `out`. */
+    /** Bins rows `[r0, r1)` of the contiguous host tensor `x` into their slice of `out`. */
     static async int32 binRows(Tensor<float64> x, float32[] cuts, int64[] ptr, int32[] out,
                                int64 r0, int64 r1, int64 nf) {
+        float64[] xb = x.hostBuffer();
+        int64 xo = x.hostBase();
         int64 r = r0;
         while (r < r1) {
             int64 f = (int64) 0;
             while (f < nf) {
-                float32 v = (float32) x.flatGet(r * nf + f);
+                float32 v = (float32) xb[xo + r * nf + f];
                 if (Binner.isNaN(v)) {
                     out[r * nf + f] = (int32) -1;
                 } else {

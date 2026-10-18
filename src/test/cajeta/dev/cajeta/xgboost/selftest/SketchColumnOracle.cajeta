@@ -1,0 +1,400 @@
+package dev.cajeta.xgboost.selftest;
+
+/** Sketch's per-column step as it stood at cajeta-xgboost aa0fffc, kept as the oracle for xgboost-data-prep 3.1.1. */
+public final class SketchColumnOracle {
+
+    static boolean isNaN(float32 v) {
+        return (Cajeta.f32ToBits(v) & (int32) 0x7FFFFFFF) > (int32) 0x7F800000;
+    }
+
+    /** The double value of the FLOAT literal `1e-5f` (0x3727C5AC) — the
+     *  sentinel expressions promote it to double, so `1.0000000474974513e-5`,
+     *  not `1e-5`. */
+    static float64 epsSentinel() {
+        return (float64) Cajeta.bitsToF32((int32) 0x3727C5AC);
+    }
+
+    /** ceil for v > 0 without a libm binding. */
+    static int64 ceilPos(float64 v) {
+        int64 t = (int64) v;
+        if ((float64) t < v) { t = t + (int64) 1; }
+        return t;
+    }
+
+    /**
+     * `LimitSizeLevel` (quantile.h:544-561): `limit_size =
+     * min(maxn, ceil(nlevel/eps)+1)` at the first nlevel with
+     * `(1<<nlevel)*limit_size >= maxn`. `eps = 1.0 / ((float)n_bins * 8.0f)`
+     * (float product, double divide — quantile.cc:473).
+     */
+    static int64 limitSize(int64 maxn, int64 nBins) {
+        float64 eps = (float64) 1.0 / (float64) ((float32) nBins * (float32) 8.0);
+        int64 nlevel = (int64) 1;
+        int64 limit = (int64) 0;
+        while (true) {
+            limit = SketchColumnOracle.ceilPos((float64) nlevel / eps) + (int64) 1;
+            if (limit > maxn) { limit = maxn; }
+            if (((int64) 1 << nlevel) * limit >= maxn) { break; }
+            nlevel = nlevel + (int64) 1;
+        }
+        return limit;
+    }
+
+    /** In-place heapsort of parallel (value, weight) arrays by value —
+     *  replaces `std::sort` in `Queue::MakeSummary`; equal values collapse
+     *  right after, so any correct sort yields identical summaries here. */
+    static void sortQueue(float32[] v, float32[] w, int64 m) {
+        int64 i = m / (int64) 2 - (int64) 1;
+        while (i >= (int64) 0) { SketchColumnOracle.siftDown(v, w, i, m); i = i - (int64) 1; }
+        int64 end = m - (int64) 1;
+        while (end > (int64) 0) {
+            float32 tv = v[0]; v[0] = v[end]; v[end] = tv;
+            float32 tw = w[0]; w[0] = w[end]; w[end] = tw;
+            SketchColumnOracle.siftDown(v, w, (int64) 0, end);
+            end = end - (int64) 1;
+        }
+    }
+
+    static void siftDown(float32[] v, float32[] w, int64 start, int64 end) {
+        int64 root = start;
+        while (root * (int64) 2 + (int64) 1 < end) {
+            int64 child = root * (int64) 2 + (int64) 1;
+            if (child + (int64) 1 < end && v[child] < v[child + (int64) 1]) {
+                child = child + (int64) 1;
+            }
+            if (v[root] < v[child]) {
+                float32 tv = v[root]; v[root] = v[child]; v[child] = tv;
+                float32 tw = w[root]; w[root] = w[child]; w[child] = tw;
+                root = child;
+            } else { return; }
+        }
+    }
+
+    /**
+     * `Queue::MakeSummary` (quantile.h:105-120): sort by value, collapse equal
+     * values (float32 weight sums), emit entries with the float32 running rank
+     * prefix `wsum`. Returns the summary size.
+     */
+    public static int64 makeSummary(float32[] qv, float32[] qw, int64 qtail,
+                             float32[] rm, float32[] rx, float32[] wm, float32[] v) {
+        SketchColumnOracle.sortQueue(qv, qw, qtail);
+        int64 size = (int64) 0;
+        float32 wsum = (float32) 0.0;
+        int64 i = (int64) 0;
+        while (i < qtail) {
+            int64 j = i + (int64) 1;
+            float32 w = qw[i];
+            while (j < qtail && qv[j] == qv[i]) { w = w + qw[j]; j = j + (int64) 1; }
+            rm[size] = wsum;
+            rx[size] = wsum + w;
+            wm[size] = w;
+            v[size] = qv[i];
+            size = size + (int64) 1;
+            wsum = wsum + w;
+            i = j;
+        }
+        return size;
+    }
+
+    /**
+     * `WQSummary::SetPrune` (quantile.h:214-250) — the sequential CPU prune.
+     * All arithmetic float32. Copies verbatim when `size <= maxsize`.
+     */
+    static int64 setPrune(float32[] irm, float32[] irx, float32[] iwm, float32[] iv, int64 size,
+                          int64 maxsize,
+                          float32[] orm, float32[] orx, float32[] owm, float32[] ov) {
+        if (size <= maxsize) {
+            int64 c = (int64) 0;
+            while (c < size) { orm[c] = irm[c]; orx[c] = irx[c]; owm[c] = iwm[c]; ov[c] = iv[c]; c = c + (int64) 1; }
+            return size;
+        }
+        float32 begin = irx[0];
+        float32 range = irm[size - (int64) 1] - irx[0];
+        int64 nn = maxsize - (int64) 1;
+        orm[0] = irm[0]; orx[0] = irx[0]; owm[0] = iwm[0]; ov[0] = iv[0];
+        int64 osize = (int64) 1;
+        int64 i = (int64) 1;
+        int64 lastidx = (int64) 0;
+        int64 k = (int64) 1;
+        while (k < nn) {
+            float32 dx2 = (float32) 2.0 * (((float32) k * range) / (float32) nn + begin);
+            while (i < size - (int64) 1 && dx2 >= irx[i + (int64) 1] + irm[i + (int64) 1]) {
+                i = i + (int64) 1;
+            }
+            if (i == size - (int64) 1) { break; }
+            float32 rMinNextI = irm[i] + iwm[i];
+            float32 rMaxPrevI1 = irx[i + (int64) 1] - iwm[i + (int64) 1];
+            if (dx2 < rMinNextI + rMaxPrevI1) {
+                if (i != lastidx) {
+                    orm[osize] = irm[i]; orx[osize] = irx[i]; owm[osize] = iwm[i]; ov[osize] = iv[i];
+                    osize = osize + (int64) 1; lastidx = i;
+                }
+            } else {
+                int64 i1 = i + (int64) 1;
+                if (i1 != lastidx) {
+                    orm[osize] = irm[i1]; orx[osize] = irx[i1]; owm[osize] = iwm[i1]; ov[osize] = iv[i1];
+                    osize = osize + (int64) 1; lastidx = i1;
+                }
+            }
+            k = k + (int64) 1;
+        }
+        if (lastidx != size - (int64) 1) {
+            int64 last = size - (int64) 1;
+            orm[osize] = irm[last]; orx[osize] = irx[last]; owm[osize] = iwm[last]; ov[osize] = iv[last];
+            osize = osize + (int64) 1;
+        }
+        return osize;
+    }
+
+    /**
+     * `WQSummary::SetCombine` (quantile.h:251-317) — merge two summaries with
+     * float32 rank sums — followed by its trailing `FixError` clamp pass
+     * (quantile.h:327-354: rmin non-decreasing with the carry only advancing
+     * on un-clamped entries, rmax non-decreasing, rmax >= rmin+wmin).
+     */
+    static int64 setCombine(float32[] arm, float32[] arx, float32[] awm, float32[] av, int64 an,
+                            float32[] brm, float32[] brx, float32[] bwm, float32[] bv, int64 bn,
+                            float32[] orm, float32[] orx, float32[] owm, float32[] ov) {
+        int64 osize = (int64) 0;
+        if (an == (int64) 0) {
+            while (osize < bn) { orm[osize] = brm[osize]; orx[osize] = brx[osize]; owm[osize] = bwm[osize]; ov[osize] = bv[osize]; osize = osize + (int64) 1; }
+            return osize;
+        }
+        if (bn == (int64) 0) {
+            while (osize < an) { orm[osize] = arm[osize]; orx[osize] = arx[osize]; owm[osize] = awm[osize]; ov[osize] = av[osize]; osize = osize + (int64) 1; }
+            return osize;
+        }
+        int64 a = (int64) 0;
+        int64 b = (int64) 0;
+        float32 aprevRmin = (float32) 0.0;
+        float32 bprevRmin = (float32) 0.0;
+        while (a < an && b < bn) {
+            if (av[a] == bv[b]) {
+                orm[osize] = arm[a] + brm[b];
+                orx[osize] = arx[a] + brx[b];
+                owm[osize] = awm[a] + bwm[b];
+                ov[osize] = av[a];
+                aprevRmin = arm[a] + awm[a];
+                bprevRmin = brm[b] + bwm[b];
+                osize = osize + (int64) 1; a = a + (int64) 1; b = b + (int64) 1;
+            } else if (av[a] < bv[b]) {
+                orm[osize] = arm[a] + bprevRmin;
+                orx[osize] = arx[a] + (brx[b] - bwm[b]);
+                owm[osize] = awm[a];
+                ov[osize] = av[a];
+                aprevRmin = arm[a] + awm[a];
+                osize = osize + (int64) 1; a = a + (int64) 1;
+            } else {
+                orm[osize] = brm[b] + aprevRmin;
+                orx[osize] = brx[b] + (arx[a] - awm[a]);
+                owm[osize] = bwm[b];
+                ov[osize] = bv[b];
+                bprevRmin = brm[b] + bwm[b];
+                osize = osize + (int64) 1; b = b + (int64) 1;
+            }
+        }
+        if (a < an) {
+            float32 brmax = brx[bn - (int64) 1];
+            while (a < an) {
+                orm[osize] = arm[a] + bprevRmin;
+                orx[osize] = arx[a] + brmax;
+                owm[osize] = awm[a];
+                ov[osize] = av[a];
+                osize = osize + (int64) 1; a = a + (int64) 1;
+            }
+        }
+        if (b < bn) {
+            float32 armax = arx[an - (int64) 1];
+            while (b < bn) {
+                orm[osize] = brm[b] + aprevRmin;
+                orx[osize] = brx[b] + armax;
+                owm[osize] = bwm[b];
+                ov[osize] = bv[b];
+                osize = osize + (int64) 1; b = b + (int64) 1;
+            }
+        }
+        // FixError (quantile.h:327-354): note prev_rmin advances ONLY when the
+        // entry was not clamped; prev_rmax always tracks the updated rmax.
+        float32 prevRmin = (float32) 0.0;
+        float32 prevRmax = (float32) 0.0;
+        int64 i = (int64) 0;
+        while (i < osize) {
+            if (orm[i] < prevRmin) { orm[i] = prevRmin; }
+            else { prevRmin = orm[i]; }
+            if (orx[i] < prevRmax) { orx[i] = prevRmax; }
+            float32 rminNext = orm[i] + owm[i];
+            if (orx[i] < rminNext) { orx[i] = rminNext; }
+            prevRmax = orx[i];
+            i = i + (int64) 1;
+        }
+        return osize;
+    }
+
+    /**
+     * One column's cuts into `out` from index 0, returning how many were
+     * written (at most `maxBin + 1`). `col` holds the column's values in row
+     * order, narrowed to float32, NaN for missing. The order of operations is
+     * the reference's, so a column's cuts do not depend on any other column.
+     */
+    /** The old per-column step; when `gn` is non-null the `GetSummary` result is also copied to `grm, grx, gwm, gv` and its size to `gn[0]`. */
+    public static int64 sketchColumn(float32[] col, int64 n, int64 maxBin, float64 eps, float32[] out,
+                                     float32[] grm, float32[] grx, float32[] gwm, float32[] gv, int64[] gn) {
+        int64 pos = (int64) 0;
+        // column_size (valid count) — the pre-pass GetDataShape.
+        int64 colSize = (int64) 0;
+        int64 r = (int64) 0;
+        while (r < n) {
+            if (!SketchColumnOracle.isNaN(col[r])) { colSize = colSize + (int64) 1; }
+            r = r + (int64) 1;
+        }
+
+        if (colSize > (int64) 0) {
+            int64 nBins = maxBin < colSize ? maxBin : colSize;
+            if (nBins < (int64) 1) { nBins = (int64) 1; }
+            int64 limit = SketchColumnOracle.limitSize(colSize, nBins);
+            int64 qcap = limit * (int64) 2;
+
+            // queue + summary/scratch buffers. Levels: slot 0 is scratch;
+            // slots 1..kMaxLevels each hold <= limit entries.
+            float32[] qv = heap float32[qcap]; float32[] qw = heap float32[qcap];
+            int64 kMaxLevels = (int64) 40;
+            float32[] lrm = heap float32[kMaxLevels * limit]; float32[] lrx = heap float32[kMaxLevels * limit];
+            float32[] lwm = heap float32[kMaxLevels * limit]; float32[] lv  = heap float32[kMaxLevels * limit];
+            int64[] lsize = heap int64[kMaxLevels];
+            int64 c = (int64) 0;
+            while (c < kMaxLevels) { lsize[c] = (int64) 0; c = c + (int64) 1; }
+            float32[] trm = heap float32[qcap]; float32[] trx = heap float32[qcap];
+            float32[] twm = heap float32[qcap]; float32[] tv  = heap float32[qcap];
+            float32[] srm = heap float32[qcap]; float32[] srx = heap float32[qcap];
+            float32[] swm = heap float32[qcap]; float32[] sv  = heap float32[qcap];
+
+            int64 qtail = (int64) 0;
+            boolean levelsUsed = false;
+            int64 maxLevel = (int64) 0;
+
+            // ---- Push loop: raw ROW order, weight 1 (quantile.h:563-583).
+            r = (int64) 0;
+            while (r < n) {
+                float32 val = col[r];
+                if (!SketchColumnOracle.isNaN(val)) {
+                    if (qtail == qcap && qv[qtail - (int64) 1] != val) {
+                        // flush: MakeSummary -> PushTemp (quantile.h:591-613)
+                        int64 tn = SketchColumnOracle.makeSummary(qv, qw, qtail, trm, trx, twm, tv);
+                        qtail = (int64) 0;
+                        levelsUsed = true;
+                        int64 l = (int64) 1;
+                        while (true) {
+                            if (l > maxLevel) { maxLevel = l; }
+                            int64 lb = l * limit;
+                            if (lsize[l] == (int64) 0) {
+                                // level[l].SetPrune(temp, limit)
+                                int64 pn = SketchColumnOracle.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
+                                int64 cc = (int64) 0;
+                                while (cc < pn) { lrm[lb + cc] = srm[cc]; lrx[lb + cc] = srx[cc]; lwm[lb + cc] = swm[cc]; lv[lb + cc] = sv[cc]; cc = cc + (int64) 1; }
+                                lsize[l] = pn;
+                                break;
+                            } else {
+                                // level[0] = prune(temp, limit); temp = combine(level[0], level[l])
+                                int64 pn = SketchColumnOracle.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
+                                // combine srm(slot0) with level l into temp
+                                float32[] llrm = heap float32[lsize[l]]; float32[] llrx = heap float32[lsize[l]];
+                                float32[] llwm = heap float32[lsize[l]]; float32[] llv = heap float32[lsize[l]];
+                                int64 cc = (int64) 0;
+                                while (cc < lsize[l]) { llrm[cc] = lrm[lb + cc]; llrx[cc] = lrx[lb + cc]; llwm[cc] = lwm[lb + cc]; llv[cc] = lv[lb + cc]; cc = cc + (int64) 1; }
+                                tn = SketchColumnOracle.setCombine(srm, srx, swm, sv, pn, llrm, llrx, llwm, llv, lsize[l], trm, trx, twm, tv);
+                                if (tn > limit) {
+                                    lsize[l] = (int64) 0;
+                                    l = l + (int64) 1;
+                                } else {
+                                    cc = (int64) 0;
+                                    while (cc < tn) { lrm[lb + cc] = trm[cc]; lrx[lb + cc] = trx[cc]; lwm[lb + cc] = twm[cc]; lv[lb + cc] = tv[cc]; cc = cc + (int64) 1; }
+                                    lsize[l] = tn;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Queue::Push (quantile.h:96-103)
+                    if (qtail == (int64) 0 || qv[qtail - (int64) 1] != val) {
+                        qv[qtail] = val; qw[qtail] = (float32) 1.0; qtail = qtail + (int64) 1;
+                    } else {
+                        qw[qtail - (int64) 1] = qw[qtail - (int64) 1] + (float32) 1.0;
+                    }
+                }
+                r = r + (int64) 1;
+            }
+
+            // ---- GetSummary (quantile.h:614-641) -> srm/srx/swm/sv, size gs.
+            int64 on = SketchColumnOracle.makeSummary(qv, qw, qtail, trm, trx, twm, tv);
+            int64 gs;
+            if (levelsUsed) {
+                // level[0] = SetPrune(out, limit)
+                int64 s0 = SketchColumnOracle.setPrune(trm, trx, twm, tv, on, limit, srm, srx, swm, sv);
+                int64 l = (int64) 1;
+                while (l <= maxLevel) {
+                    if (lsize[l] != (int64) 0) {
+                        if (s0 == (int64) 0) {
+                            int64 lb = l * limit;
+                            int64 cc = (int64) 0;
+                            while (cc < lsize[l]) { srm[cc] = lrm[lb + cc]; srx[cc] = lrx[lb + cc]; swm[cc] = lwm[lb + cc]; sv[cc] = lv[lb + cc]; cc = cc + (int64) 1; }
+                            s0 = lsize[l];
+                        } else {
+                            int64 lb = l * limit;
+                            float32[] llrm = heap float32[lsize[l]]; float32[] llrx = heap float32[lsize[l]];
+                            float32[] llwm = heap float32[lsize[l]]; float32[] llv = heap float32[lsize[l]];
+                            int64 cc = (int64) 0;
+                            while (cc < lsize[l]) { llrm[cc] = lrm[lb + cc]; llrx[cc] = lrx[lb + cc]; llwm[cc] = lwm[lb + cc]; llv[cc] = lv[lb + cc]; cc = cc + (int64) 1; }
+                            int64 tn = SketchColumnOracle.setCombine(srm, srx, swm, sv, s0, llrm, llrx, llwm, llv, lsize[l], trm, trx, twm, tv);
+                            s0 = SketchColumnOracle.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
+                        }
+                    }
+                    l = l + (int64) 1;
+                }
+                gs = s0;
+            } else {
+                if (on > limit) {
+                    gs = SketchColumnOracle.setPrune(trm, trx, twm, tv, on, limit, srm, srx, swm, sv);
+                } else {
+                    int64 cc = (int64) 0;
+                    while (cc < on) { srm[cc] = trm[cc]; srx[cc] = trx[cc]; swm[cc] = twm[cc]; sv[cc] = tv[cc]; cc = cc + (int64) 1; }
+                    gs = on;
+                }
+            }
+
+            if (gn != null) {
+                int64 g = (int64) 0;
+                while (g < gs) { grm[g] = srm[g]; grx[g] = srx[g]; gwm[g] = swm[g]; gv[g] = sv[g]; g = g + (int64) 1; }
+                gn[0] = gs;
+            }
+
+            // ---- AllReduce: prune to min(colSize, (int64)(maxBin*8.0f)).
+            int64 inter = (int64) ((float32) maxBin * (float32) 8.0);
+            if (colSize < inter) { inter = colSize; }
+            int64 rn = SketchColumnOracle.setPrune(srm, srx, swm, sv, gs, inter, trm, trx, twm, tv);
+
+            // ---- MakeCuts: a = prune(reduced, min(inter, maxBin)+1).
+            int64 maxNumBins = inter < maxBin ? inter : maxBin;
+            int64 an = SketchColumnOracle.setPrune(trm, trx, twm, tv, rn, maxNumBins + (int64) 1, srm, srx, swm, sv);
+
+            // min sentinel: (mval - |mval|) - eps, double chain (quantile.cc:427).
+            float64 mval = (float64) sv[0];
+            float64 amag = mval < (float64) 0.0 ? (float64) 0.0 - mval : mval;
+            out[pos] = (float32) ((mval - amag) - eps); pos = pos + (int64) 1;
+            // interior: a[1..required-1].value, strictly increasing (quantile.cc:375-387).
+            int64 required = an < maxNumBins ? an : maxNumBins;
+            int64 e = (int64) 1;
+            while (e < required) {
+                float32 cpt = sv[e];
+                if (e == (int64) 1 || cpt > out[pos - (int64) 1]) {
+                    out[pos] = cpt; pos = pos + (int64) 1;
+                }
+                e = e + (int64) 1;
+            }
+            // max sentinel: cpt + (|cpt| + eps), double chain (quantile.cc:444-448).
+            float64 cptL = (float64) sv[an - (int64) 1];
+            float64 cmag = cptL < (float64) 0.0 ? (float64) 0.0 - cptL : cptL;
+            out[pos] = (float32) (cptL + (cmag + eps)); pos = pos + (int64) 1;
+        }
+        return pos;
+    }
+}

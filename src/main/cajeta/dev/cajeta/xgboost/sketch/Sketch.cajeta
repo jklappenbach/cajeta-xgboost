@@ -70,33 +70,90 @@ public final class Sketch {
         return limit;
     }
 
-    /** In-place heapsort of parallel (value, weight) arrays by value —
-     *  replaces `std::sort` in `Queue::MakeSummary`; equal values collapse
-     *  right after, so any correct sort yields identical summaries here. */
-    static void sortQueue(float32[] v, float32[] w, int64 m) {
-        int64 i = m / (int64) 2 - (int64) 1;
-        while (i >= (int64) 0) { Sketch.siftDown(v, w, i, m); i = i - (int64) 1; }
-        int64 end = m - (int64) 1;
-        while (end > (int64) 0) {
-            float32 tv = v[0]; v[0] = v[end]; v[end] = tv;
-            float32 tw = w[0]; w[0] = w[end]; w[end] = tw;
-            Sketch.siftDown(v, w, (int64) 0, end);
-            end = end - (int64) 1;
+    /** The `nlevel` at which {@link #limitSize} stops; a column's level tree never climbs past it. */
+    static int64 limitLevels(int64 maxn, int64 nBins) {
+        float64 eps = (float64) 1.0 / (float64) ((float32) nBins * (float32) 8.0);
+        int64 nlevel = (int64) 1;
+        while (true) {
+            int64 limit = Sketch.ceilPos((float64) nlevel / eps) + (int64) 1;
+            if (limit > maxn) { limit = maxn; }
+            if (((int64) 1 << nlevel) * limit >= maxn) { break; }
+            nlevel = nlevel + (int64) 1;
         }
+        return nlevel;
     }
 
-    static void siftDown(float32[] v, float32[] w, int64 start, int64 end) {
-        int64 root = start;
-        while (root * (int64) 2 + (int64) 1 < end) {
-            int64 child = root * (int64) 2 + (int64) 1;
-            if (child + (int64) 1 < end && v[child] < v[child + (int64) 1]) {
-                child = child + (int64) 1;
+    /** Ascending order key of a non-NaN float32: distinct bits give distinct keys, `-0` just below `+0`. */
+    static int64 orderKey(float32 v) {
+        int64 b = (int64) Cajeta.f32ToBits(v);
+        if (b < (int64) 0) { return (int64) 2147483647 - (b & (int64) 2147483647); }
+        return b + ((int64) 1 << 31);
+    }
+
+    /** Stable sort of the parallel (value, weight) arrays by {@link #orderKey}: insertion below 33 entries, else an 11-bit LSD radix sort. */
+    static void sortQueue(float32[] v, float32[] w, int64 m, ColumnWork ws) {
+        if (m <= (int64) 32) {
+            int64 i = (int64) 1;
+            while (i < m) {
+                float32 cv = v[i];
+                float32 cw = w[i];
+                int64 ck = Sketch.orderKey(cv);
+                int64 j = i - (int64) 1;
+                while (j >= (int64) 0 && Sketch.orderKey(v[j]) > ck) {
+                    v[j + (int64) 1] = v[j];
+                    w[j + (int64) 1] = w[j];
+                    j = j - (int64) 1;
+                }
+                v[j + (int64) 1] = cv;
+                w[j + (int64) 1] = cw;
+                i = i + (int64) 1;
             }
-            if (v[root] < v[child]) {
-                float32 tv = v[root]; v[root] = v[child]; v[child] = tv;
-                float32 tw = w[root]; w[root] = w[child]; w[child] = tw;
-                root = child;
-            } else { return; }
+            return;
+        }
+        int64[] ka = ws.key;
+        int64[] kb = ws.key2;
+        float32[] va = v;
+        float32[] vb = ws.v2;
+        float32[] wa = w;
+        float32[] wb = ws.w2;
+        int64[] h = ws.hist;
+        int64 i = (int64) 0;
+        while (i < m) { ka[i] = Sketch.orderKey(v[i]); i = i + (int64) 1; }
+        boolean inScratch = false;
+        int64 shift = (int64) 0;
+        while (shift < (int64) 32) {
+            int64 d = (int64) 0;
+            while (d < (int64) 2048) { h[d] = (int64) 0; d = d + (int64) 1; }
+            i = (int64) 0;
+            while (i < m) {
+                d = (ka[i] >> shift) & (int64) 2047;
+                h[d] = h[d] + (int64) 1;
+                i = i + (int64) 1;
+            }
+            if (h[(ka[0] >> shift) & (int64) 2047] != m) {
+                int64 run = (int64) 0;
+                d = (int64) 0;
+                while (d < (int64) 2048) { int64 c = h[d]; h[d] = run; run = run + c; d = d + (int64) 1; }
+                i = (int64) 0;
+                while (i < m) {
+                    d = (ka[i] >> shift) & (int64) 2047;
+                    int64 p = h[d];
+                    kb[p] = ka[i];
+                    vb[p] = va[i];
+                    wb[p] = wa[i];
+                    h[d] = p + (int64) 1;
+                    i = i + (int64) 1;
+                }
+                int64[] tk = ka; ka = kb; kb = tk;
+                float32[] tv = va; va = vb; vb = tv;
+                float32[] tw = wa; wa = wb; wb = tw;
+                inScratch = !inScratch;
+            }
+            shift = shift + (int64) 11;
+        }
+        if (inScratch) {
+            i = (int64) 0;
+            while (i < m) { v[i] = va[i]; w[i] = wa[i]; i = i + (int64) 1; }
         }
     }
 
@@ -105,9 +162,9 @@ public final class Sketch {
      * values (float32 weight sums), emit entries with the float32 running rank
      * prefix `wsum`. Returns the summary size.
      */
-    static int64 makeSummary(float32[] qv, float32[] qw, int64 qtail,
+    static int64 makeSummary(float32[] qv, float32[] qw, int64 qtail, ColumnWork ws,
                              float32[] rm, float32[] rx, float32[] wm, float32[] v) {
-        Sketch.sortQueue(qv, qw, qtail);
+        Sketch.sortQueue(qv, qw, qtail, ws);
         int64 size = (int64) 0;
         float32 wsum = (float32) 0.0;
         int64 i = (int64) 0;
@@ -124,6 +181,13 @@ public final class Sketch {
             i = j;
         }
         return size;
+    }
+
+    /** {@link #makeSummary} of `m` queue entries, sorted in place, into `rm, rx, wm, v`; a test hook. */
+    public static int64 queueSummary(float32[] qv, float32[] qw, int64 m,
+                                     float32[] rm, float32[] rx, float32[] wm, float32[] v) {
+        ColumnWork ws #= ColumnWork.create((m + (int64) 1) / (int64) 2 + (int64) 1, (int64) 1);
+        return Sketch.makeSummary(qv, qw, m, ws, rm, rx, wm, v);
     }
 
     /**
@@ -177,17 +241,18 @@ public final class Sketch {
     }
 
     /**
-     * `WQSummary::SetCombine` (quantile.h:251-317) — merge two summaries with
+     * `WQSummary::SetCombine` (quantile.h:251-317) — merge two summaries (`b` read from
+ * offset `bo`) with
      * float32 rank sums — followed by its trailing `FixError` clamp pass
      * (quantile.h:327-354: rmin non-decreasing with the carry only advancing
      * on un-clamped entries, rmax non-decreasing, rmax >= rmin+wmin).
      */
     static int64 setCombine(float32[] arm, float32[] arx, float32[] awm, float32[] av, int64 an,
-                            float32[] brm, float32[] brx, float32[] bwm, float32[] bv, int64 bn,
+                            float32[] brm, float32[] brx, float32[] bwm, float32[] bv, int64 bo, int64 bn,
                             float32[] orm, float32[] orx, float32[] owm, float32[] ov) {
         int64 osize = (int64) 0;
         if (an == (int64) 0) {
-            while (osize < bn) { orm[osize] = brm[osize]; orx[osize] = brx[osize]; owm[osize] = bwm[osize]; ov[osize] = bv[osize]; osize = osize + (int64) 1; }
+            while (osize < bn) { orm[osize] = brm[bo + osize]; orx[osize] = brx[bo + osize]; owm[osize] = bwm[bo + osize]; ov[osize] = bv[bo + osize]; osize = osize + (int64) 1; }
             return osize;
         }
         if (bn == (int64) 0) {
@@ -199,32 +264,32 @@ public final class Sketch {
         float32 aprevRmin = (float32) 0.0;
         float32 bprevRmin = (float32) 0.0;
         while (a < an && b < bn) {
-            if (av[a] == bv[b]) {
-                orm[osize] = arm[a] + brm[b];
-                orx[osize] = arx[a] + brx[b];
-                owm[osize] = awm[a] + bwm[b];
+            if (av[a] == bv[bo + b]) {
+                orm[osize] = arm[a] + brm[bo + b];
+                orx[osize] = arx[a] + brx[bo + b];
+                owm[osize] = awm[a] + bwm[bo + b];
                 ov[osize] = av[a];
                 aprevRmin = arm[a] + awm[a];
-                bprevRmin = brm[b] + bwm[b];
+                bprevRmin = brm[bo + b] + bwm[bo + b];
                 osize = osize + (int64) 1; a = a + (int64) 1; b = b + (int64) 1;
-            } else if (av[a] < bv[b]) {
+            } else if (av[a] < bv[bo + b]) {
                 orm[osize] = arm[a] + bprevRmin;
-                orx[osize] = arx[a] + (brx[b] - bwm[b]);
+                orx[osize] = arx[a] + (brx[bo + b] - bwm[bo + b]);
                 owm[osize] = awm[a];
                 ov[osize] = av[a];
                 aprevRmin = arm[a] + awm[a];
                 osize = osize + (int64) 1; a = a + (int64) 1;
             } else {
-                orm[osize] = brm[b] + aprevRmin;
-                orx[osize] = brx[b] + (arx[a] - awm[a]);
-                owm[osize] = bwm[b];
-                ov[osize] = bv[b];
-                bprevRmin = brm[b] + bwm[b];
+                orm[osize] = brm[bo + b] + aprevRmin;
+                orx[osize] = brx[bo + b] + (arx[a] - awm[a]);
+                owm[osize] = bwm[bo + b];
+                ov[osize] = bv[bo + b];
+                bprevRmin = brm[bo + b] + bwm[bo + b];
                 osize = osize + (int64) 1; b = b + (int64) 1;
             }
         }
         if (a < an) {
-            float32 brmax = brx[bn - (int64) 1];
+            float32 brmax = brx[bo + bn - (int64) 1];
             while (a < an) {
                 orm[osize] = arm[a] + bprevRmin;
                 orx[osize] = arx[a] + brmax;
@@ -236,10 +301,10 @@ public final class Sketch {
         if (b < bn) {
             float32 armax = arx[an - (int64) 1];
             while (b < bn) {
-                orm[osize] = brm[b] + aprevRmin;
-                orx[osize] = brx[b] + armax;
-                owm[osize] = bwm[b];
-                ov[osize] = bv[b];
+                orm[osize] = brm[bo + b] + aprevRmin;
+                orx[osize] = brx[bo + b] + armax;
+                owm[osize] = bwm[bo + b];
+                ov[osize] = bv[bo + b];
                 osize = osize + (int64) 1; b = b + (int64) 1;
             }
         }
@@ -260,181 +325,202 @@ public final class Sketch {
         return osize;
     }
 
-    /**
-     * One column's cuts into `out` from index 0, returning how many were
-     * written (at most `maxBin + 1`). `col` holds the column's values in row
-     * order, narrowed to float32, NaN for missing. The order of operations is
-     * the reference's, so a column's cuts do not depend on any other column.
-     */
-    static int64 sketchColumn(float32[] col, int64 n, int64 maxBin, float64 eps, float32[] out) {
-        int64 pos = (int64) 0;
-        // column_size (valid count) — the pre-pass GetDataShape.
-        int64 colSize = (int64) 0;
+    /** The valid (non-NaN) count of a column. */
+    static int64 validCount(float32[] col, int64 n) {
+        int64 c = (int64) 0;
         int64 r = (int64) 0;
         while (r < n) {
-            if (!Sketch.isNaN(col[r])) { colSize = colSize + (int64) 1; }
+            if (!Sketch.isNaN(col[r])) { c = c + (int64) 1; }
+            r = r + (int64) 1;
+        }
+        return c;
+    }
+
+    /** Buffers that hold any column of `n` rows sketched to `maxBin` bins with every value valid. */
+    static #ColumnWork workFor(int64 n, int64 maxBin) {
+        int64 nBins = maxBin < n ? maxBin : n;
+        if (nBins < (int64) 1) { nBins = (int64) 1; }
+        int64 rows = n < (int64) 1 ? (int64) 1 : n;
+        return ColumnWork.create(Sketch.limitSize(rows, nBins), Sketch.limitLevels(rows, nBins) + (int64) 2);
+    }
+
+    /**
+     * Streams a column of `colSize` valid values through the GK queue and level
+     * tree (quantile.h:563-641), leaving `GetSummary`'s result in `ws.s*`;
+     * returns its size.
+     */
+    static int64 summarize(float32[] col, int64 n, int64 limit, ColumnWork ws) {
+        int64 qcap = limit * (int64) 2;
+        int64 ls = ws.limit;
+        float32[] qv = ws.qv; float32[] qw = ws.qw;
+        float32[] trm = ws.trm; float32[] trx = ws.trx; float32[] twm = ws.twm; float32[] tv = ws.tv;
+        float32[] srm = ws.srm; float32[] srx = ws.srx; float32[] swm = ws.swm; float32[] sv = ws.sv;
+        float32[] lrm = ws.lrm; float32[] lrx = ws.lrx; float32[] lwm = ws.lwm; float32[] lv = ws.lv;
+        int64[] lsize = ws.lsize;
+        int64 c = (int64) 0;
+        while (c < ws.slots) { lsize[c] = (int64) 0; c = c + (int64) 1; }
+        int64 qtail = (int64) 0;
+        boolean levelsUsed = false;
+        int64 maxLevel = (int64) 0;
+
+        int64 r = (int64) 0;
+        while (r < n) {
+            float32 val = col[r];
+            if (!Sketch.isNaN(val)) {
+                if (qtail == qcap && qv[qtail - (int64) 1] != val) {
+                    int64 tn = Sketch.makeSummary(qv, qw, qtail, ws, trm, trx, twm, tv);
+                    qtail = (int64) 0;
+                    levelsUsed = true;
+                    int64 l = (int64) 1;
+                    while (true) {
+                        if (l > maxLevel) { maxLevel = l; }
+                        int64 lb = l * ls;
+                        int64 pn = Sketch.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
+                        if (lsize[l] == (int64) 0) {
+                            int64 cc = (int64) 0;
+                            while (cc < pn) { lrm[lb + cc] = srm[cc]; lrx[lb + cc] = srx[cc]; lwm[lb + cc] = swm[cc]; lv[lb + cc] = sv[cc]; cc = cc + (int64) 1; }
+                            lsize[l] = pn;
+                            break;
+                        }
+                        tn = Sketch.setCombine(srm, srx, swm, sv, pn, lrm, lrx, lwm, lv, lb, lsize[l], trm, trx, twm, tv);
+                        if (tn > limit) {
+                            lsize[l] = (int64) 0;
+                            l = l + (int64) 1;
+                        } else {
+                            int64 cc = (int64) 0;
+                            while (cc < tn) { lrm[lb + cc] = trm[cc]; lrx[lb + cc] = trx[cc]; lwm[lb + cc] = twm[cc]; lv[lb + cc] = tv[cc]; cc = cc + (int64) 1; }
+                            lsize[l] = tn;
+                            break;
+                        }
+                    }
+                }
+                if (qtail == (int64) 0 || qv[qtail - (int64) 1] != val) {
+                    qv[qtail] = val; qw[qtail] = (float32) 1.0; qtail = qtail + (int64) 1;
+                } else {
+                    qw[qtail - (int64) 1] = qw[qtail - (int64) 1] + (float32) 1.0;
+                }
+            }
             r = r + (int64) 1;
         }
 
-        if (colSize > (int64) 0) {
-            int64 nBins = maxBin < colSize ? maxBin : colSize;
-            if (nBins < (int64) 1) { nBins = (int64) 1; }
-            int64 limit = Sketch.limitSize(colSize, nBins);
-            int64 qcap = limit * (int64) 2;
-
-            // queue + summary/scratch buffers. Levels: slot 0 is scratch;
-            // slots 1..kMaxLevels each hold <= limit entries.
-            float32[] qv = heap float32[qcap]; float32[] qw = heap float32[qcap];
-            int64 kMaxLevels = (int64) 40;
-            float32[] lrm = heap float32[kMaxLevels * limit]; float32[] lrx = heap float32[kMaxLevels * limit];
-            float32[] lwm = heap float32[kMaxLevels * limit]; float32[] lv  = heap float32[kMaxLevels * limit];
-            int64[] lsize = heap int64[kMaxLevels];
-            int64 c = (int64) 0;
-            while (c < kMaxLevels) { lsize[c] = (int64) 0; c = c + (int64) 1; }
-            float32[] trm = heap float32[qcap]; float32[] trx = heap float32[qcap];
-            float32[] twm = heap float32[qcap]; float32[] tv  = heap float32[qcap];
-            float32[] srm = heap float32[qcap]; float32[] srx = heap float32[qcap];
-            float32[] swm = heap float32[qcap]; float32[] sv  = heap float32[qcap];
-
-            int64 qtail = (int64) 0;
-            boolean levelsUsed = false;
-            int64 maxLevel = (int64) 0;
-
-            // ---- Push loop: raw ROW order, weight 1 (quantile.h:563-583).
-            r = (int64) 0;
-            while (r < n) {
-                float32 val = col[r];
-                if (!Sketch.isNaN(val)) {
-                    if (qtail == qcap && qv[qtail - (int64) 1] != val) {
-                        // flush: MakeSummary -> PushTemp (quantile.h:591-613)
-                        int64 tn = Sketch.makeSummary(qv, qw, qtail, trm, trx, twm, tv);
-                        qtail = (int64) 0;
-                        levelsUsed = true;
-                        int64 l = (int64) 1;
-                        while (true) {
-                            if (l > maxLevel) { maxLevel = l; }
-                            int64 lb = l * limit;
-                            if (lsize[l] == (int64) 0) {
-                                // level[l].SetPrune(temp, limit)
-                                int64 pn = Sketch.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
-                                int64 cc = (int64) 0;
-                                while (cc < pn) { lrm[lb + cc] = srm[cc]; lrx[lb + cc] = srx[cc]; lwm[lb + cc] = swm[cc]; lv[lb + cc] = sv[cc]; cc = cc + (int64) 1; }
-                                lsize[l] = pn;
-                                break;
-                            } else {
-                                // level[0] = prune(temp, limit); temp = combine(level[0], level[l])
-                                int64 pn = Sketch.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
-                                // combine srm(slot0) with level l into temp
-                                float32[] llrm = heap float32[lsize[l]]; float32[] llrx = heap float32[lsize[l]];
-                                float32[] llwm = heap float32[lsize[l]]; float32[] llv = heap float32[lsize[l]];
-                                int64 cc = (int64) 0;
-                                while (cc < lsize[l]) { llrm[cc] = lrm[lb + cc]; llrx[cc] = lrx[lb + cc]; llwm[cc] = lwm[lb + cc]; llv[cc] = lv[lb + cc]; cc = cc + (int64) 1; }
-                                tn = Sketch.setCombine(srm, srx, swm, sv, pn, llrm, llrx, llwm, llv, lsize[l], trm, trx, twm, tv);
-                                if (tn > limit) {
-                                    lsize[l] = (int64) 0;
-                                    l = l + (int64) 1;
-                                } else {
-                                    cc = (int64) 0;
-                                    while (cc < tn) { lrm[lb + cc] = trm[cc]; lrx[lb + cc] = trx[cc]; lwm[lb + cc] = twm[cc]; lv[lb + cc] = tv[cc]; cc = cc + (int64) 1; }
-                                    lsize[l] = tn;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    // Queue::Push (quantile.h:96-103)
-                    if (qtail == (int64) 0 || qv[qtail - (int64) 1] != val) {
-                        qv[qtail] = val; qw[qtail] = (float32) 1.0; qtail = qtail + (int64) 1;
-                    } else {
-                        qw[qtail - (int64) 1] = qw[qtail - (int64) 1] + (float32) 1.0;
-                    }
-                }
-                r = r + (int64) 1;
+        int64 on = Sketch.makeSummary(qv, qw, qtail, ws, trm, trx, twm, tv);
+        if (!levelsUsed) {
+            if (on > limit) {
+                return Sketch.setPrune(trm, trx, twm, tv, on, limit, srm, srx, swm, sv);
             }
-
-            // ---- GetSummary (quantile.h:614-641) -> srm/srx/swm/sv, size gs.
-            int64 on = Sketch.makeSummary(qv, qw, qtail, trm, trx, twm, tv);
-            int64 gs;
-            if (levelsUsed) {
-                // level[0] = SetPrune(out, limit)
-                int64 s0 = Sketch.setPrune(trm, trx, twm, tv, on, limit, srm, srx, swm, sv);
-                int64 l = (int64) 1;
-                while (l <= maxLevel) {
-                    if (lsize[l] != (int64) 0) {
-                        if (s0 == (int64) 0) {
-                            int64 lb = l * limit;
-                            int64 cc = (int64) 0;
-                            while (cc < lsize[l]) { srm[cc] = lrm[lb + cc]; srx[cc] = lrx[lb + cc]; swm[cc] = lwm[lb + cc]; sv[cc] = lv[lb + cc]; cc = cc + (int64) 1; }
-                            s0 = lsize[l];
-                        } else {
-                            int64 lb = l * limit;
-                            float32[] llrm = heap float32[lsize[l]]; float32[] llrx = heap float32[lsize[l]];
-                            float32[] llwm = heap float32[lsize[l]]; float32[] llv = heap float32[lsize[l]];
-                            int64 cc = (int64) 0;
-                            while (cc < lsize[l]) { llrm[cc] = lrm[lb + cc]; llrx[cc] = lrx[lb + cc]; llwm[cc] = lwm[lb + cc]; llv[cc] = lv[lb + cc]; cc = cc + (int64) 1; }
-                            int64 tn = Sketch.setCombine(srm, srx, swm, sv, s0, llrm, llrx, llwm, llv, lsize[l], trm, trx, twm, tv);
-                            s0 = Sketch.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
-                        }
-                    }
-                    l = l + (int64) 1;
-                }
-                gs = s0;
-            } else {
-                if (on > limit) {
-                    gs = Sketch.setPrune(trm, trx, twm, tv, on, limit, srm, srx, swm, sv);
-                } else {
-                    int64 cc = (int64) 0;
-                    while (cc < on) { srm[cc] = trm[cc]; srx[cc] = trx[cc]; swm[cc] = twm[cc]; sv[cc] = tv[cc]; cc = cc + (int64) 1; }
-                    gs = on;
-                }
-            }
-
-            // ---- AllReduce: prune to min(colSize, (int64)(maxBin*8.0f)).
-            int64 inter = (int64) ((float32) maxBin * (float32) 8.0);
-            if (colSize < inter) { inter = colSize; }
-            int64 rn = Sketch.setPrune(srm, srx, swm, sv, gs, inter, trm, trx, twm, tv);
-
-            // ---- MakeCuts: a = prune(reduced, min(inter, maxBin)+1).
-            int64 maxNumBins = inter < maxBin ? inter : maxBin;
-            int64 an = Sketch.setPrune(trm, trx, twm, tv, rn, maxNumBins + (int64) 1, srm, srx, swm, sv);
-
-            // min sentinel: (mval - |mval|) - eps, double chain (quantile.cc:427).
-            float64 mval = (float64) sv[0];
-            float64 amag = mval < (float64) 0.0 ? (float64) 0.0 - mval : mval;
-            out[pos] = (float32) ((mval - amag) - eps); pos = pos + (int64) 1;
-            // interior: a[1..required-1].value, strictly increasing (quantile.cc:375-387).
-            int64 required = an < maxNumBins ? an : maxNumBins;
-            int64 e = (int64) 1;
-            while (e < required) {
-                float32 cpt = sv[e];
-                if (e == (int64) 1 || cpt > out[pos - (int64) 1]) {
-                    out[pos] = cpt; pos = pos + (int64) 1;
-                }
-                e = e + (int64) 1;
-            }
-            // max sentinel: cpt + (|cpt| + eps), double chain (quantile.cc:444-448).
-            float64 cptL = (float64) sv[an - (int64) 1];
-            float64 cmag = cptL < (float64) 0.0 ? (float64) 0.0 - cptL : cptL;
-            out[pos] = (float32) (cptL + (cmag + eps)); pos = pos + (int64) 1;
+            int64 cc = (int64) 0;
+            while (cc < on) { srm[cc] = trm[cc]; srx[cc] = trx[cc]; swm[cc] = twm[cc]; sv[cc] = tv[cc]; cc = cc + (int64) 1; }
+            return on;
         }
+        int64 s0 = Sketch.setPrune(trm, trx, twm, tv, on, limit, srm, srx, swm, sv);
+        int64 l = (int64) 1;
+        while (l <= maxLevel) {
+            if (lsize[l] != (int64) 0) {
+                int64 lb = l * ls;
+                if (s0 == (int64) 0) {
+                    int64 cc = (int64) 0;
+                    while (cc < lsize[l]) { srm[cc] = lrm[lb + cc]; srx[cc] = lrx[lb + cc]; swm[cc] = lwm[lb + cc]; sv[cc] = lv[lb + cc]; cc = cc + (int64) 1; }
+                    s0 = lsize[l];
+                } else {
+                    int64 tn = Sketch.setCombine(srm, srx, swm, sv, s0, lrm, lrx, lwm, lv, lb, lsize[l], trm, trx, twm, tv);
+                    s0 = Sketch.setPrune(trm, trx, twm, tv, tn, limit, srm, srx, swm, sv);
+                }
+            }
+            l = l + (int64) 1;
+        }
+        return s0;
+    }
+
+    /**
+     * One column's cuts into `out` from index 0, returning how many were
+     * written (at most `maxBin + 1`). `col` holds the column's values in row
+     * order, narrowed to float32, NaN for missing. Uses `ws` when it is large
+     * enough, else buffers of its own.
+     */
+    static int64 sketchColumn(float32[] col, int64 n, int64 maxBin, float64 eps, float32[] out, ColumnWork ws) {
+        int64 colSize = Sketch.validCount(col, n);
+        if (colSize == (int64) 0) { return (int64) 0; }
+        int64 nBins = maxBin < colSize ? maxBin : colSize;
+        if (nBins < (int64) 1) { nBins = (int64) 1; }
+        int64 limit = Sketch.limitSize(colSize, nBins);
+        int64 slots = Sketch.limitLevels(colSize, nBins) + (int64) 2;
+        if (!ws.fits(limit, slots)) {
+            ColumnWork own #= ColumnWork.create(limit, slots);
+            return Sketch.cutsOf(col, n, colSize, limit, maxBin, eps, out, own);
+        }
+        return Sketch.cutsOf(col, n, colSize, limit, maxBin, eps, out, ws);
+    }
+
+    /** `AllReduce`'s and `MakeCuts`' prunes of the column's summary, then the sentinels (quantile.cc:318-448). */
+    static int64 cutsOf(float32[] col, int64 n, int64 colSize, int64 limit, int64 maxBin, float64 eps,
+                        float32[] out, ColumnWork ws) {
+        int64 gs = Sketch.summarize(col, n, limit, ws);
+        float32[] trm = ws.trm; float32[] trx = ws.trx; float32[] twm = ws.twm; float32[] tv = ws.tv;
+        float32[] srm = ws.srm; float32[] srx = ws.srx; float32[] swm = ws.swm; float32[] sv = ws.sv;
+        int64 inter = (int64) ((float32) maxBin * (float32) 8.0);
+        if (colSize < inter) { inter = colSize; }
+        int64 rn = Sketch.setPrune(srm, srx, swm, sv, gs, inter, trm, trx, twm, tv);
+        int64 maxNumBins = inter < maxBin ? inter : maxBin;
+        int64 an = Sketch.setPrune(trm, trx, twm, tv, rn, maxNumBins + (int64) 1, srm, srx, swm, sv);
+
+        int64 pos = (int64) 0;
+        float64 mval = (float64) sv[0];
+        float64 amag = mval < (float64) 0.0 ? (float64) 0.0 - mval : mval;
+        out[pos] = (float32) ((mval - amag) - eps); pos = pos + (int64) 1;
+        int64 required = an < maxNumBins ? an : maxNumBins;
+        int64 e = (int64) 1;
+        while (e < required) {
+            float32 cpt = sv[e];
+            if (e == (int64) 1 || cpt > out[pos - (int64) 1]) {
+                out[pos] = cpt; pos = pos + (int64) 1;
+            }
+            e = e + (int64) 1;
+        }
+        float64 cptL = (float64) sv[an - (int64) 1];
+        float64 cmag = cptL < (float64) 0.0 ? (float64) 0.0 - cptL : cptL;
+        out[pos] = (float32) (cptL + (cmag + eps)); pos = pos + (int64) 1;
         return pos;
     }
 
-    /** Sketches the columns `f, f + stride, ...` into their slots of `slots`, recording each count. */
+    /** One column's cuts into `out` (at least `maxBin + 1` long), with buffers of its own; returns the count. */
+    public static int64 columnCuts(float32[] col, int64 n, int64 maxBin, float32[] out) {
+        ColumnWork ws #= Sketch.workFor(n, maxBin);
+        return Sketch.sketchColumn(col, n, maxBin, Sketch.epsSentinel(), out, ws);
+    }
+
+    /** The column's `GetSummary` result into `rm, rx, wm, v` (each at least `n` long); returns its size. A test hook. */
+    public static int64 columnSummary(float32[] col, int64 n, int64 maxBin,
+                                      float32[] rm, float32[] rx, float32[] wm, float32[] v) {
+        int64 colSize = Sketch.validCount(col, n);
+        if (colSize == (int64) 0) { return (int64) 0; }
+        int64 nBins = maxBin < colSize ? maxBin : colSize;
+        if (nBins < (int64) 1) { nBins = (int64) 1; }
+        int64 limit = Sketch.limitSize(colSize, nBins);
+        ColumnWork ws #= ColumnWork.create(limit, Sketch.limitLevels(colSize, nBins) + (int64) 2);
+        int64 gs = Sketch.summarize(col, n, limit, ws);
+        int64 g = (int64) 0;
+        while (g < gs) { rm[g] = ws.srm[g]; rx[g] = ws.srx[g]; wm[g] = ws.swm[g]; v[g] = ws.sv[g]; g = g + (int64) 1; }
+        return gs;
+    }
+
+    /** Sketches the columns `f, f + stride, ...` of the contiguous host tensor `x` into their slots of `slots`, recording each count. */
     static async int32 sketchColumns(Tensor<float64> x, int64 n, int64 nf, int64 maxBin,
                                      float64 eps, int64 first, int64 stride,
                                      float32[] slots, int64[] counts) {
         int64 width = maxBin + (int64) 1;
         float32[] col = heap float32[n];
         float32[] cut = heap float32[width];
+        ColumnWork ws #= Sketch.workFor(n, maxBin);
+        float64[] xb = x.hostBuffer();
+        int64 xo = x.hostBase();
         int64 f = first;
         while (f < nf) {
             int64 r = (int64) 0;
             while (r < n) {
-                col[r] = (float32) x.flatGet(r * nf + f);
+                col[r] = (float32) xb[xo + r * nf + f];
                 r = r + (int64) 1;
             }
-            int64 k = Sketch.sketchColumn(col, n, maxBin, eps, cut);
+            int64 k = Sketch.sketchColumn(col, n, maxBin, eps, cut, ws);
             int64 j = (int64) 0;
             while (j < k) {
                 slots[f * width + j] = cut[j];

@@ -42,12 +42,17 @@ public class PrepTiming {
         int64 nf = x.shapeAt(1);
         int64[] sk = heap int64[reps];
         int64[] bn = heap int64[reps];
+        int64[] s1 = heap int64[reps];
         int64 r = (int64) 0;
         while (r < reps) {
             int64[] cutPtrsA = heap int64[nf + (int64) 1];
             int64 t0 = Clock.nanoTime();
             float32[] cuts #= Sketch.cuts(x, n, nf, (int64) 256, cutPtrsA);
             sk[r] = Clock.nanoTime() - t0;
+            int64[] cutPtrsS = heap int64[nf + (int64) 1];
+            int64 ts = Clock.nanoTime();
+            float32[] cutsS #= Sketch.cutsWith(x, n, nf, (int64) 256, cutPtrsS, (int64) 1);
+            s1[r] = Clock.nanoTime() - ts;
             int64 total = cutPtrsA[nf];
             float64[] cv = heap float64[total];
             int64 c = (int64) 0;
@@ -64,7 +69,9 @@ public class PrepTiming {
             r = r + (int64) 1;
         }
         System.stdout.println("prep " + label + " n " + n + " nf " + nf + ": sketch "
-            + FeatureScanTiming.median(sk, reps) / (int64) 1000000 + " ms, bin "
+            + FeatureScanTiming.median(sk, reps) / (int64) 1000000 + " ms (one task "
+            + FeatureScanTiming.median(s1, reps) / (int64) 1000000 + " ms, "
+            + FeatureScanTiming.median(s1, reps) / (nf * (int64) 1000) + " us a column), bin "
             + FeatureScanTiming.median(bn, reps) / (int64) 1000000 + " ms, median of " + reps);
         return;
     }
