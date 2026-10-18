@@ -16,7 +16,7 @@ public class SketchStepTest {
 
     static int64 bits(float32 v) { return (int64) Cajeta.f32ToBits(v); }
 
-    /** A value's bits, with -0 read as +0: a run of equal zeros keeps whichever zero its sort put first, which the reference's unstable `std::sort` does not fix either. */
+    /** A value's bits, with -0 read as +0: the oracle's heapsort leads a mixed run of zeros differently from `std::sort`, which Sketch follows (SketchZeroSignTest). */
     static int64 valueBits(float32 v) {
         int64 b = (int64) Cajeta.f32ToBits(v);
         if ((b & (int64) 2147483647) == (int64) 0) { return (int64) 0; }

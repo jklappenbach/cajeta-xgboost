@@ -44,3 +44,13 @@ Requires `xgboost` + `numpy` (and CUDA + an NVIDIA GPU for `--device cuda`).
 The harness still needs to dump XGBoost's **internal bin edges + per-instance bin
 indices + per-round grad/hess**, for the binned-boundary histogram-level parity
 (§7.1). Tracked as a TODO in `generate.py`.
+
+## Sketch tie-order fixtures
+
+- `zeros/` (`gen_zeros.py`, needs xgboost==3.1.2): columns holding both `-0.0`
+  and `+0.0`, with the real `QuantileDMatrix` cuts at max_bin 256, 64 and 16 in
+  `cut_ptrs_<b>.npy` / `cut_values_<b>.npy`. Which zero leads an equal run
+  follows `std::sort`, so these pin the sketch's mixed-zero path.
+- `stdsort/` (`gen_stdsort.py`, builds `stdsort_ref.cpp` with g++): libstdc++'s
+  `std::sort` and `std::partial_sort` permutations of tie-heavy queues,
+  including McIlroy adversarial inputs that exhaust introsort's depth limit.

@@ -157,14 +157,181 @@ public final class Sketch {
         }
     }
 
+    /** True when the first `m` values hold both -0 and +0, the only equal values whose bits differ. */
+    static boolean mixedZeros(float32[] v, int64 m) {
+        boolean neg = false;
+        boolean pos = false;
+        int64 i = (int64) 0;
+        while (i < m) {
+            if (v[i] == (float32) 0.0) {
+                if (Cajeta.f32ToBits(v[i]) == (int32) 0) { pos = true; } else { neg = true; }
+            }
+            i = i + (int64) 1;
+        }
+        return neg && pos;
+    }
+
+    /**
+     * libstdc++'s `std::sort` by value, step for step (introsort, threshold 16,
+     * median of three, heapsort past depth `2 lg m`), so equal values land where XGBoost's do.
+     */
+    public static void stdSort(float32[] v, float32[] w, int64 m) {
+        if (m < (int64) 2) { return; }
+        int64 lg = (int64) -1;
+        int64 k = m;
+        while (k > (int64) 0) { k = k >> (int64) 1; lg = lg + (int64) 1; }
+        Sketch.introLoop(v, w, (int64) 0, m, lg * (int64) 2);
+        if (m > (int64) 16) {
+            Sketch.insertionSort(v, w, (int64) 0, (int64) 16);
+            int64 i = (int64) 16;
+            while (i < m) { Sketch.linearInsert(v, w, i); i = i + (int64) 1; }
+        } else {
+            Sketch.insertionSort(v, w, (int64) 0, m);
+        }
+    }
+
+    /** libstdc++'s `std::partial_sort(first, last, last)`, the fallback {@link #stdSort} takes past its depth limit; a test hook. */
+    public static void stdPartialSort(float32[] v, float32[] w, int64 m) {
+        Sketch.heapSortRange(v, w, (int64) 0, m);
+    }
+
+    static void swapAt(float32[] v, float32[] w, int64 a, int64 b) {
+        float32 tv = v[a]; v[a] = v[b]; v[b] = tv;
+        float32 tw = w[a]; w[a] = w[b]; w[b] = tw;
+    }
+
+    /** `__introsort_loop`. */
+    static void introLoop(float32[] v, float32[] w, int64 first, int64 last, int64 depth) {
+        int64 hi = last;
+        int64 d = depth;
+        while (hi - first > (int64) 16) {
+            if (d == (int64) 0) {
+                Sketch.heapSortRange(v, w, first, hi);
+                return;
+            }
+            d = d - (int64) 1;
+            int64 mid = first + (hi - first) / (int64) 2;
+            int64 a = first + (int64) 1;
+            int64 c = hi - (int64) 1;
+            if (v[a] < v[mid]) {
+                if (v[mid] < v[c]) { Sketch.swapAt(v, w, first, mid); }
+                else if (v[a] < v[c]) { Sketch.swapAt(v, w, first, c); }
+                else { Sketch.swapAt(v, w, first, a); }
+            } else if (v[a] < v[c]) { Sketch.swapAt(v, w, first, a); }
+            else if (v[mid] < v[c]) { Sketch.swapAt(v, w, first, c); }
+            else { Sketch.swapAt(v, w, first, mid); }
+            int64 lo = first + (int64) 1;
+            int64 up = hi;
+            float32 pivot = v[first];
+            while (true) {
+                while (v[lo] < pivot) { lo = lo + (int64) 1; }
+                up = up - (int64) 1;
+                while (pivot < v[up]) { up = up - (int64) 1; }
+                if (!(lo < up)) { break; }
+                Sketch.swapAt(v, w, lo, up);
+                lo = lo + (int64) 1;
+            }
+            Sketch.introLoop(v, w, lo, hi, d);
+            hi = lo;
+        }
+    }
+
+    /** `__insertion_sort` over `[first, last)`. */
+    static void insertionSort(float32[] v, float32[] w, int64 first, int64 last) {
+        if (first == last) { return; }
+        int64 i = first + (int64) 1;
+        while (i < last) {
+            if (v[i] < v[first]) {
+                float32 cv = v[i];
+                float32 cw = w[i];
+                int64 j = i;
+                while (j > first) { v[j] = v[j - (int64) 1]; w[j] = w[j - (int64) 1]; j = j - (int64) 1; }
+                v[first] = cv;
+                w[first] = cw;
+            } else {
+                Sketch.linearInsert(v, w, i);
+            }
+            i = i + (int64) 1;
+        }
+    }
+
+    /** `__unguarded_linear_insert` of the entry at `at`. */
+    static void linearInsert(float32[] v, float32[] w, int64 at) {
+        float32 cv = v[at];
+        float32 cw = w[at];
+        int64 hole = at;
+        int64 next = at - (int64) 1;
+        while (cv < v[next]) {
+            v[hole] = v[next];
+            w[hole] = w[next];
+            hole = next;
+            next = next - (int64) 1;
+        }
+        v[hole] = cv;
+        w[hole] = cw;
+    }
+
+    /** `__partial_sort(first, last, last)`: `__make_heap` then `__sort_heap`. */
+    static void heapSortRange(float32[] v, float32[] w, int64 first, int64 last) {
+        int64 len = last - first;
+        if (len >= (int64) 2) {
+            int64 parent = (len - (int64) 2) / (int64) 2;
+            while (true) {
+                Sketch.adjustHeap(v, w, first, parent, len, v[first + parent], w[first + parent]);
+                if (parent == (int64) 0) { break; }
+                parent = parent - (int64) 1;
+            }
+        }
+        int64 end = last;
+        while (end - first > (int64) 1) {
+            end = end - (int64) 1;
+            float32 cv = v[end];
+            float32 cw = w[end];
+            v[end] = v[first];
+            w[end] = w[first];
+            Sketch.adjustHeap(v, w, first, (int64) 0, end - first, cv, cw);
+        }
+    }
+
+    /** `__adjust_heap` then `__push_heap` of `(cv, cw)` into the hole. */
+    static void adjustHeap(float32[] v, float32[] w, int64 first, int64 holeIndex, int64 len, float32 cv, float32 cw) {
+        int64 top = holeIndex;
+        int64 hole = holeIndex;
+        int64 second = holeIndex;
+        while (second < (len - (int64) 1) / (int64) 2) {
+            second = (int64) 2 * (second + (int64) 1);
+            if (v[first + second] < v[first + second - (int64) 1]) { second = second - (int64) 1; }
+            v[first + hole] = v[first + second];
+            w[first + hole] = w[first + second];
+            hole = second;
+        }
+        if ((len & (int64) 1) == (int64) 0 && second == (len - (int64) 2) / (int64) 2) {
+            second = (int64) 2 * (second + (int64) 1);
+            v[first + hole] = v[first + second - (int64) 1];
+            w[first + hole] = w[first + second - (int64) 1];
+            hole = second - (int64) 1;
+        }
+        int64 parent = (hole - (int64) 1) / (int64) 2;
+        while (hole > top && v[first + parent] < cv) {
+            v[first + hole] = v[first + parent];
+            w[first + hole] = w[first + parent];
+            hole = parent;
+            parent = (hole - (int64) 1) / (int64) 2;
+        }
+        v[first + hole] = cv;
+        w[first + hole] = cw;
+    }
+
     /**
      * `Queue::MakeSummary` (quantile.h:105-120): sort by value, collapse equal
      * values (float32 weight sums), emit entries with the float32 running rank
-     * prefix `wsum`. Returns the summary size.
+     * prefix `wsum`. Returns the summary size. A queue holding both zeros sorts
+     * as `std::sort` does, since which zero leads a run is visible in the cuts.
      */
     static int64 makeSummary(float32[] qv, float32[] qw, int64 qtail, ColumnWork ws,
                              float32[] rm, float32[] rx, float32[] wm, float32[] v) {
-        Sketch.sortQueue(qv, qw, qtail, ws);
+        if (Sketch.mixedZeros(qv, qtail)) { Sketch.stdSort(qv, qw, qtail); }
+        else { Sketch.sortQueue(qv, qw, qtail, ws); }
         int64 size = (int64) 0;
         float32 wsum = (float32) 0.0;
         int64 i = (int64) 0;

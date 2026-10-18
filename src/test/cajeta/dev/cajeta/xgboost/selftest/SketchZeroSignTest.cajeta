@@ -1,0 +1,90 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import cajeta.math.npio.Npy;
+import dev.cajeta.xgboost.sketch.Sketch;
+
+/**
+ * xgboost-data-prep Unit 3: a queue holding both zeros sorts as libstdc++'s
+ * `std::sort` does, so the zero that leads an equal run, and so the cuts,
+ * are XGBoost 3.1.2's (fixtures `stdsort` and `zeros`).
+ */
+public class SketchZeroSignTest {
+
+    public SketchZeroSignTest() { return; }
+
+    static void checkSort(boolean partial) {
+        FixtureLoader f #= FixtureLoader.open("stdsort");
+        Tensor<int64> offs #= Npy.loadI64(f.path("offsets.npy"));
+        Tensor<int32> in #= Npy.loadI32(f.path("in_bits.npy"));
+        Tensor<int32> bits #= Npy.loadI32(f.path(partial ? "partial_bits.npy" : "sort_bits.npy"));
+        Tensor<int32> tags #= Npy.loadI32(f.path(partial ? "partial_tags.npy" : "sort_tags.npy"));
+        int64 cases = offs.size() - (int64) 1;
+        int64 c = (int64) 0;
+        while (c < cases) {
+            int64 b0 = offs.flatGet(c);
+            int64 m = offs.flatGet(c + (int64) 1) - b0;
+            float32[] v = heap float32[m];
+            float32[] w = heap float32[m];
+            int64 i = (int64) 0;
+            while (i < m) {
+                v[i] = Cajeta.bitsToF32(in.flatGet(b0 + i));
+                w[i] = (float32) i;
+                i = i + (int64) 1;
+            }
+            if (partial) { Sketch.stdPartialSort(v, w, m); } else { Sketch.stdSort(v, w, m); }
+            i = (int64) 0;
+            while (i < m) {
+                Assert.equals((int64) Cajeta.f32ToBits(v[i]), (int64) bits.flatGet(b0 + i));
+                Assert.equals((int64) w[i], (int64) tags.flatGet(b0 + i));
+                i = i + (int64) 1;
+            }
+            c = c + (int64) 1;
+        }
+        return;
+    }
+
+    @Test
+    public void stdSortPermutesAsLibstdcxx() {
+        SketchZeroSignTest.checkSort(false);
+        return;
+    }
+
+    @Test
+    public void heapFallbackPermutesAsLibstdcxxPartialSort() {
+        SketchZeroSignTest.checkSort(true);
+        return;
+    }
+
+    static void checkCuts(int64 maxBin) {
+        FixtureLoader f #= FixtureLoader.open("zeros");
+        Tensor<float64> x #= f.x();
+        Tensor<int64> refCp #= Npy.loadI64(f.path("cut_ptrs_" + maxBin + ".npy"));
+        Tensor<float64> refCv #= Npy.loadF64(f.path("cut_values_" + maxBin + ".npy"));
+        int64 n = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        int64 tasks = (int64) 1;
+        while (tasks <= (int64) 4) {
+            int64[] cp = heap int64[nf + (int64) 1];
+            float32[] cv #= Sketch.cutsWith(x, n, nf, maxBin, cp, tasks);
+            int64 i = (int64) 0;
+            while (i <= nf) { Assert.equals(cp[i], refCp.flatGet(i)); i = i + (int64) 1; }
+            i = (int64) 0;
+            while (i < cp[nf]) {
+                Assert.equals((int64) Cajeta.f32ToBits(cv[i]), (int64) Cajeta.f32ToBits((float32) refCv.flatGet(i)));
+                i = i + (int64) 1;
+            }
+            tasks = tasks * (int64) 4;
+        }
+        return;
+    }
+
+    @Test
+    public void mixedZeroCutsAreXgboostsBitForBit() {
+        SketchZeroSignTest.checkCuts((int64) 256);
+        SketchZeroSignTest.checkCuts((int64) 64);
+        SketchZeroSignTest.checkCuts((int64) 16);
+        return;
+    }
+}
