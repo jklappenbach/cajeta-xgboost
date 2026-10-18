@@ -1,0 +1,168 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.objective.Objective;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+
+/** xgboost-device-training Unit 3: the device quantiser equals `GradientQuantiser.build`, bit for bit. */
+public class GpuQuantiserTest {
+
+    public GpuQuantiserTest() { return; }
+
+    static void assertSameFactors(String what, GradientQuantiser want, GradientQuantiser got) {
+        if (Cajeta.f64ToBits(got.toFixedGrad) != Cajeta.f64ToBits(want.toFixedGrad)) {
+            Assert.fail(what + ": toFixedGrad differs");
+        }
+        if (Cajeta.f64ToBits(got.toFixedHess) != Cajeta.f64ToBits(want.toFixedHess)) {
+            Assert.fail(what + ": toFixedHess differs");
+        }
+        Assert.equals(Cajeta.f64ToBits(got.toFloatGrad), Cajeta.f64ToBits(want.toFloatGrad));
+        Assert.equals(Cajeta.f64ToBits(got.toFloatHess), Cajeta.f64ToBits(want.toFloatHess));
+    }
+
+    /** The device's selected group: factors and quantized pairs against the host's over `grad`/`hess`. */
+    static void assertGroup(String what, GpuTrainState st, float64[] grad, float64[] hess,
+                            int64 n, int64 K, int64 g) {
+        float64[] gs = heap float64[n];
+        float64[] hs = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { gs[i] = grad[i * K + g]; hs[i] = hess[i * K + g]; i = i + (int64) 1; }
+        GradientQuantiser host #= GradientQuantiser.build(gs, hs, n);
+        st.useGroup(g);
+        GradientQuantiser dev #= st.quantise();
+        GpuQuantiserTest.assertSameFactors(what, host, dev);
+        int64[] qp #= st.quantizedPairs();
+        i = (int64) 0;
+        while (i < n) {
+            if (qp[i * (int64) 2] != host.fixedGrad(gs[i]) || qp[i * (int64) 2 + (int64) 1] != host.fixedHess(hs[i])) {
+                Assert.fail(what + ": row " + Int64.of(i).toString() + " quantizes differently");
+            }
+            i = i + (int64) 1;
+        }
+    }
+
+    /** Rounds 0 to 2 of a host fit on `fixture`, every group. */
+    static void assertFixture(String fixture, Objective o, int64 K) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        int64 rounds = (int64) 3;
+        int64 rows = n * K;
+        float32[] mh = heap float32[rounds * rows];
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
+                                n, rounds, (int64) 4, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                o, K, mh, false);
+        float32 base = GpuObjectiveTest.baseOf(o);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginFit(label, base, K);
+        float32[] margin = heap float32[rows];
+        float64[] dg = heap float64[rows];
+        float64[] dh = heap float64[rows];
+        int64 r = (int64) 0;
+        while (r < rounds) {
+            int64 t = (int64) 0;
+            while (t < rows) {
+                if (r == (int64) 0) { margin[t] = base; }
+                else { margin[t] = mh[(r - (int64) 1) * rows + t]; }
+                t = t + (int64) 1;
+            }
+            st.uploadMargins(margin);
+            st.gradients(o);
+            st.downloadGradients(dg, dh);
+            int64 g = (int64) 0;
+            while (g < K) {
+                GpuQuantiserTest.assertGroup(fixture + " round " + Int64.of(r).toString() + " group " + Int64.of(g).toString(), st, dg, dh, n, K, g);
+                g = g + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        Assert.equals((int64) 0, st.quantiserFallbacks());
+        return;
+    }
+
+    @Test
+    public void factorsEqualTheHostsOnTheFixtures() {
+        GpuQuantiserTest.assertFixture("tiny_reg", Objective.SQUARED_ERROR, (int64) 1);
+        GpuQuantiserTest.assertFixture("large_reg", Objective.SQUARED_ERROR, (int64) 1);
+        GpuQuantiserTest.assertFixture("tiny_binary", Objective.LOGISTIC, (int64) 1);
+        GpuQuantiserTest.assertFixture("large_binary", Objective.LOGISTIC, (int64) 1);
+        GpuQuantiserTest.assertFixture("tiny_multi", Objective.SOFTMAX, (int64) 4);
+        GpuQuantiserTest.assertFixture("large_multi", Objective.SOFTMAX, (int64) 4);
+        return;
+    }
+
+    /** The float64 sum of `v[lo, hi)` by halves. */
+    static float64 pairwise(float64[] v, int64 lo, int64 hi) {
+        if (hi - lo == (int64) 1) { return v[lo]; }
+        int64 mid = lo + (hi - lo) / (int64) 2;
+        return GpuQuantiserTest.pairwise(v, lo, mid) + GpuQuantiserTest.pairwise(v, mid, hi);
+    }
+
+    /** `2^e` from its bits. */
+    static float64 p2(int64 e) { return Cajeta.bitsToF64((e + (int64) 1023) << (int64) 52); }
+
+    /** A one-feature state over `n` rows holding `grad` and `hess` on the device. */
+    static #GpuTrainState stateWith(float64[] grad, float64[] hess, int64 n) {
+        int32[] bz = heap int32[n];
+        int64[] bs = heap int64[2]; bs[0] = n; bs[1] = (int64) 1;
+        Tensor<int32> bins #= Tensor.of<int32>(bz, bs);
+        int64[] cp = heap int64[2]; cp[0] = (int64) 0; cp[1] = (int64) 1;
+        int64[] cs = heap int64[1]; cs[0] = (int64) 2;
+        Tensor<int64> cutPtrs #= Tensor.of<int64>(cp, cs);
+        float64[] label = heap float64[n];
+        GpuTrainState st #= GpuTrainState.create(bins, cutPtrs, n);
+        st.beginFit(label, (float32) 0.0, (int64) 1);
+        st.loadGradients(grad, hess);
+        return #st;
+    }
+
+    @Test
+    public void aPowerOfTwoHessianSumIsExactWithoutTheFallback() {
+        int64 n = (int64) 4096;
+        float64[] grad = heap float64[n];
+        float64[] hess = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            grad[i] = (float64) 0.25 - (float64) (i % (int64) 7) * (float64) 0.125;
+            hess[i] = (float64) 1.0;
+            i = i + (int64) 1;
+        }
+        GpuTrainState st #= GpuQuantiserTest.stateWith(grad, hess, n);
+        GpuQuantiserTest.assertGroup("power of two", st, grad, hess, n, (int64) 1, (int64) 0);
+        Assert.equals((int64) 0, st.quantiserFallbacks());
+        return;
+    }
+
+    @Test
+    public void aSumOneUlpBelowAPowerOfTwoKeepsTheHostsExponent() {
+        int64 n = (int64) 4096;
+        float64[] grad = heap float64[n];
+        float64[] hess = heap float64[n];
+        grad[0] = (float64) 1.0 - GpuQuantiserTest.p2((int64) -24);
+        grad[1] = GpuQuantiserTest.p2((int64) -24) - GpuQuantiserTest.p2((int64) -38);
+        grad[2] = GpuQuantiserTest.p2((int64) -39) - GpuQuantiserTest.p2((int64) -50);
+        int64 i = (int64) 0;
+        while (i < n) {
+            if (i >= (int64) 3) { grad[i] = GpuQuantiserTest.p2((int64) -56); }
+            hess[i] = (float64) 1.0;
+            i = i + (int64) 1;
+        }
+        GradientQuantiser host #= GradientQuantiser.build(grad, hess, n);
+        GradientQuantiser pair #= GradientQuantiser.fromSums(GpuQuantiserTest.pairwise(grad, (int64) 0, n),
+                                                             (float64) 0.0, (float64) n, (float64) 0.0, n);
+        // The two orders must disagree, or this input proves nothing.
+        Assert.isTrue(Cajeta.f64ToBits(pair.toFixedGrad) != Cajeta.f64ToBits(host.toFixedGrad));
+
+        GpuTrainState st #= GpuQuantiserTest.stateWith(grad, hess, n);
+        GpuQuantiserTest.assertGroup("adversarial", st, grad, hess, n, (int64) 1, (int64) 0);
+        Assert.equals((int64) 1, st.quantiserFallbacks());
+        return;
+    }
+}

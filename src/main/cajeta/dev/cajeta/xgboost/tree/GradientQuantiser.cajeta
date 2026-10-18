@@ -84,7 +84,15 @@ public final class GradientQuantiser {
             else if (h < (float32) 0.0) { negH = negH + (float64) (- h); }
             i = i + (int64) 1;
         }
+        return GradientQuantiser.fromSums(posG, negG, posH, negH, n);
+    }
 
+    /**
+     * The quantiser of `n` rows from its four clip sums. Each factor is a
+     * monotone function of the sums, which the device builder relies on.
+     */
+    public static #GradientQuantiser fromSums(float64 posG, float64 negG,
+                                              float64 posH, float64 negH, int64 n) {
         float64 maxG = Math.max(posG, negG);
         float64 maxH = Math.max(posH, negH);
         float64 rndG = GradientQuantiser.roundingFactor(maxG, n);

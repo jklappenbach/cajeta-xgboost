@@ -15,6 +15,7 @@ final class TransferLog {
     int64 downRows;
     int64 downSmall;
     int64 syncs;
+    int64 fallbacks;
     int64 trees;
     int64 treeStart;
     int64 treeMax;

@@ -145,7 +145,6 @@ public final class Booster {
             if (st != null) {
                 if (r > (int64) 0) { st.uploadMargins(margin); }
                 st.gradients(objective);
-                st.downloadGradients(grad, hess);
             } else {
                 Booster.gradHessOf(objective, margin, label, n, K, grad, hess);
             }
@@ -155,11 +154,12 @@ public final class Booster {
                 // stride K. For K == 1 this is a straight copy of grad/hess,
                 // so the single-group path stays value-identical.
                 int64 ii = (int64) 0;
-                while (ii < n) {
+                while (st == null && ii < n) {
                     gradK[ii] = grad[ii * K + g];
                     hessK[ii] = hess[ii * K + g];
                     ii = ii + (int64) 1;
                 }
+                if (st != null) { st.useGroup(g); }
 
                 // (2) Grow this class's tree into scratch arrays; capture leafOf.
                 int64[]   si = heap int64[cap];

@@ -145,7 +145,10 @@ public final class TreeBuilder {
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
                              float32[] lossChg, float64[] sumHess,
                              int64[] leafOf, boolean device, GpuTrainState st) {
-        GradientQuantiser q #= GradientQuantiser.build(grad, hess, n);
+        boolean deviceQ = st != null && st.hasDeviceGradients();
+        GradientQuantiser q;
+        if (deviceQ) { q #= st.quantise(); }
+        else { q #= GradientQuantiser.build(grad, hess, n); }
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
         int64 nbins = cutPtrs.flatGet(nf);
 
@@ -168,7 +171,8 @@ public final class TreeBuilder {
         while (i < n) { position[i] = (int64) 0; i = i + (int64) 1; }
 
         // Root histogram (built directly over all rows).
-        if (st != null) { st.beginTree(q, grad, hess, cap); }
+        if (deviceQ) { st.beginTree(cap); }
+        else if (st != null) { st.beginTree(q, grad, hess, cap); }
         TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, (int64) 0, (int64) 0,
                                   bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
 

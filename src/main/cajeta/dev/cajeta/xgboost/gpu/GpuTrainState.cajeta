@@ -30,6 +30,8 @@ public final class GpuTrainState {
     KernelBuffer<float32> margins;
     KernelBuffer<float32> gradG;
     KernelBuffer<float32> gradH;
+    KernelBuffer<int64> qWords;
+    KernelBuffer<float64> qSums;
     TransferLog log;
     int32[] blockH;
     int64[] histWords;
@@ -40,6 +42,8 @@ public final class GpuTrainState {
     int64 nf;
     int64 nbins;
     int64 groups;
+    int64 group;
+    boolean deviceGrads;
 
     GpuTrainState(Tensor<int64> cutPtrs, int64 n) {
         this.n = n;
@@ -65,6 +69,8 @@ public final class GpuTrainState {
         this.segBegin = heap int64[1];
         this.segCount = heap int64[1];
         this.log = heap TransferLog();
+        this.qWords = heap KernelBuffer<int64>((int64) 8 * GpuQuantiser.words() + (int64) 1);
+        this.qSums = heap KernelBuffer<float64>((int64) 4);
         this.cutOff.upload(cutH);
         this.log.upSmalls((int64) 1);
     }
@@ -251,6 +257,60 @@ public final class GpuTrainState {
     public void gradients(Objective o) {
         GpuObjective.launch(o, this.gradG, this.gradH, this.margins, this.labels,
                             this.n, this.groups, this.log);
+        this.deviceGrads = true;
+    }
+
+    /** Uploads `grad` and `hess` (`n * groups`) as the device pairs; a test hook. */
+    public void loadGradients(float64[] grad, float64[] hess) {
+        int64 rows = this.n * this.groups;
+        float32[] g = heap float32[rows];
+        float32[] h = heap float32[rows];
+        int64 i = (int64) 0;
+        while (i < rows) {
+            g[i] = (float32) grad[i];
+            h[i] = (float32) hess[i];
+            i = i + (int64) 1;
+        }
+        this.gradG.upload(g);
+        this.log.upRow();
+        this.gradH.upload(h);
+        this.log.upRow();
+        this.deviceGrads = true;
+    }
+
+    /** True once the device holds this round's gradient pairs. */
+    public boolean hasDeviceGradients() { return this.deviceGrads; }
+
+    /** Selects output group `g` for the next tree's quantiser and pairs. */
+    public void useGroup(int64 g) { this.group = g; }
+
+    /**
+     * The quantiser of the selected group's device pairs, equal to
+     * `GradientQuantiser.build` on them; the pairs are quantized on the device.
+     */
+    public #GradientQuantiser quantise() {
+        return GpuQuantiser.build(this.q, this.gradG, this.gradH, this.n, this.groups, this.group,
+                                  this.qWords, this.qSums, this.log);
+    }
+
+    /** The device's quantized pairs, `[n, 2]`; a test hook. */
+    public #int64[] quantizedPairs() {
+        int64[] out = heap int64[this.n * (int64) 2];
+        this.q.download(out);
+        this.log.downRow();
+        return #out;
+    }
+
+    /** Starts a tree of up to `cap` nodes over pairs already quantized on the device. */
+    public void beginTree(int64 cap) {
+        this.log.beginTree();
+        GpuPartition.resetSegments(this.ridx, this.n, this.log);
+        if ((int64) this.segBegin.count() < cap) {
+            this.segBegin = heap int64[cap];
+            this.segCount = heap int64[cap];
+        }
+        this.segBegin[0] = (int64) 0;
+        this.segCount[0] = this.n;
     }
 
     /** Downloads the device G and H into `grad` and `hess`, `n * groups` row-major. */
@@ -292,6 +352,8 @@ public final class GpuTrainState {
     public int64 smallDownloads() { return this.log.downSmall; }
     /** Stream synchronizations. */
     public int64 syncs() { return this.log.syncs; }
+    /** Quantisers that replayed the host's row-order sum. */
+    public int64 quantiserFallbacks() { return this.log.fallbacks; }
     /** Trees begun. */
     public int64 trees() { return this.log.trees; }
     /** The most synchronizations any one tree made. */

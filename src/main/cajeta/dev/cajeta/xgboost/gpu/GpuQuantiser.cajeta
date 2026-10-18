@@ -1,0 +1,255 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.xpu.Bits;
+import cajeta.xpu.KernelBuffer;
+import cajeta.xpu.KernelStream;
+import cajeta.xpu.KernelThread;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+
+/**
+ * `GradientQuantiser.build` on the device (xgboost-device-training spec 3.2.2,
+ * 10.1). The four clip sums are accumulated exactly as 320-bit fixed point;
+ * where every sum within the host's rounding bound gives the same factors those
+ * are the host's, and otherwise one thread replays the host's ascending sum.
+ */
+final class GpuQuantiser {
+
+    /** 32-bit words per exact sum: float32's 277 bits plus log2(n), carried in int64. */
+    static int64 words() { return (int64) 10; }
+
+    /** Float32 bits `b` (finite) as float64, exactly and without float32 arithmetic. */
+    @Device
+    static float64 widen(int32 b) {
+        int32 e = (b >> 23) & (int32) 0xFF;
+        if (e == (int32) 0xFF) { return (float64) Cajeta.bitsToF32(b); }
+        int64 m = (int64) (b & (int32) 0x7FFFFF);
+        int64 p = (int64) -149;
+        if (e != (int32) 0) { m = m | (int64) 0x800000; p = (int64) e - (int64) 150; }
+        float64 v = (float64) m * Cajeta.bitsToF64((p + (int64) 1023) << (int64) 52);
+        if (b < (int32) 0) { return (float64) 0.0 - v; }
+        return v;
+    }
+
+    /** -1, 0 or 1 for the sign of float32 bits `b`; 0 for a zero or NaN. */
+    @Device
+    static int32 signOf(int32 b) {
+        int32 mag = b & (int32) 0x7FFFFFFF;
+        if (mag == (int32) 0 || mag > (int32) 0x7F800000) { return (int32) 0; }
+        if (b < (int32) 0) { return (int32) -1; }
+        return (int32) 1;
+    }
+
+    /** Threads per sum word: blocks of 256. */
+    static int64 blocksPerSlot(int64 n) {
+        int64 b = (n + (int64) 255) / (int64) 256;
+        if (b > (int64) 16) { b = (int64) 16; }
+        if (b < (int64) 1) { b = (int64) 1; }
+        return b;
+    }
+
+    /**
+     * Word `w` of sum `s` (0 grad+, 1 grad-, 2 hess+, 3 hess-) over rows `r*stride + offset`:
+     * each value's 24-bit mantissa lands at bit `exponent - 1`. `words[40]` counts infinities,
+     * and `words[41 + s*10 + k]` counts threads whose lowest set bit falls in word `k`.
+     */
+    @Kernel
+    public static void clipWords(KernelBuffer<int64> words, KernelBuffer<float32> g,
+                                 KernelBuffer<float32> h, uint32 n, uint32 stride,
+                                 uint32 offset, uint32 perSlot) {
+        uint32 t = KernelThread.globalIdX();
+        uint32 slot = t / perSlot;
+        if (slot < 40) {
+            uint32 s = slot / 10;
+            uint32 w = slot - s * 10;
+            uint32 r = t - slot * perSlot;
+            int64 acc = (int64) 0;
+            int64 infs = (int64) 0;
+            int32 minLsb = (int32) 1000;
+            while (r < n) {
+                float32 v = h[r * stride + offset];
+                if (s < 2) { v = g[r * stride + offset]; }
+                int32 vb = Cajeta.f32ToBits(v);
+                int32 want = (int32) 1;
+                if (s == 1 || s == 3) { want = (int32) -1; }
+                if (GpuQuantiser.signOf(vb) == want) {
+                    int32 b = vb & (int32) 0x7FFFFFFF;
+                    int32 e = (b >> 23) & (int32) 0xFF;
+                    if (e == (int32) 0xFF) {
+                        infs = infs + (int64) 1;
+                    } else {
+                        int64 m = (int64) (b & (int32) 0x7FFFFF);
+                        int32 p = (int32) 0;
+                        if (e != (int32) 0) { m = m | (int64) 0x800000; p = e - (int32) 1; }
+                        uint32 wi = (uint32) p / 32;
+                        int64 sh = m << (int64) ((uint32) p - wi * 32);
+                        int32 lsb = p + (int32) Bits.trailingZeros((uint32) m);
+                        if (lsb < minLsb) { minLsb = lsb; }
+                        if (wi == w) { acc = acc + (sh & (((int64) 1 << (int64) 32) - (int64) 1)); }
+                        if (wi + 1 == w) { acc = acc + (sh >> (int64) 32); }
+                    }
+                }
+                r = r + perSlot;
+            }
+            if (acc != (int64) 0) { words.atomicAdd(slot, acc); }
+            if (w == 0 && infs != (int64) 0) { words.atomicAdd(40, infs); }
+            if (w == 0 && minLsb < (int32) 1000) {
+                words.atomicAdd(41 + s * 10 + (uint32) minLsb / 32, (int64) 1);
+            }
+        }
+    }
+
+    /** The host's four ascending float64 clip sums, by one thread, into `out[4]`. */
+    @Kernel
+    public static void serialSums(KernelBuffer<float64> out, KernelBuffer<float32> g,
+                                  KernelBuffer<float32> h, uint32 n, uint32 stride, uint32 offset) {
+        if (KernelThread.globalIdX() == 0) {
+            float64 posG = (float64) 0.0;
+            float64 negG = (float64) 0.0;
+            float64 posH = (float64) 0.0;
+            float64 negH = (float64) 0.0;
+            uint32 r = 0;
+            while (r < n) {
+                int32 gb = Cajeta.f32ToBits(g[r * stride + offset]);
+                int32 hb = Cajeta.f32ToBits(h[r * stride + offset]);
+                int32 gs = GpuQuantiser.signOf(gb);
+                int32 hs = GpuQuantiser.signOf(hb);
+                if (gs > (int32) 0) { posG = posG + GpuQuantiser.widen(gb); }
+                else if (gs < (int32) 0) { negG = negG + GpuQuantiser.widen(gb & (int32) 0x7FFFFFFF); }
+                if (hs > (int32) 0) { posH = posH + GpuQuantiser.widen(hb); }
+                else if (hs < (int32) 0) { negH = negH + GpuQuantiser.widen(hb & (int32) 0x7FFFFFFF); }
+                r = r + 1;
+            }
+            out[0] = posG;
+            out[1] = negG;
+            out[2] = posH;
+            out[3] = negH;
+        }
+    }
+
+    /** `fixedGrad` and `fixedHess` of each row into `q` (row-major pairs). */
+    @Kernel
+    public static void quantize(KernelBuffer<int64> q, KernelBuffer<float32> g,
+                                KernelBuffer<float32> h, uint32 n, uint32 stride, uint32 offset,
+                                float64 toFixedGrad, float64 toFixedHess) {
+        uint32 r = KernelThread.globalIdX();
+        if (r < n) {
+            float64 gv = GpuQuantiser.widen(Cajeta.f32ToBits(g[r * stride + offset]));
+            float64 hv = GpuQuantiser.widen(Cajeta.f32ToBits(h[r * stride + offset]));
+            q[r * 2] = (int64) (gv * toFixedGrad);
+            q[r * 2 + 1] = (int64) (hv * toFixedHess);
+        }
+    }
+
+    /** `2^e` for e in the float64 normal range. */
+    static float64 pow2(int64 e) {
+        return Cajeta.bitsToF64((e + (int64) 1023) << (int64) 52);
+    }
+
+    /**
+     * True when every partial sum of sum `s` is exact in float64: its top bit is
+     * fewer than 53 bits above the lowest bit any of its values sets.
+     */
+    static boolean exactSum(int64[] w, int64 s) {
+        int64 carry = (int64) 0;
+        int64 top = (int64) -1;
+        int64 i = (int64) 0;
+        while (i < GpuQuantiser.words()) {
+            int64 v = w[s * GpuQuantiser.words() + i] + carry;
+            int64 c = v & (((int64) 1 << (int64) 32) - (int64) 1);
+            carry = v >> (int64) 32;
+            int64 b = (int64) 0;
+            while (b < (int64) 32) {
+                if (((c >> b) & (int64) 1) != (int64) 0) { top = (int64) 32 * i + b; }
+                b = b + (int64) 1;
+            }
+            i = i + (int64) 1;
+        }
+        if (carry != (int64) 0) { return false; }
+        if (top < (int64) 0) { return true; }
+        int64 base = (int64) 4 * GpuQuantiser.words() + (int64) 1 + s * GpuQuantiser.words();
+        int64 k = (int64) 0;
+        while (k < GpuQuantiser.words() && w[base + k] == (int64) 0) { k = k + (int64) 1; }
+        return top - (int64) 32 * k < (int64) 53;
+    }
+
+    /** Sum `s` of the carried words, as float64 within ten roundings of exact. */
+    static float64 sumOf(int64[] w, int64 s) {
+        int64[] c = heap int64[GpuQuantiser.words()];
+        int64 carry = (int64) 0;
+        int64 i = (int64) 0;
+        while (i < GpuQuantiser.words()) {
+            int64 v = w[s * GpuQuantiser.words() + i] + carry;
+            c[i] = v & (((int64) 1 << (int64) 32) - (int64) 1);
+            carry = v >> (int64) 32;
+            i = i + (int64) 1;
+        }
+        float64 sum = (float64) carry * GpuQuantiser.pow2((int64) 32 * GpuQuantiser.words() - (int64) 149);
+        i = GpuQuantiser.words() - (int64) 1;
+        while (i >= (int64) 0) {
+            sum = sum + (float64) c[i] * GpuQuantiser.pow2((int64) 32 * i - (int64) 149);
+            i = i - (int64) 1;
+        }
+        return sum;
+    }
+
+    /**
+     * The quantiser of rows `r*stride + offset` of `g` and `h`, equal to
+     * `GradientQuantiser.build` on them, and those rows quantized into `q`.
+     */
+    static #GradientQuantiser build(KernelBuffer<int64> q, KernelBuffer<float32> g,
+                                    KernelBuffer<float32> h, int64 n, int64 stride, int64 offset,
+                                    KernelBuffer<int64> words, KernelBuffer<float64> sums,
+                                    TransferLog log) {
+        KernelStream s #= KernelStream.current();
+        int64 nw = (int64) 8 * GpuQuantiser.words() + (int64) 1;
+        int64[] w = heap int64[nw];
+        words.upload(w);
+        log.upSmalls((int64) 1);
+        int64 per = GpuQuantiser.blocksPerSlot(n) * (int64) 256;
+        uint32 blocks = (uint32) ((int64) 40 * GpuQuantiser.blocksPerSlot(n));
+        clipWords.launch(s, grid: [blocks], block: [256])
+            (words, g, h, (uint32) n, (uint32) stride, (uint32) offset, (uint32) per);
+        log.sync(s);
+        words.download(w);
+        log.downSmalls((int64) 1);
+
+        GradientQuantiser gq = null;
+        if (w[(int64) 4 * GpuQuantiser.words()] == (int64) 0) {
+            float64 margin = (float64) (n + (int64) 16) * GpuQuantiser.pow2((int64) -51);
+            float64[] lo = heap float64[4];
+            float64[] hi = heap float64[4];
+            int64 k = (int64) 0;
+            while (k < (int64) 4) {
+                float64 v = GpuQuantiser.sumOf(w, k);
+                lo[k] = v;
+                hi[k] = v;
+                if (!GpuQuantiser.exactSum(w, k)) {
+                    lo[k] = v * ((float64) 1.0 - margin);
+                    hi[k] = v * ((float64) 1.0 + margin);
+                }
+                k = k + (int64) 1;
+            }
+            GradientQuantiser a #= GradientQuantiser.fromSums(lo[0], lo[1], lo[2], lo[3], n);
+            GradientQuantiser b #= GradientQuantiser.fromSums(hi[0], hi[1], hi[2], hi[3], n);
+            if (Cajeta.f64ToBits(a.toFixedGrad) == Cajeta.f64ToBits(b.toFixedGrad)
+                && Cajeta.f64ToBits(a.toFixedHess) == Cajeta.f64ToBits(b.toFixedHess)) {
+                gq #= a;
+            }
+        }
+        if (gq == null) {
+            log.fallbacks = log.fallbacks + (int64) 1;
+            serialSums.launch(s, grid: [1], block: [1])
+                (sums, g, h, (uint32) n, (uint32) stride, (uint32) offset);
+            log.sync(s);
+            float64[] hs = heap float64[4];
+            sums.download(hs);
+            log.downSmalls((int64) 1);
+            gq #= GradientQuantiser.fromSums(hs[0], hs[1], hs[2], hs[3], n);
+        }
+        uint32 un = (uint32) n;
+        quantize.launch(s, grid: [(un + 255) / 256], block: [256])
+            (q, g, h, un, (uint32) stride, (uint32) offset, gq.toFixedGrad, gq.toFixedHess);
+        log.sync(s);
+        return #gq;
+    }
+}
