@@ -1,0 +1,112 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.objective.Objective;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Histogram;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
+
+/** xgboost-device-training Unit 4: the device histogram store and sibling subtraction. */
+public class GpuStoreTest {
+
+    public GpuStoreTest() { return; }
+
+    /** The root's larger child derived on the device equals parent - built and its own CPU histogram. */
+    static void assertDerived(String fixture) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginTree(q, g, h, (int64) 8);
+        Histogram root #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        int64 nbins = root.nbins;
+        int64[] hg = heap int64[(int64) 3 * nbins];
+        int64[] hh = heap int64[(int64) 3 * nbins];
+        int64[] tg = heap int64[3];
+        int64[] th = heap int64[3];
+        st.buildNode((int64) 0, hg, hh, tg, th, (int64) 0);
+        Split s #= SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
+                                       (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        int64[] cnts #= st.split(s, f.cutPtrs(), (int64) 0, (int64) 1, (int64) 2);
+        int64 small = (int64) 1;
+        int64 large = (int64) 2;
+        if (cnts[0] > cnts[1]) { small = (int64) 2; large = (int64) 1; }
+        st.buildNode(small, hg, hh, tg, th, small * nbins);
+        st.deriveNode((int64) 0, small, large, hg, hh, tg, th, large * nbins);
+
+        int64[] position = heap int64[n];
+        int64[] cpuCnts #= GpuPartitionTest.cpuPartition(f.bins(), f.cutPtrs(), s, position,
+                                                        (int64) 0, (int64) 1, (int64) 2, nf, n);
+        Histogram cpu #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, large, n);
+        int64 b = (int64) 0;
+        while (b < nbins) {
+            Assert.equals(hg[b] - hg[small * nbins + b], hg[large * nbins + b]);
+            Assert.equals(hh[b] - hh[small * nbins + b], hh[large * nbins + b]);
+            Assert.equals(cpu.g[b], hg[large * nbins + b]);
+            Assert.equals(cpu.h[b], hh[large * nbins + b]);
+            b = b + (int64) 1;
+        }
+        Assert.equals(tg[0] - tg[small], tg[large]);
+        Assert.equals(th[0] - th[small], th[large]);
+        Assert.equals(cpu.totalG, tg[large]);
+        Assert.equals(cpu.totalH, th[large]);
+        return;
+    }
+
+    @Test
+    public void aDerivedChildIsParentMinusBuiltBitForBit() {
+        GpuStoreTest.assertDerived("tiny_reg_missing");
+        GpuStoreTest.assertDerived("large_reg");
+        return;
+    }
+
+    /** The most nodes at any one depth of tree 0 of `m`. */
+    static int64 widestLevel(Model m) {
+        int64 cap = m.cap;
+        int64[] depth = heap int64[cap];
+        int64[] perDepth = heap int64[cap];
+        int64 widest = (int64) 1;
+        perDepth[0] = (int64) 1;
+        int64 nid = (int64) 0;
+        while (nid < m.nodeCount[0]) {
+            if (!m.isLeaf[nid]) {
+                int64 l = m.leftChildren[nid];
+                int64 r = m.rightChildren[nid];
+                depth[l] = depth[nid] + (int64) 1;
+                depth[r] = depth[nid] + (int64) 1;
+                perDepth[depth[l]] = perDepth[depth[l]] + (int64) 2;
+                if (perDepth[depth[l]] > widest) { widest = perDepth[depth[l]]; }
+            }
+            nid = nid + (int64) 1;
+        }
+        return widest;
+    }
+
+    @Test
+    public void aDepthEightTreePeaksAtItsWidestLevel() {
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        float32[] mh = heap float32[n];
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model m #= Booster.train(null, f.cutPtrs(), f.cutValues(), label,
+                                n, (int64) 1, (int64) 8, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                Objective.SQUARED_ERROR, (int64) 1, mh, true, st);
+        int64 widest = GpuStoreTest.widestLevel(m);
+        Assert.isTrue(widest > (int64) 64);
+        Assert.isTrue(st.slotPeak() >= widest);
+        Assert.isTrue(st.slotPeak() <= widest + (int64) 1);
+        return;
+    }
+}

@@ -290,13 +290,21 @@ public final class TreeBuilder {
                 if (cntL <= cntR) {
                     TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, li * nbins, li,
                                               bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
-                    TreeBuilder.subtractInto(histG, histH, totGof, totHof,
-                                             base, li * nbins, ri * nbins, nid, li, ri, nbins);
+                    if (st != null) {
+                        st.deriveNode(nid, li, ri, histG, histH, totGof, totHof, ri * nbins);
+                    } else {
+                        TreeBuilder.subtractInto(histG, histH, totGof, totHof,
+                                                 base, li * nbins, ri * nbins, nid, li, ri, nbins);
+                    }
                 } else {
                     TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, ri * nbins, ri,
                                               bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
-                    TreeBuilder.subtractInto(histG, histH, totGof, totHof,
-                                             base, ri * nbins, li * nbins, nid, ri, li, nbins);
+                    if (st != null) {
+                        st.deriveNode(nid, ri, li, histG, histH, totGof, totHof, li * nbins);
+                    } else {
+                        TreeBuilder.subtractInto(histG, histH, totGof, totHof,
+                                                 base, ri * nbins, li * nbins, nid, ri, li, nbins);
+                    }
                 }
 
                 queue[tail] = li; tail = tail + (int64) 1;
@@ -307,6 +315,7 @@ public final class TreeBuilder {
                 // (updater_gpu_hist.cu:690 `left_weight * param.learning_rate`).
                 bw[nid] = (float32) (rawW * (float32) eta);
                 sc[nid] = bw[nid];
+                if (st != null) { st.release(nid); }
             }
         }
 

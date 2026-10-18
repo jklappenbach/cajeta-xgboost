@@ -25,7 +25,7 @@ public final class GpuTrainState {
     KernelBuffer<int32> ridx;
     KernelBuffer<int32> scratch;
     KernelBuffer<int32> blockCounts;
-    KernelBuffer<int64> hist;
+    KernelBuffer<int64> store;
     KernelBuffer<float64> labels;
     KernelBuffer<float32> margins;
     KernelBuffer<float32> gradG;
@@ -35,6 +35,13 @@ public final class GpuTrainState {
     TransferLog log;
     int32[] blockH;
     int64[] histWords;
+    int64 slotWords;
+    int64 slotCap;
+    int64[] slotOf;
+    int64[] freeSlots;
+    int64 freeTop;
+    int64 slotsLive;
+    int64 slotsPeak;
     int64[] qFixed;
     int64[] segBegin;
     int64[] segCount;
@@ -62,7 +69,11 @@ public final class GpuTrainState {
         this.ridx = heap KernelBuffer<int32>(n);
         this.scratch = heap KernelBuffer<int32>(n);
         this.blockCounts = heap KernelBuffer<int32>(blocks);
-        this.hist = heap KernelBuffer<int64>((int64) 2 * this.nbins + (int64) 2);
+        this.slotWords = (int64) 2 * this.nbins + (int64) 2;
+        this.slotCap = (int64) 4;
+        this.store = heap KernelBuffer<int64>(this.slotCap * this.slotWords);
+        this.freeSlots = heap int64[this.slotCap];
+        this.slotOf = heap int64[1];
         this.blockH = heap int32[blocks];
         this.histWords = heap int64[(int64) 2 * this.nbins + (int64) 2];
         this.qFixed = heap int64[n * (int64) 2];
@@ -169,22 +180,68 @@ public final class GpuTrainState {
         this.log.beginTree();
         this.q.upload(this.qFixed);
         this.log.upRow();
+        this.startTree(cap);
+    }
+
+    /** The root's segment is every row, and every histogram slot is free. */
+    void startTree(int64 cap) {
         GpuPartition.resetSegments(this.ridx, this.n, this.log);
         if ((int64) this.segBegin.count() < cap) {
             this.segBegin = heap int64[cap];
             this.segCount = heap int64[cap];
         }
+        if ((int64) this.slotOf.count() < cap) { this.slotOf = heap int64[cap]; }
+        int64 i = (int64) 0;
+        while (i < (int64) this.slotOf.count()) { this.slotOf[i] = (int64) -1; i = i + (int64) 1; }
+        i = (int64) 0;
+        while (i < this.slotCap) { this.freeSlots[i] = this.slotCap - (int64) 1 - i; i = i + (int64) 1; }
+        this.freeTop = this.slotCap;
+        this.slotsLive = (int64) 0;
         this.segBegin[0] = (int64) 0;
         this.segCount[0] = this.n;
     }
 
-    /** Node `nid`'s histogram into the store slice at `base`, and its totals. */
-    public void buildNode(int64 nid, int64[] histG, int64[] histH,
-                          int64[] totGof, int64[] totHof, int64 base) {
-        GpuHistogram.buildSegment(this.hist, this.bins, this.cutOff, this.q, this.ridx,
-                                  this.segBegin[nid], this.segCount[nid], this.nf, this.nbins,
-                                  this.log);
-        this.hist.download(this.histWords);
+    /** Node `nid`'s slot, taking a free one (and doubling the store when none is) if it has none. */
+    int64 slotFor(int64 nid) {
+        if (this.slotOf[nid] >= (int64) 0) { return this.slotOf[nid]; }
+        if (this.freeTop == (int64) 0) {
+            int64 cap2 = this.slotCap * (int64) 2;
+            KernelBuffer<int64> grown = heap KernelBuffer<int64>(cap2 * this.slotWords);
+            GpuHistogram.copyInto(grown, this.store, this.slotCap * this.slotWords, this.log);
+            this.store #= grown;
+            int64[] free2 = heap int64[cap2];
+            int64 i = (int64) 0;
+            while (i < this.slotCap) { free2[i] = cap2 - (int64) 1 - i; i = i + (int64) 1; }
+            this.freeSlots #= free2;
+            this.freeTop = this.slotCap;
+            this.slotCap = cap2;
+        }
+        this.freeTop = this.freeTop - (int64) 1;
+        int64 slot = this.freeSlots[this.freeTop];
+        this.slotOf[nid] = slot;
+        this.slotsLive = this.slotsLive + (int64) 1;
+        if (this.slotsLive > this.slotsPeak) { this.slotsPeak = this.slotsLive; }
+        return slot;
+    }
+
+    /** Returns node `nid`'s slot to the pool. */
+    public void release(int64 nid) {
+        int64 slot = this.slotOf[nid];
+        if (slot < (int64) 0) { return; }
+        this.freeSlots[this.freeTop] = slot;
+        this.freeTop = this.freeTop + (int64) 1;
+        this.slotOf[nid] = (int64) -1;
+        this.slotsLive = this.slotsLive - (int64) 1;
+    }
+
+    /** The most histogram slots held at once in this fit. */
+    public int64 slotPeak() { return this.slotsPeak; }
+
+    /** Downloads node `nid`'s slot into the host store slice at `base` and its totals. */
+    void readSlot(int64 nid, int64[] histG, int64[] histH, int64[] totGof, int64[] totHof, int64 base) {
+        KernelBuffer<int64> v #= this.store.slice((uint64) (this.slotOf[nid] * this.slotWords),
+                                                  (uint64) this.slotWords);
+        v.download(this.histWords);
         this.log.downSmalls((int64) 1);
         int64 b = (int64) 0;
         while (b < this.nbins) {
@@ -194,6 +251,30 @@ public final class GpuTrainState {
         }
         totGof[nid] = this.histWords[this.nbins * (int64) 2];
         totHof[nid] = this.histWords[this.nbins * (int64) 2 + (int64) 1];
+    }
+
+    /** Node `nid`'s histogram, built into its slot from its segment, then into the host store slice at `base`. */
+    public void buildNode(int64 nid, int64[] histG, int64[] histH,
+                          int64[] totGof, int64[] totHof, int64 base) {
+        int64 slot = this.slotFor(nid);
+        GpuHistogram.buildSegment(this.store, slot * this.slotWords, this.bins, this.cutOff, this.q,
+                                  this.ridx, this.segBegin[nid], this.segCount[nid], this.nf,
+                                  this.nbins, this.log);
+        this.readSlot(nid, histG, histH, totGof, totHof, base);
+    }
+
+    /**
+     * Node `derived`'s histogram as `parent` minus `built` on the device, then into
+     * the host store slice at `base`; `parent`'s slot returns to the pool.
+     */
+    public void deriveNode(int64 parent, int64 built, int64 derived, int64[] histG, int64[] histH,
+                           int64[] totGof, int64[] totHof, int64 base) {
+        int64 out = this.slotFor(derived);
+        GpuHistogram.subtract(this.store, this.slotOf[parent] * this.slotWords,
+                              this.slotOf[built] * this.slotWords, out * this.slotWords,
+                              this.slotWords, this.log);
+        this.readSlot(derived, histG, histH, totGof, totHof, base);
+        this.release(parent);
     }
 
     /** Splits node `nid` into `li` and `ri` by `s` and answers `[cntL, cntR]`. */
@@ -304,13 +385,7 @@ public final class GpuTrainState {
     /** Starts a tree of up to `cap` nodes over pairs already quantized on the device. */
     public void beginTree(int64 cap) {
         this.log.beginTree();
-        GpuPartition.resetSegments(this.ridx, this.n, this.log);
-        if ((int64) this.segBegin.count() < cap) {
-            this.segBegin = heap int64[cap];
-            this.segCount = heap int64[cap];
-        }
-        this.segBegin[0] = (int64) 0;
-        this.segCount[0] = this.n;
+        this.startTree(cap);
     }
 
     /** Downloads the device G and H into `grad` and `hess`, `n * groups` row-major. */

@@ -56,8 +56,8 @@ public final class GpuHistogram {
 
     /**
      * Node histogram over a row segment: one thread per (segment row, feature)
-     * cell, the same integer atomics as histScatter. The node's totals land in
-     * the two words after the bins.
+     * cell, the same integer atomics as histScatter, into the slot at word
+     * `base`. The node's totals land in the two words after the bins.
      */
     @Kernel
     public static void histSegment(KernelBuffer<int64> hist,
@@ -65,23 +65,45 @@ public final class GpuHistogram {
                                    KernelBuffer<int32> cutOff,
                                    KernelBuffer<int64> q,
                                    KernelBuffer<int32> ridx,
-                                   uint32 begin, uint32 count, uint32 nf, uint32 nbins) {
+                                   uint32 base, uint32 begin, uint32 count, uint32 nf, uint32 nbins) {
         uint32 i = KernelThread.globalIdX();
         if (i < count * nf) {
             uint32 slot = i / nf;
             uint32 f = i - slot * nf;
             uint32 r = (uint32) ridx[begin + slot];
             if (f == 0) {
-                hist.atomicAdd(nbins * 2, q[r * 2]);
-                hist.atomicAdd(nbins * 2 + 1, q[r * 2 + 1]);
+                hist.atomicAdd(base + nbins * 2, q[r * 2]);
+                hist.atomicAdd(base + nbins * 2 + 1, q[r * 2 + 1]);
             }
             int32 b = bins[r * nf + f];
             if (b >= 0) {
-                uint32 gb = ((uint32) cutOff[f] + (uint32) b) * 2;
+                uint32 gb = base + ((uint32) cutOff[f] + (uint32) b) * 2;
                 hist.atomicAdd(gb, q[r * 2]);
                 hist.atomicAdd(gb + 1, q[r * 2 + 1]);
             }
         }
+    }
+
+    /** Zeroes words `[base, base + n)` of `buf`. */
+    @Kernel
+    public static void zeroRange(KernelBuffer<int64> buf, uint32 base, uint32 n) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < n) { buf[base + i] = (int64) 0; }
+    }
+
+    /** Sibling subtraction over one slot: `store[out + i] = store[parent + i] - store[built + i]`. */
+    @Kernel
+    public static void subtractSlot(KernelBuffer<int64> store, uint32 parent, uint32 built,
+                                    uint32 out, uint32 words) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < words) { store[out + i] = store[parent + i] - store[built + i]; }
+    }
+
+    /** Copies the first `n` words of `src` into `dst`. */
+    @Kernel
+    public static void copyWords(KernelBuffer<int64> dst, KernelBuffer<int64> src, uint32 n) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < n) { dst[i] = src[i]; }
     }
 
     /** Zeroes the first `n` words of `buf`. */
@@ -93,19 +115,40 @@ public final class GpuHistogram {
 
     /**
      * Builds the histogram of the segment `[begin, begin + count)` of `ridx` into
-     * `hist` (`2 * nbins + 2` words: G and H per bin, then the totals) and waits.
+     * the slot of `hist` at word `base` (`2 * nbins + 2` words: G and H per bin,
+     * then the totals) and waits.
      */
-    static void buildSegment(KernelBuffer<int64> hist, KernelBuffer<int32> bins,
+    /** Derives the slot at `out` as the slot at `parent` minus the slot at `built`, and waits. */
+    static void subtract(KernelBuffer<int64> store, int64 parent, int64 built, int64 out,
+                         int64 words, TransferLog log) {
+        KernelStream s #= KernelStream.current();
+        uint32 w = (uint32) words;
+        subtractSlot.launch(s, grid: [(w + 255) / 256], block: [256])
+            (store, (uint32) parent, (uint32) built, (uint32) out, w);
+        log.sync(s);
+        return;
+    }
+
+    /** Copies the first `n` words of `src` into `dst`, and waits. */
+    static void copyInto(KernelBuffer<int64> dst, KernelBuffer<int64> src, int64 n, TransferLog log) {
+        KernelStream s #= KernelStream.current();
+        uint32 un = (uint32) n;
+        copyWords.launch(s, grid: [(un + 255) / 256], block: [256])(dst, src, un);
+        log.sync(s);
+        return;
+    }
+
+    static void buildSegment(KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
                              KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
                              KernelBuffer<int32> ridx, int64 begin, int64 count,
                              int64 nf, int64 nbins, TransferLog log) {
         KernelStream s #= KernelStream.current();
         uint32 words = (uint32) ((int64) 2 * nbins + (int64) 2);
-        zeroWords.launch(s, grid: [(words + 255) / 256], block: [256])(hist, words);
+        zeroRange.launch(s, grid: [(words + 255) / 256], block: [256])(hist, (uint32) base, words);
         uint32 cells = (uint32) (count * nf);
         if (cells > 0) {
             histSegment.launch(s, grid: [(cells + 63) / 64], block: [64])
-                (hist, bins, cutOff, q, ridx, (uint32) begin, (uint32) count,
+                (hist, bins, cutOff, q, ridx, (uint32) base, (uint32) begin, (uint32) count,
                  (uint32) nf, (uint32) nbins);
         }
         log.sync(s);
