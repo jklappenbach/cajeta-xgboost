@@ -1,5 +1,6 @@
 package dev.cajeta.xgboost.sketch;
 
+import cajeta.concurrent.Carriers;
 import cajeta.math.Tensor;
 
 /**
@@ -39,29 +40,72 @@ public final class Binner {
         return (int32) idx;
     }
 
-    /**
-     * Bin every (row, feature): `out[r*nf + f]` = local bin index, `−1` for missing.
-     * `x` is `[n, nf]` row-major float64; `cutPtrs` is `[nf+1]`; `cutValues` is the
-     * concatenated per-feature cuts.
-     */
-    public static #int32[] bin(Tensor<float64> x, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
-                               int64 n, int64 nf) {
-        int32[] out = heap int32[n * nf];
-        int64 r = (int64) 0;
-        while (r < n) {
+    /** `searchBin` over a float32 copy of the cuts, the same search and clamp. */
+    static int32 searchBinF32(float32[] cuts, int64 b0, int64 b1, float32 v) {
+        int64 lo = b0;
+        int64 hi = b1;
+        while (lo < hi) {
+            int64 mid = lo + (hi - lo) / (int64) 2;
+            if (cuts[mid] > v) { hi = mid; }
+            else { lo = mid + (int64) 1; }
+        }
+        int64 idx = lo - b0;
+        if (idx > b1 - b0 - (int64) 1) { idx = b1 - b0 - (int64) 1; }
+        return (int32) idx;
+    }
+
+    /** Bins rows `[r0, r1)` into their slice of `out`. */
+    static async int32 binRows(Tensor<float64> x, float32[] cuts, int64[] ptr, int32[] out,
+                               int64 r0, int64 r1, int64 nf) {
+        int64 r = r0;
+        while (r < r1) {
             int64 f = (int64) 0;
             while (f < nf) {
                 float32 v = (float32) x.flatGet(r * nf + f);
                 if (Binner.isNaN(v)) {
                     out[r * nf + f] = (int32) -1;
                 } else {
-                    int64 b0 = cutPtrs.flatGet(f);
-                    int64 b1 = cutPtrs.flatGet(f + (int64) 1);
-                    out[r * nf + f] = Binner.searchBin(cutValues, b0, b1, v);
+                    out[r * nf + f] = Binner.searchBinF32(cuts, ptr[f], ptr[f + (int64) 1], v);
                 }
                 f = f + (int64) 1;
             }
             r = r + (int64) 1;
+        }
+        return (int32) 0;
+    }
+
+    /**
+     * Bin every (row, feature): `out[r*nf + f]` = local bin index, `−1` for missing.
+     * `x` is `[n, nf]` row-major float64; `cutPtrs` is `[nf+1]`; `cutValues` is the
+     * concatenated per-feature cuts. The cuts are read from a float32 copy and the
+     * rows are split across the carriers; each cell's result is `searchBin`'s.
+     */
+    public static #int32[] bin(Tensor<float64> x, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                               int64 n, int64 nf) {
+        int64 total = cutPtrs.flatGet(nf);
+        float32[] cuts = heap float32[total];
+        int64 c = (int64) 0;
+        while (c < total) {
+            cuts[c] = (float32) cutValues.flatGet(c);
+            c = c + (int64) 1;
+        }
+        int64[] ptr = heap int64[nf + (int64) 1];
+        int64 f = (int64) 0;
+        while (f <= nf) {
+            ptr[f] = cutPtrs.flatGet(f);
+            f = f + (int64) 1;
+        }
+        int32[] out = heap int32[n * nf];
+        int64 parts = (int64) Carriers.count() * (int64) 2;
+        int64 step = (n + parts - (int64) 1) / parts;
+        scope {
+            int64 r0 = (int64) 0;
+            while (r0 < n) {
+                int64 r1 = r0 + step;
+                if (r1 > n) { r1 = n; }
+                spawn binRows(x, cuts, ptr, out, r0, r1, nf);
+                r0 = r1;
+            }
         }
         return #out;
     }

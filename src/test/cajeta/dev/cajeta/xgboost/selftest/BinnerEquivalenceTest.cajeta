@@ -1,0 +1,88 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.sketch.Binner;
+
+/**
+ * xgboost-data-prep 1.1.2: the fast binner's matrix equals the 0.5.0 binner's
+ * (`BinnerOracle`) cell for cell, on the fixtures and on a generated set that
+ * holds NaN, values equal to a cut, values past either end, and a feature
+ * with a single cut.
+ */
+public class BinnerEquivalenceTest {
+
+    public BinnerEquivalenceTest() { return; }
+
+    static void assertSameBins(String label, Tensor<float64> x, Tensor<int64> cp,
+                               Tensor<float64> cv, int64 n, int64 nf) {
+        int32[] want #= BinnerOracle.bin(x, cp, cv, n, nf);
+        int32[] got #= Binner.bin(x, cp, cv, n, nf);
+        int64 i = (int64) 0;
+        while (i < n * nf) {
+            if (got[i] != want[i]) {
+                Assert.fail(label + ": cell " + i + " bins to " + got[i] + ", expected " + want[i]);
+            }
+            i = i + (int64) 1;
+        }
+        return;
+    }
+
+    static void checkFixture(String fixture) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> x #= f.x();
+        Tensor<int64> cp #= f.cutPtrs();
+        Tensor<float64> cv #= f.cutValues();
+        BinnerEquivalenceTest.assertSameBins(fixture, x, cp, cv, x.shapeAt(0), x.shapeAt(1));
+        return;
+    }
+
+    @Test
+    public void fastBinsEqualTheOracleOnTheFixtures() {
+        BinnerEquivalenceTest.checkFixture("tiny_reg");
+        BinnerEquivalenceTest.checkFixture("tiny_reg_missing");
+        BinnerEquivalenceTest.checkFixture("large_reg");
+        BinnerEquivalenceTest.checkFixture("covertype");
+        return;
+    }
+
+    @Test
+    public void fastBinsEqualTheOracleOnTheEdges() {
+        // Feature 0 has one cut, feature 1 three, feature 2 five.
+        int64 nf = (int64) 3;
+        float64[] cutsA = heap float64[9];
+        cutsA[0] = (float64) 0.5;
+        cutsA[1] = (float64) -1.0; cutsA[2] = (float64) 0.0; cutsA[3] = (float64) 1.0;
+        cutsA[4] = (float64) 0.1; cutsA[5] = (float64) 0.2; cutsA[6] = (float64) 0.3;
+        cutsA[7] = (float64) 0.4; cutsA[8] = (float64) 0.5;
+        int64[] ptrA = heap int64[4];
+        ptrA[0] = (int64) 0; ptrA[1] = (int64) 1; ptrA[2] = (int64) 4; ptrA[3] = (int64) 9;
+        int64[] cvShape = heap int64[1]; cvShape[0] = (int64) 9;
+        int64[] cpShape = heap int64[1]; cpShape[0] = (int64) 4;
+        Tensor<float64> cv #= Tensor.of<float64>(cutsA, cvShape);
+        Tensor<int64> cp #= Tensor.of<int64>(ptrA, cpShape);
+
+        float64[] probes = heap float64[12];
+        probes[0] = (float64) -5.0;   probes[1] = (float64) -1.0;  probes[2] = (float64) -0.5;
+        probes[3] = (float64) 0.0;    probes[4] = (float64) 0.1;   probes[5] = (float64) 0.25;
+        probes[6] = (float64) 0.5;    probes[7] = (float64) 0.5000001;
+        probes[8] = (float64) 1.0;    probes[9] = (float64) 9.0;
+        probes[10] = Cajeta.bitsToF64((int64) 9221120237041090560);
+        probes[11] = (float64) 0.30000001;
+        int64 n = (int64) 12;
+        float64[] xs = heap float64[n * nf];
+        int64 r = (int64) 0;
+        while (r < n) {
+            int64 f = (int64) 0;
+            while (f < nf) {
+                xs[r * nf + f] = probes[(r + f) % n];
+                f = f + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        int64[] xShape = heap int64[2]; xShape[0] = n; xShape[1] = nf;
+        Tensor<float64> x #= Tensor.of<float64>(xs, xShape);
+        BinnerEquivalenceTest.assertSameBins("edges", x, cp, cv, n, nf);
+        return;
+    }
+}
