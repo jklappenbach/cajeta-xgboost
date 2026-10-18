@@ -143,10 +143,22 @@ fi
 [[ -f "$ml_cja" ]] || { echo "could not resolve a dev.cajeta.ml archive" >&2; exit 1; }
 echo ">> cajeta-ml: $ml_cja"
 
+# A comma-separated --classpath for the compiler. Git Bash converts a lone
+# POSIX path argument for a native Windows exe but not a comma list, so on
+# MSYS each entry is converted with cygpath; elsewhere they pass unchanged.
+classpath() {
+    local out="" p
+    for p in "$@"; do
+        if command -v cygpath >/dev/null 2>&1; then p="$(cygpath -m "$p")"; fi
+        out="${out:+$out,}$p"
+    done
+    printf '%s' "$out"
+}
+
 echo ">> building xgboost library .cja"
 XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
 "$CAJETA" --emit=cja --xpu-backend="$XPU_BACKENDS" -o "$out/xgboost.cja" \
-    --classpath="$ml_cja" \
+    --classpath="$(classpath "$ml_cja")" \
     dev.cajeta.xgboost.XGBoost.run "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the test binary"
@@ -156,7 +168,7 @@ echo ">> building + running the test binary"
 # phoenix-wsl (nvptx), the Strix Halo dev box (amdgpu/vulkan), and hosted
 # CI (cpu emulation) alike.
 "$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKENDS" \
-    --classpath="$out/xgboost.cja,$unit_cja,$ml_cja" \
+    --classpath="$(classpath "$out/xgboost.cja" "$unit_cja" "$ml_cja")" \
     -o "$out/xgboosttests" \
     dev.cajeta.xgboost.selftest.TestMain.run "$here/src/test/cajeta" "$out" >/dev/null
 

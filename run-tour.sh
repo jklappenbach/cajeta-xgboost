@@ -91,12 +91,24 @@ if [[ -z "$ml_cja" ]]; then
 fi
 [[ -f "$ml_cja" ]] || { echo "could not resolve a dev.cajeta.ml archive" >&2; exit 1; }
 
+# A comma-separated --classpath for the compiler. Git Bash converts a lone
+# POSIX path argument for a native Windows exe but not a comma list, so on
+# MSYS each entry is converted with cygpath; elsewhere they pass unchanged.
+classpath() {
+    local out="" p
+    for p in "$@"; do
+        if command -v cygpath >/dev/null 2>&1; then p="$(cygpath -m "$p")"; fi
+        out="${out:+$out,}$p"
+    done
+    printf '%s' "$out"
+}
+
 echo ">> compiling the tour"
 mkdir -p build/tour
 # Device codegen happens at EXE emission (the library's @Kernels lower here),
 # so the tour binary bundles the same backends as the test suite.
 XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
-"$CAJETA" --emit=exe --xpu-backend="$XPU_BACKENDS" --classpath="$art,$ml_cja" \
+"$CAJETA" --emit=exe --xpu-backend="$XPU_BACKENDS" --classpath="$(classpath "$art" "$ml_cja")" \
     -o build/tour/xgboost-tour \
     dev.cajeta.xgboost.tour.Tour.main "$here/tour/src" build/tour >/dev/null
 
