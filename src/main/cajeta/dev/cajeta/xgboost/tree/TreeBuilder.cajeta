@@ -6,6 +6,7 @@ import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.gpu.GpuHistogram;
 import dev.cajeta.xgboost.gpu.GpuPartition;
 import dev.cajeta.xgboost.gpu.GpuSplitFinder;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
 
 /**
  * Grows one regression tree over binned data, reproducing XGBoost's GPU `hist`
@@ -99,7 +100,8 @@ public final class TreeBuilder {
      * The device-dispatch form: with `device` true the three per-node data
      * passes — histogram build, split evaluation, row partition — run as
      * `cajeta.xpu` kernels ({@link GpuHistogram}, {@link GpuSplitFinder},
-     * {@link GpuPartition}); everything else (node bookkeeping, sibling
+     * {@link GpuPartition}) over a {@link GpuTrainState} made for this tree;
+     * everything else (node bookkeeping, sibling
      * subtraction, gating) stays on the host. Every device component is
      * bit-identical to its CPU twin by construction, so the grown tree is the
      * SAME tree, bit for bit, either way. Split evaluation additionally
@@ -115,6 +117,34 @@ public final class TreeBuilder {
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
                              float32[] lossChg, float64[] sumHess,
                              int64[] leafOf, boolean device) {
+        if (!device) {
+            return TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n, maxDepth, maxLeaves,
+                                    lambda, alpha, gamma, minChildWeight, eta, si, sc, dl, lc, rc,
+                                    bw, leaf, lossChg, sumHess, leafOf, false, null);
+        }
+        GpuTrainState st #= GpuTrainState.create(bins, cutPtrs, n);
+        return TreeBuilder.grow(bins, cutPtrs, cutValues, grad, hess, n, maxDepth, maxLeaves,
+                                lambda, alpha, gamma, minChildWeight, eta, si, sc, dl, lc, rc,
+                                bw, leaf, lossChg, sumHess, leafOf, true, st);
+    }
+
+    /**
+     * The device form over a run's {@link GpuTrainState}: each node's rows are
+     * a segment of the state's row index, so a split moves only that node's
+     * rows and a histogram reads only them, and nothing is uploaded per node.
+     * With `device` true and `st` null the per-node kernels serve instead,
+     * which upload the rows and scan all of them for every node; that form is
+     * kept to time the segment path against.
+     */
+    public static int64 grow(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                             float64[] grad, float64[] hess, int64 n,
+                             int64 maxDepth, int64 maxLeaves,
+                             float64 lambda, float64 alpha, float64 gamma, float64 minChildWeight,
+                             float64 eta,
+                             int64[] si, float32[] sc, boolean[] dl,
+                             int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
+                             float32[] lossChg, float64[] sumHess,
+                             int64[] leafOf, boolean device, GpuTrainState st) {
         GradientQuantiser q #= GradientQuantiser.build(grad, hess, n);
         int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
         int64 nbins = cutPtrs.flatGet(nf);
@@ -138,7 +168,8 @@ public final class TreeBuilder {
         while (i < n) { position[i] = (int64) 0; i = i + (int64) 1; }
 
         // Root histogram (built directly over all rows).
-        TreeBuilder.buildNodeInto(device, histG, histH, totGof, totHof, (int64) 0, (int64) 0,
+        if (st != null) { st.beginTree(q, grad, hess, cap); }
+        TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, (int64) 0, (int64) 0,
                                   bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
 
         int64 nodeCount = (int64) 1;
@@ -219,7 +250,11 @@ public final class TreeBuilder {
                 // Repartition this node's rows: present → left iff bin ≤ splitGidx.
                 int64 cntL;
                 int64 cntR;
-                if (device) {
+                if (st != null) {
+                    int64[] cnts #= st.split(s, cutPtrs, nid, li, ri);
+                    cntL = cnts[0];
+                    cntR = cnts[1];
+                } else if (device) {
                     int64[] cnts #= GpuPartition.partition(bins, cutPtrs, s, position,
                                                           nid, li, ri, nf, n);
                     cntL = cnts[0];
@@ -247,12 +282,12 @@ public final class TreeBuilder {
                 // the larger as parent − built (exact int64; §4.2). Both children's
                 // slices persist in the store for when they're dequeued.
                 if (cntL <= cntR) {
-                    TreeBuilder.buildNodeInto(device, histG, histH, totGof, totHof, li * nbins, li,
+                    TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, li * nbins, li,
                                               bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
                     TreeBuilder.subtractInto(histG, histH, totGof, totHof,
                                              base, li * nbins, ri * nbins, nid, li, ri, nbins);
                 } else {
-                    TreeBuilder.buildNodeInto(device, histG, histH, totGof, totHof, ri * nbins, ri,
+                    TreeBuilder.buildNodeInto(device, st, histG, histH, totGof, totHof, ri * nbins, ri,
                                               bins, cutPtrs, q, grad, hess, position, nf, n, nbins);
                     TreeBuilder.subtractInto(histG, histH, totGof, totHof,
                                              base, ri * nbins, li * nbins, nid, ri, li, nbins);
@@ -270,6 +305,10 @@ public final class TreeBuilder {
         }
 
         // Final leaf assignment per row (every row ends at a leaf node).
+        if (st != null) {
+            st.leafOf(leafOf, leaf, nodeCount);
+            return nodeCount;
+        }
         int64 rr = (int64) 0;
         while (rr < n) { leafOf[rr] = position[rr]; rr = rr + (int64) 1; }
         return nodeCount;
@@ -336,12 +375,16 @@ public final class TreeBuilder {
      * store slice — the two are bit-identical (integer atomics commute), so
      * the store's contents do not depend on the path taken.
      */
-    static void buildNodeInto(boolean device,
+    static void buildNodeInto(boolean device, GpuTrainState st,
                               int64[] histG, int64[] histH, int64[] totGof, int64[] totHof,
                               int64 base, int64 nid,
                               Tensor<int32> bins, Tensor<int64> cutPtrs, GradientQuantiser q,
                               float64[] grad, float64[] hess, int64[] position, int64 nf, int64 n,
                               int64 nbins) {
+        if (st != null) {
+            st.buildNode(nid, histG, histH, totGof, totHof, base);
+            return;
+        }
         if (device) {
             Histogram hb #= GpuHistogram.buildPos(bins, cutPtrs, q, grad, hess,
                                                  position, nid, n);

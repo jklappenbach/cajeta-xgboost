@@ -1,0 +1,169 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.math.Tensor;
+import cajeta.xpu.KernelBuffer;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+import dev.cajeta.xgboost.tree.Split;
+
+/**
+ * The device side of a training run (int64-scan-verbs spec 6.3): the bin
+ * matrix, uploaded once per run, the quantized gradient pairs, uploaded once
+ * per tree, and a row-index buffer `ridx` in which each node's rows are one
+ * contiguous segment in ascending row order, the CPU builder's order.
+ * Splitting a node partitions its segment in place; a node's histogram reads
+ * only its segment.
+ *
+ * Bit-identical to the CPU builder: the partition is a stable function of
+ * each row's own bin, and the histograms are integer atomics, which commute.
+ */
+public final class GpuTrainState {
+
+    /** Bin-matrix uploads since the process started; a test-only counter. */
+    public static int64 binUploads;
+    /** Gradient-pair uploads since the process started; a test-only counter. */
+    public static int64 gpairUploads;
+
+    KernelBuffer<int32> bins;
+    KernelBuffer<int32> cutOff;
+    KernelBuffer<int64> q;
+    KernelBuffer<int32> ridx;
+    KernelBuffer<int32> scratch;
+    KernelBuffer<int32> blockCounts;
+    KernelBuffer<int64> hist;
+    int32[] blockH;
+    int64[] histWords;
+    int64[] qFixed;
+    int64[] segBegin;
+    int64[] segCount;
+    int64 n;
+    int64 nf;
+    int64 nbins;
+
+    GpuTrainState(Tensor<int32> binsT, Tensor<int64> cutPtrs, int64 n) {
+        this.n = n;
+        this.nf = cutPtrs.shapeAt(0) - (int64) 1;
+        this.nbins = cutPtrs.flatGet(this.nf);
+        int64 cells = n * this.nf;
+        int32[] binsH = heap int32[cells];
+        int64 c = (int64) 0;
+        while (c < cells) {
+            binsH[c] = binsT.flatGet(c);
+            c = c + (int64) 1;
+        }
+        int32[] cutH = heap int32[this.nf];
+        int64 f = (int64) 0;
+        while (f < this.nf) {
+            cutH[f] = (int32) cutPtrs.flatGet(f);
+            f = f + (int64) 1;
+        }
+        int64 blocks = (n + GpuPartition.segmentBlock() - (int64) 1) / GpuPartition.segmentBlock();
+        this.bins = heap KernelBuffer<int32>(cells);
+        this.cutOff = heap KernelBuffer<int32>(this.nf);
+        this.q = heap KernelBuffer<int64>(n * (int64) 2);
+        this.ridx = heap KernelBuffer<int32>(n);
+        this.scratch = heap KernelBuffer<int32>(n);
+        this.blockCounts = heap KernelBuffer<int32>(blocks);
+        this.hist = heap KernelBuffer<int64>((int64) 2 * this.nbins + (int64) 2);
+        this.blockH = heap int32[blocks];
+        this.histWords = heap int64[(int64) 2 * this.nbins + (int64) 2];
+        this.qFixed = heap int64[n * (int64) 2];
+        this.segBegin = heap int64[1];
+        this.segCount = heap int64[1];
+        this.bins.upload(binsH);
+        GpuTrainState.binUploads = GpuTrainState.binUploads + (int64) 1;
+        this.cutOff.upload(cutH);
+    }
+
+    /** A run's device state over `n` rows of `bins`; the bin matrix is uploaded here, once. */
+    public static #GpuTrainState create(Tensor<int32> bins, Tensor<int64> cutPtrs, int64 n) {
+        GpuTrainState st = heap GpuTrainState(bins, cutPtrs, n);
+        return #st;
+    }
+
+    /**
+     * Starts a tree of up to `cap` nodes: uploads this tree's quantized
+     * gradient pairs and makes the root's segment every row.
+     */
+    public void beginTree(GradientQuantiser quant, float64[] grad, float64[] hess, int64 cap) {
+        int64 r = (int64) 0;
+        while (r < this.n) {
+            this.qFixed[r * (int64) 2] = quant.fixedGrad(grad[r]);
+            this.qFixed[r * (int64) 2 + (int64) 1] = quant.fixedHess(hess[r]);
+            r = r + (int64) 1;
+        }
+        this.q.upload(this.qFixed);
+        GpuTrainState.gpairUploads = GpuTrainState.gpairUploads + (int64) 1;
+        GpuPartition.resetSegments(this.ridx, this.n);
+        if ((int64) this.segBegin.count() < cap) {
+            this.segBegin = heap int64[cap];
+            this.segCount = heap int64[cap];
+        }
+        this.segBegin[0] = (int64) 0;
+        this.segCount[0] = this.n;
+    }
+
+    /** Node `nid`'s histogram into the store slice at `base`, and its totals. */
+    public void buildNode(int64 nid, int64[] histG, int64[] histH,
+                          int64[] totGof, int64[] totHof, int64 base) {
+        GpuHistogram.buildSegment(this.hist, this.bins, this.cutOff, this.q, this.ridx,
+                                  this.segBegin[nid], this.segCount[nid], this.nf, this.nbins);
+        this.hist.download(this.histWords);
+        int64 b = (int64) 0;
+        while (b < this.nbins) {
+            histG[base + b] = this.histWords[b * (int64) 2];
+            histH[base + b] = this.histWords[b * (int64) 2 + (int64) 1];
+            b = b + (int64) 1;
+        }
+        totGof[nid] = this.histWords[this.nbins * (int64) 2];
+        totHof[nid] = this.histWords[this.nbins * (int64) 2 + (int64) 1];
+    }
+
+    /** Splits node `nid` into `li` and `ri` by `s` and answers `[cntL, cntR]`. */
+    public #int64[] split(Split s, Tensor<int64> cutPtrs, int64 nid, int64 li, int64 ri) {
+        int64 begin = this.segBegin[nid];
+        int64 count = this.segCount[nid];
+        int64 left = GpuPartition.splitSegment(this.ridx, this.scratch, this.blockCounts,
+                                               this.blockH, this.bins, cutPtrs, s,
+                                               begin, count, this.nf);
+        this.segBegin[li] = begin;
+        this.segCount[li] = left;
+        this.segBegin[ri] = begin + left;
+        this.segCount[ri] = count - left;
+        int64[] counts = heap int64[2];
+        counts[0] = left;
+        counts[1] = count - left;
+        return #counts;
+    }
+
+    /** Each row's leaf, read once from the leaves' segments. */
+    public void leafOf(int64[] leafOf, boolean[] leaf, int64 nodeCount) {
+        int32[] rows = heap int32[this.n];
+        this.ridx.download(rows);
+        int64 nid = (int64) 0;
+        while (nid < nodeCount) {
+            if (leaf[nid]) {
+                int64 k = this.segBegin[nid];
+                int64 end = k + this.segCount[nid];
+                while (k < end) {
+                    leafOf[(int64) rows[k]] = nid;
+                    k = k + (int64) 1;
+                }
+            }
+            nid = nid + (int64) 1;
+        }
+    }
+
+    /** The rows of node `nid`'s segment, in segment order. */
+    public #int32[] segmentRows(int64 nid) {
+        int32[] all = heap int32[this.n];
+        this.ridx.download(all);
+        int64 count = this.segCount[nid];
+        int32[] rows = heap int32[count];
+        int64 k = (int64) 0;
+        while (k < count) {
+            rows[k] = all[this.segBegin[nid] + k];
+            k = k + (int64) 1;
+        }
+        return #rows;
+    }
+}

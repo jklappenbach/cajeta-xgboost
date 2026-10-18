@@ -4,6 +4,7 @@ import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
 import dev.cajeta.xgboost.objective.Objective;
 
 /**
@@ -101,6 +102,32 @@ public class GrowDeviceTest {
     @Test
     public void logisticTrainingBitIdenticalOnDevice() {
         GrowDeviceTest.compareTraining("tiny_binary", Objective.LOGISTIC, (int64) 5);
+        return;
+    }
+
+    // int64-scan-verbs 7.1.4: a device training run uploads the bin matrix once
+    // and the gradient pairs once per tree, never per node.
+    @Test
+    public void trainingUploadsTheBinsOnceAndTheGradientsOncePerTree() {
+        FixtureLoader f #= FixtureLoader.open("tiny_multi");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label = heap float64[n];
+        int64 li = (int64) 0;
+        while (li < n) { label[li] = yT.flatGet(li); li = li + (int64) 1; }
+        int64 rounds = (int64) 2;
+        int64 K = (int64) 4;
+        float32[] mh = heap float32[rounds * n * K];
+        int64 bins0 = GpuTrainState.binUploads;
+        int64 gpairs0 = GpuTrainState.gpairUploads;
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label,
+                                n, rounds, (int64) 4, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                Objective.SOFTMAX, K, mh, true);
+        Assert.equals(GpuTrainState.binUploads - bins0, (int64) 1);
+        Assert.equals(GpuTrainState.gpairUploads - gpairs0, rounds * K);
+        Assert.equals((int64) m.nodeCount.count(), rounds * K);
         return;
     }
 }

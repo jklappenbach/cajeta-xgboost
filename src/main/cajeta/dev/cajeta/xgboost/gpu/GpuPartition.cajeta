@@ -1,9 +1,11 @@
 package dev.cajeta.xgboost.gpu;
 
 import cajeta.math.Tensor;
+import cajeta.xpu.GroupOp;
 import cajeta.xpu.KernelBuffer;
 import cajeta.xpu.KernelStream;
 import cajeta.xpu.KernelThread;
+import cajeta.xpu.Workgroup;
 import dev.cajeta.xgboost.tree.Split;
 
 /**
@@ -43,6 +45,131 @@ public final class GpuPartition {
                 }
             }
         }
+    }
+
+    /** 1 when the row at `slot` of the segment goes left, 0 when it goes right or `slot` is past it. */
+    @Device
+    static int32 leftFlag(KernelBuffer<int32> bins, KernelBuffer<int32> ridx,
+                          uint32 begin, uint32 slot, uint32 count, uint32 nf,
+                          int32 findex, int32 localSplit, int32 defLeft) {
+        int32 flag = 0;
+        if (slot < count) {
+            uint32 r = (uint32) ridx[begin + slot];
+            int32 b = bins[r * nf + (uint32) findex];
+            if (b < 0) {
+                if (defLeft != 0) { flag = 1; }
+            } else if (b <= localSplit) {
+                flag = 1;
+            }
+        }
+        return flag;
+    }
+
+    /** The partition's first pass: each workgroup stores how many of its rows go left. */
+    @Kernel
+    @Wave(width = 32)
+    public static void segmentCount(KernelBuffer<int32> blockCounts,
+                                    KernelBuffer<int32> bins,
+                                    KernelBuffer<int32> ridx,
+                                    uint32 begin, uint32 count, uint32 nf,
+                                    int32 findex, int32 localSplit, int32 defLeft) {
+        uint32 slot = KernelThread.globalIdX();
+        int32 flag = GpuPartition.leftFlag(bins, ridx, begin, slot, count, nf,
+                                           findex, localSplit, defLeft);
+        int32 total = Workgroup.reduce(GroupOp.Add, flag);
+        if (KernelThread.x() == 0) { blockCounts[Workgroup.x()] = total; }
+    }
+
+    /**
+     * The second pass: a left row goes to its block's base plus the left rows
+     * before it in the block, a right row after every left row in segment
+     * order. Both sides keep the segment's order.
+     */
+    @Kernel
+    @Wave(width = 32)
+    public static void segmentPlace(KernelBuffer<int32> scratch,
+                                    KernelBuffer<int32> blockBase,
+                                    KernelBuffer<int32> bins,
+                                    KernelBuffer<int32> ridx,
+                                    uint32 begin, uint32 count, uint32 leftCount, uint32 nf,
+                                    int32 findex, int32 localSplit, int32 defLeft) {
+        uint32 slot = KernelThread.globalIdX();
+        int32 flag = GpuPartition.leftFlag(bins, ridx, begin, slot, count, nf,
+                                           findex, localSplit, defLeft);
+        int32 before = Workgroup.scan(GroupOp.Add, flag);
+        if (slot < count) {
+            uint32 leftBefore = (uint32) blockBase[Workgroup.x()] + (uint32) before;
+            uint32 dst = leftCount + (slot - leftBefore);
+            if (flag == 1) { dst = leftBefore; }
+            scratch[begin + dst] = ridx[begin + slot];
+        }
+    }
+
+    /** Copies the segment `[begin, begin + count)` of `src` into `dst`. */
+    @Kernel
+    public static void copySegment(KernelBuffer<int32> dst, KernelBuffer<int32> src,
+                                   uint32 begin, uint32 count) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < count) { dst[begin + i] = src[begin + i]; }
+    }
+
+    /** `ridx[r] = r` for every row: the root's segment. */
+    @Kernel
+    public static void identity(KernelBuffer<int32> ridx, uint32 n) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < n) { ridx[i] = (int32) i; }
+    }
+
+    /** The workgroup size of the segment partition. */
+    public static int64 segmentBlock() { return (int64) 256; }
+
+    /** Sets `ridx` to the identity over `n` rows and waits. */
+    public static void resetSegments(KernelBuffer<int32> ridx, int64 n) {
+        KernelStream s #= KernelStream.current();
+        uint32 un = (uint32) n;
+        identity.launch(s, grid: [(un + 255) / 256], block: [256])(ridx, un);
+        s.sync();
+        return;
+    }
+
+    /**
+     * Splits the segment `[begin, begin + count)` of `ridx` stably by `s`: the
+     * left rows first, then the right, each in segment order. Returns the left
+     * count. `blockCounts` holds one int32 per 256 rows of the segment;
+     * `blockH` is its host twin.
+     */
+    public static int64 splitSegment(KernelBuffer<int32> ridx, KernelBuffer<int32> scratch,
+                                     KernelBuffer<int32> blockCounts, int32[] blockH,
+                                     KernelBuffer<int32> bins, Tensor<int64> cutPtrs,
+                                     Split s, int64 begin, int64 count, int64 nf) {
+        int64 b0 = cutPtrs.flatGet(s.findex);
+        int32 localSplit = (int32) (s.splitGidx - b0);
+        int32 defLeft = s.defaultLeft ? (int32) 1 : (int32) 0;
+        int64 blocks = (count + GpuPartition.segmentBlock() - (int64) 1) / GpuPartition.segmentBlock();
+        uint32 ub = (uint32) begin;
+        uint32 uc = (uint32) count;
+        KernelStream st #= KernelStream.current();
+        segmentCount.launch(st, grid: [(uint32) blocks], block: [256])
+            (blockCounts, bins, ridx, ub, uc, (uint32) nf, (int32) s.findex, localSplit, defLeft);
+        st.sync();
+        blockCounts.download(blockH, blocks);
+
+        int64 left = (int64) 0;
+        int64 k = (int64) 0;
+        while (k < blocks) {
+            int32 c = blockH[k];
+            blockH[k] = (int32) left;
+            left = left + (int64) c;
+            k = k + (int64) 1;
+        }
+        blockCounts.upload(blockH, blocks);
+
+        segmentPlace.launch(st, grid: [(uint32) blocks], block: [256])
+            (scratch, blockCounts, bins, ridx, ub, uc, (uint32) left, (uint32) nf,
+             (int32) s.findex, localSplit, defLeft);
+        copySegment.launch(st, grid: [(uc + 255) / 256], block: [256])(ridx, scratch, ub, uc);
+        st.sync();
+        return left;
     }
 
     /**

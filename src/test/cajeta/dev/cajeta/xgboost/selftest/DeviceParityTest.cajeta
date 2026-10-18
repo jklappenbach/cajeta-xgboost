@@ -1,0 +1,83 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * int64-scan-verbs 7.1.5: the device training path, on its row segments,
+ * trains the NVIDIA reference trees and margins at every depth the fixtures
+ * cover. Rounds after the first of a logistic or softmax model need the EX2
+ * capture, so without it those compare round 0 only.
+ */
+public class DeviceParityTest {
+
+    public DeviceParityTest() { return; }
+
+    static void trainAndCompare(String fixture, Objective obj, int64 K, int64 maxDepth,
+                                float64 gamma, float64 mcw, int64 rounds) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.shapeAt(0);
+        float64[] label = heap float64[n];
+        int64 i = (int64) 0;
+        while (i < n) { label[i] = yT.flatGet(i); i = i + (int64) 1; }
+        float32[] marginHistory = heap float32[rounds * n * K];
+        Model m #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                maxDepth, (int64) 0,
+                                (float64) 1.0, (float64) 0.0, gamma, mcw,
+                                (float64) 0.3, (float64) 0.5, obj, K, marginHistory, true);
+        String treeDiff #= ParityRunner.compareTrees(m, f, rounds * K);
+        Assert.that(treeDiff).isEqualTo("");
+        String marginDiff #= ParityRunner.compareMargins(marginHistory, f.margins(),
+                                                        rounds, n * K);
+        Assert.that(marginDiff).isEqualTo("");
+        return;
+    }
+
+    static int64 expRounds(int64 rounds) {
+        if (SfuMath.hasEx2Table()) { return rounds; }
+        return (int64) 1;
+    }
+
+    @Test
+    public void regressionAtDepthsTwoFourAndSix() {
+        DeviceParityTest.trainAndCompare("tiny_reg_d2", Objective.SQUARED_ERROR, (int64) 1,
+                                         (int64) 2, (float64) 0.0, (float64) 1.0, (int64) 3);
+        DeviceParityTest.trainAndCompare("tiny_reg", Objective.SQUARED_ERROR, (int64) 1,
+                                         (int64) 4, (float64) 0.0, (float64) 1.0, (int64) 3);
+        DeviceParityTest.trainAndCompare("tiny_reg_d6", Objective.SQUARED_ERROR, (int64) 1,
+                                         (int64) 6, (float64) 0.0, (float64) 1.0, (int64) 3);
+        DeviceParityTest.trainAndCompare("large_reg", Objective.SQUARED_ERROR, (int64) 1,
+                                         (int64) 6, (float64) 0.0, (float64) 1.0, (int64) 3);
+        return;
+    }
+
+    @Test
+    public void regressionGatesAndMissingValues() {
+        DeviceParityTest.trainAndCompare("tiny_reg_mcw10", Objective.SQUARED_ERROR, (int64) 1,
+                                         (int64) 4, (float64) 0.0, (float64) 10.0, (int64) 3);
+        DeviceParityTest.trainAndCompare("tiny_reg_gamma1", Objective.SQUARED_ERROR, (int64) 1,
+                                         (int64) 4, (float64) 1.0, (float64) 1.0, (int64) 3);
+        DeviceParityTest.trainAndCompare("tiny_reg_missing", Objective.SQUARED_ERROR, (int64) 1,
+                                         (int64) 4, (float64) 0.0, (float64) 1.0, (int64) 3);
+        return;
+    }
+
+    @Test
+    public void logisticAndSoftmax() {
+        DeviceParityTest.trainAndCompare("tiny_binary", Objective.LOGISTIC, (int64) 1,
+                                         (int64) 4, (float64) 0.0, (float64) 1.0,
+                                         DeviceParityTest.expRounds((int64) 3));
+        DeviceParityTest.trainAndCompare("large_binary", Objective.LOGISTIC, (int64) 1,
+                                         (int64) 6, (float64) 0.0, (float64) 1.0,
+                                         DeviceParityTest.expRounds((int64) 3));
+        DeviceParityTest.trainAndCompare("tiny_multi", Objective.SOFTMAX, (int64) 4,
+                                         (int64) 4, (float64) 0.0, (float64) 1.0,
+                                         DeviceParityTest.expRounds((int64) 3));
+        return;
+    }
+}

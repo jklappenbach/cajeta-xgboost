@@ -3,6 +3,7 @@ package dev.cajeta.xgboost.selftest;
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.gpu.GpuPartition;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
 import dev.cajeta.xgboost.tree.Split;
@@ -120,6 +121,86 @@ public class GpuPartitionTest {
     @Test
     public void largeFixturePartitionBitIdentical() {
         GpuPartitionTest.comparePartition("large_reg");
+        return;
+    }
+
+    /** Asserts node `nid`'s segment is exactly the rows `position` gives it, ascending. */
+    static void assertSegment(GpuTrainState st, int64[] position, int64 nid, int64 n) {
+        int32[] rows #= st.segmentRows(nid);
+        int64 k = (int64) 0;
+        int64 r = (int64) 0;
+        while (r < n) {
+            if (position[r] == nid) {
+                Assert.isTrue(k < (int64) rows.count());
+                Assert.equals((int64) rows[k], r);
+                k = k + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        Assert.equals((int64) rows.count(), k);
+        return;
+    }
+
+    /** Splits `nid` on the segments and on the CPU positions and compares both children. */
+    static void compareSegmentSplit(GpuTrainState st, Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                    Split s, int64[] position, int64 nid, int64 li, int64 ri,
+                                    int64 nf, int64 n) {
+        int64[] cCpu #= GpuPartitionTest.cpuPartition(bins, cutPtrs, s, position, nid, li, ri, nf, n);
+        int64[] cGpu #= st.split(s, cutPtrs, nid, li, ri);
+        Assert.equals(cGpu[0], cCpu[0]);
+        Assert.equals(cGpu[1], cCpu[1]);
+        GpuPartitionTest.assertSegment(st, position, li, n);
+        GpuPartitionTest.assertSegment(st, position, ri, n);
+        return;
+    }
+
+    /** The root split, then each child split again, on the segments against the CPU loop. */
+    static void compareSegments(String fixture, int64 minRootRows) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        Assert.isTrue(n >= minRootRows);
+        int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        Histogram root #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Split s #= SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
+                                       (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        Assert.isTrue(s.valid);
+
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginTree(q, g, h, (int64) 8);
+        int64[] position = heap int64[n];
+        GpuPartitionTest.compareSegmentSplit(st, f.bins(), f.cutPtrs(), s, position,
+                                             (int64) 0, (int64) 1, (int64) 2, nf, n);
+        int64 child = (int64) 1;
+        while (child <= (int64) 2) {
+            Histogram hc #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, child, n);
+            Split sc #= SplitFinder.findBest(hc, f.cutPtrs(), f.cutValues(), q,
+                                            (float64) 1.0, (float64) 0.0, (float64) 1.0);
+            if (sc.valid) {
+                GpuPartitionTest.compareSegmentSplit(st, f.bins(), f.cutPtrs(), sc, position, child,
+                                                     (int64) 2 * child + (int64) 1,
+                                                     (int64) 2 * child + (int64) 2, nf, n);
+            }
+            child = child + (int64) 1;
+        }
+        return;
+    }
+
+    // int64-scan-verbs 7.1.1: each child's segment holds the CPU builder's rows, ascending.
+    @Test
+    public void segmentsHoldTheCpuRowsInOrder() {
+        GpuPartitionTest.compareSegments("tiny_reg", (int64) 1);
+        GpuPartitionTest.compareSegments("tiny_reg_missing", (int64) 1);
+        return;
+    }
+
+    // 7.1.2: 20000 rows span 79 workgroups of 256 with an uneven last one, and
+    // node 2's segment starts mid-buffer.
+    @Test
+    public void segmentsOverManyWorkgroupsStayStable() {
+        GpuPartitionTest.compareSegments("large_reg", (int64) 3 * GpuPartition.segmentBlock() + (int64) 1);
         return;
     }
 }

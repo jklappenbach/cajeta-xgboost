@@ -1,0 +1,87 @@
+package dev.cajeta.xgboost.selftest;
+
+import cajeta.math.Tensor;
+import cajeta.time.Clock;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.tree.TreeBuilder;
+
+/**
+ * int64-scan-verbs 7.1.6: a device tree grown on the row segments timed
+ * against the per-node kernels, interleaved, at each fixture's round-0
+ * gradients. Runs only with XGB_TIME_TREEGROW set and prints medians; the
+ * segment path's one-off state (the bin upload) is timed on its own.
+ */
+public class TreeGrowTiming {
+
+    public TreeGrowTiming() { return; }
+
+    static int64 growOnce(FixtureLoader f, float64[] g, float64[] h, int64 n, int64 depth,
+                          GpuTrainState st) {
+        int64 cap = TreeBuilder.capacity(depth);
+        int64[] si = heap int64[cap];
+        float32[] sc = heap float32[cap];
+        boolean[] dl = heap boolean[cap];
+        int64[] lc = heap int64[cap];
+        int64[] rc = heap int64[cap];
+        float32[] bw = heap float32[cap];
+        boolean[] leaf = heap boolean[cap];
+        float32[] lossChg = heap float32[cap];
+        float64[] sumHess = heap float64[cap];
+        int64[] leafOf = heap int64[n];
+        int64 t0 = Clock.nanoTime();
+        TreeBuilder.grow(f.bins(), f.cutPtrs(), f.cutValues(), g, h, n, depth, (int64) 0,
+                         (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                         (float64) 0.3, si, sc, dl, lc, rc, bw, leaf, lossChg, sumHess,
+                         leafOf, true, st);
+        return Clock.nanoTime() - t0;
+    }
+
+    static void timeFixture(String fixture, int64 depth, int64 reps) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        int64 c0 = Clock.nanoTime();
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        int64 createNs = Clock.nanoTime() - c0;
+
+        int64[] segNs = heap int64[reps];
+        int64[] nodeNs = heap int64[reps];
+        int64 r = (int64) -1;
+        while (r < reps) {
+            int64 ts = (int64) 0;
+            int64 tn = (int64) 0;
+            if (r % (int64) 2 == (int64) 0) {
+                ts = TreeGrowTiming.growOnce(f, g, h, n, depth, st);
+                tn = TreeGrowTiming.growOnce(f, g, h, n, depth, null);
+            } else {
+                tn = TreeGrowTiming.growOnce(f, g, h, n, depth, null);
+                ts = TreeGrowTiming.growOnce(f, g, h, n, depth, st);
+            }
+            if (r >= (int64) 0) {
+                segNs[r] = ts;
+                nodeNs[r] = tn;
+            }
+            r = r + (int64) 1;
+        }
+        int64 ms = FeatureScanTiming.median(segNs, reps);
+        int64 mn = FeatureScanTiming.median(nodeNs, reps);
+        System.stdout.println("treeGrow " + fixture + " n " + n + " depth " + depth
+            + ": segments " + ms / (int64) 1000 + " us, per-node " + mn / (int64) 1000
+            + " us, state " + createNs / (int64) 1000 + " us once, median of " + reps);
+        return;
+    }
+
+    @Test
+    public void segmentsAgainstPerNodeAtTheFixtureShapes() {
+        if (System.env.get("XGB_TIME_TREEGROW") == null) { return; }
+        int64 reps = (int64) 9;
+        timeFixture("tiny_reg", (int64) 4, reps);
+        timeFixture("tiny_reg_missing", (int64) 4, reps);
+        timeFixture("tiny_binary", (int64) 4, reps);
+        timeFixture("large_reg", (int64) 6, reps);
+        timeFixture("large_binary", (int64) 6, reps);
+        timeFixture("covertype", (int64) 6, reps);
+        return;
+    }
+}

@@ -3,6 +3,9 @@ package dev.cajeta.xgboost.selftest;
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
 import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.tree.Split;
+import dev.cajeta.xgboost.tree.SplitFinder;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
 
@@ -94,6 +97,54 @@ public class GpuHistogramTest {
         Histogram cpu #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
         Histogram gpu #= GpuHistogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
         assertSame(cpu, gpu);
+        return;
+    }
+
+    /** Asserts node `nid`'s segment histogram equals the CPU builder's over `position`. */
+    static void assertSegmentHistogram(GpuTrainState st, FixtureLoader f, GradientQuantiser q,
+                                       float64[] g, float64[] h, int64[] position,
+                                       int64 nid, int64 n) {
+        Histogram cpu #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, nid, n);
+        int64[] hg = heap int64[cpu.nbins];
+        int64[] hh = heap int64[cpu.nbins];
+        int64[] tg = heap int64[8];
+        int64[] th = heap int64[8];
+        st.buildNode(nid, hg, hh, tg, th, (int64) 0);
+        int64 b = (int64) 0;
+        while (b < cpu.nbins) {
+            Assert.equals(hg[b], cpu.g[b]);
+            Assert.equals(hh[b], cpu.h[b]);
+            b = b + (int64) 1;
+        }
+        Assert.equals(tg[nid], cpu.totalG);
+        Assert.equals(th[nid], cpu.totalH);
+        return;
+    }
+
+    // int64-scan-verbs 7.1.3: a node's histogram built from its segment equals
+    // the CPU builder's bit for bit, missing values (15%) included.
+    @Test
+    public void segmentHistogramsBitIdenticalToCpu() {
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_missing");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        st.beginTree(q, g, h, (int64) 8);
+        int64[] position = heap int64[n];
+        GpuHistogramTest.assertSegmentHistogram(st, f, q, g, h, position, (int64) 0, n);
+
+        Histogram root #= Histogram.buildAll(f.bins(), f.cutPtrs(), q, g, h, n);
+        Split s #= SplitFinder.findBest(root, f.cutPtrs(), f.cutValues(), q,
+                                       (float64) 1.0, (float64) 0.0, (float64) 1.0);
+        int64[] cnts #= st.split(s, f.cutPtrs(), (int64) 0, (int64) 1, (int64) 2);
+        int64[] cpuCnts #= GpuPartitionTest.cpuPartition(f.bins(), f.cutPtrs(), s, position,
+                                                        (int64) 0, (int64) 1, (int64) 2, nf, n);
+        Assert.equals(cnts[0], cpuCnts[0]);
+        GpuHistogramTest.assertSegmentHistogram(st, f, q, g, h, position, (int64) 1, n);
+        GpuHistogramTest.assertSegmentHistogram(st, f, q, g, h, position, (int64) 2, n);
         return;
     }
 }

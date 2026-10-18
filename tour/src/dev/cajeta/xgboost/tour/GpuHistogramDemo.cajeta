@@ -5,6 +5,7 @@ import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.gpu.GpuHistogram;
 import dev.cajeta.xgboost.gpu.GpuPartition;
 import dev.cajeta.xgboost.gpu.GpuSplitFinder;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
 import dev.cajeta.xgboost.objective.SquaredError;
 import dev.cajeta.xgboost.sketch.Binner;
 import dev.cajeta.xgboost.sketch.Sketch;
@@ -155,5 +156,40 @@ public class GpuHistogramDemo extends DemoClass {
         this.check(samePart,
             "the GPU partition routes every row to the same child as the "
             + "CPU loop — per-row pure function + commutative counts");
+
+        // Training keeps the rows on the device: a GpuTrainState uploads the
+        // bins once per fit, each node's rows are one segment of a row index,
+        // a split partitions that segment stably, and a histogram reads only
+        // its node's rows.
+        GpuTrainState st #= GpuTrainState.create(binsT, cutPtrsT, n);
+        st.beginTree(q, grad, hess, (int64) 4);
+        int64[] hg = heap int64[cpu.nbins];
+        int64[] hh = heap int64[cpu.nbins];
+        int64[] tg = heap int64[4];
+        int64[] th = heap int64[4];
+        st.buildNode((int64) 0, hg, hh, tg, th, (int64) 0);
+        boolean sameSeg = tg[0] == cpu.totalG && th[0] == cpu.totalH;
+        b = (int64) 0;
+        while (b < cpu.nbins) {
+            if (hg[b] != cpu.g[b] || hh[b] != cpu.h[b]) { sameSeg = false; }
+            b = b + (int64) 1;
+        }
+        int64[] segCnts #= st.split(sp, cutPtrsT, (int64) 0, (int64) 1, (int64) 2);
+        int32[] leftRows #= st.segmentRows((int64) 1);
+        boolean ordered = segCnts[0] == cL && (int64) leftRows.count() == cL;
+        int64 k = (int64) 0;
+        pr = (int64) 0;
+        while (pr < n && ordered) {
+            if (posC[pr] == (int64) 1) {
+                if ((int64) leftRows[k] != pr) { ordered = false; }
+                k = k + (int64) 1;
+            }
+            pr = pr + (int64) 1;
+        }
+        System.stdout.println("   segments: root histogram from the row index, then "
+            + segCnts[0] + " / " + segCnts[1] + " rows split in place");
+        this.check(sameSeg && ordered,
+            "the device-resident path builds the same histogram and puts the "
+            + "left child's rows first, in ascending row order, as the host does");
     }
 }

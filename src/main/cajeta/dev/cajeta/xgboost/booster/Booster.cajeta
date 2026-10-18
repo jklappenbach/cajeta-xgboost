@@ -6,6 +6,7 @@ import dev.cajeta.xgboost.objective.Logistic;
 import dev.cajeta.xgboost.objective.Softmax;
 import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.TreeBuilder;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
 
 /**
  * The gradient-boosting loop for `reg:squarederror` (spec §3.1, §3.4, §3.5),
@@ -114,6 +115,9 @@ public final class Booster {
         float64[] gradK = heap float64[n];   // one class's slice
         float64[] hessK = heap float64[n];
         int64[] leafOf = heap int64[n];
+        // The device side of the run: the bin matrix goes up once, here.
+        GpuTrainState st = null;
+        if (device) { st #= GpuTrainState.create(bins, cutPtrs, n); }
 
         int64 r = (int64) 0;
         while (r < rounds) {
@@ -144,7 +148,7 @@ public final class Booster {
                 int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, gradK, hessK, n,
                                             maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
                                             eta, si, sc, dl, lc, rc, bw, lf, lch, shs, leafOf,
-                                            device);
+                                            device, st);
                 // Tree index is round-major: r*K + g, so class g's trees are
                 // every K-th tree — XGBoost's own layout.
                 int64 t = r * K + g;

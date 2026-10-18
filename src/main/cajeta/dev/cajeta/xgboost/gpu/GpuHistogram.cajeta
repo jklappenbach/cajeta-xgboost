@@ -55,6 +55,64 @@ public final class GpuHistogram {
     }
 
     /**
+     * Node histogram over a row segment: one thread per (segment row, feature)
+     * cell, the same integer atomics as histScatter. The node's totals land in
+     * the two words after the bins.
+     */
+    @Kernel
+    public static void histSegment(KernelBuffer<int64> hist,
+                                   KernelBuffer<int32> bins,
+                                   KernelBuffer<int32> cutOff,
+                                   KernelBuffer<int64> q,
+                                   KernelBuffer<int32> ridx,
+                                   uint32 begin, uint32 count, uint32 nf, uint32 nbins) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < count * nf) {
+            uint32 slot = i / nf;
+            uint32 f = i - slot * nf;
+            uint32 r = (uint32) ridx[begin + slot];
+            if (f == 0) {
+                hist.atomicAdd(nbins * 2, q[r * 2]);
+                hist.atomicAdd(nbins * 2 + 1, q[r * 2 + 1]);
+            }
+            int32 b = bins[r * nf + f];
+            if (b >= 0) {
+                uint32 gb = ((uint32) cutOff[f] + (uint32) b) * 2;
+                hist.atomicAdd(gb, q[r * 2]);
+                hist.atomicAdd(gb + 1, q[r * 2 + 1]);
+            }
+        }
+    }
+
+    /** Zeroes the first `n` words of `buf`. */
+    @Kernel
+    public static void zeroWords(KernelBuffer<int64> buf, uint32 n) {
+        uint32 i = KernelThread.globalIdX();
+        if (i < n) { buf[i] = (int64) 0; }
+    }
+
+    /**
+     * Builds the histogram of the segment `[begin, begin + count)` of `ridx` into
+     * `hist` (`2 * nbins + 2` words: G and H per bin, then the totals) and waits.
+     */
+    public static void buildSegment(KernelBuffer<int64> hist, KernelBuffer<int32> bins,
+                                    KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
+                                    KernelBuffer<int32> ridx, int64 begin, int64 count,
+                                    int64 nf, int64 nbins) {
+        KernelStream s #= KernelStream.current();
+        uint32 words = (uint32) ((int64) 2 * nbins + (int64) 2);
+        zeroWords.launch(s, grid: [(words + 255) / 256], block: [256])(hist, words);
+        uint32 cells = (uint32) (count * nf);
+        if (cells > 0) {
+            histSegment.launch(s, grid: [(cells + 63) / 64], block: [64])
+                (hist, bins, cutOff, q, ridx, (uint32) begin, (uint32) count,
+                 (uint32) nf, (uint32) nbins);
+        }
+        s.sync();
+        return;
+    }
+
+    /**
      * Build node `nid`'s histogram over the rows `position[r] == nid` — the
      * GPU analog of {@link Histogram#buildPos}, same result bit for bit.
      * Node totals are host-side int64 sums in ascending row order, exactly
