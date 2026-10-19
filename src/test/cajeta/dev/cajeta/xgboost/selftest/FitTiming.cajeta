@@ -64,11 +64,58 @@ public class FitTiming {
         return;
     }
 
+    /** The `k`-th of `n` values in ascending order, in milliseconds. */
+    static int64 rankMs(int64[] v, int64 n, int64 k) {
+        int64[] c = heap int64[n];
+        int64 i = (int64) 0;
+        while (i < n) {
+            int64 x = v[i];
+            int64 j = i;
+            while (j > (int64) 0 && c[j - (int64) 1] > x) { c[j] = c[j - (int64) 1]; j = j - (int64) 1; }
+            c[j] = x;
+            i = i + (int64) 1;
+        }
+        return c[k] / (int64) 1000000;
+    }
+
+    /** xgboost-device-followups 2.3.1: the tuned build against global atomics only, interleaved, with quartiles. */
+    static void timeTuned(String label, Tensor<int32> bins, Tensor<int64> cutPtrs,
+                          Tensor<float64> cutValues, float64[] y, int64 n, Objective obj, int64 K,
+                          int64 reps) {
+        int64[] sh = heap int64[reps];
+        int64[] gl = heap int64[reps];
+        int64 r = (int64) -1;
+        while (r < reps) {
+            int64 j = (int64) 0;
+            while (j < (int64) 2) {
+                int64 mode = (j + r + (int64) 2) % (int64) 2;
+                int64 ns = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, mode);
+                if (r >= (int64) 0) {
+                    if (mode == (int64) 0) { sh[r] = ns; } else { gl[r] = ns; }
+                }
+                j = j + (int64) 1;
+            }
+            r = r + (int64) 1;
+        }
+        int64 q1 = reps / (int64) 4;
+        int64 q2 = reps / (int64) 2;
+        int64 q3 = (reps * (int64) 3) / (int64) 4;
+        System.stdout.println("tune " + label + " n " + n + ": tuned "
+            + FitTiming.rankMs(sh, reps, q2) + " ms (" + FitTiming.rankMs(sh, reps, q1) + "-"
+            + FitTiming.rankMs(sh, reps, q3) + "), global " + FitTiming.rankMs(gl, reps, q2) + " ms ("
+            + FitTiming.rankMs(gl, reps, q1) + "-" + FitTiming.rankMs(gl, reps, q3) + "), median of " + reps);
+        return;
+    }
+
     static void timeFixture(String fixture, Objective obj, int64 K, int64 reps) {
         FixtureLoader f #= FixtureLoader.open(fixture);
         Tensor<float64> yT #= f.y();
         int64 n = yT.shapeAt(0);
         float64[] y #= ApiTest.labelOf(f, n);
+        if (System.env.get("XGB_TIME_TUNE") != null) {
+            FitTiming.timeTuned(fixture, f.bins(), f.cutPtrs(), f.cutValues(), y, n, obj, K, reps);
+            return;
+        }
         FitTiming.timeFit(fixture, f.bins(), f.cutPtrs(), f.cutValues(), y, n, obj, K, reps);
         return;
     }
@@ -104,6 +151,11 @@ public class FitTiming {
             y[r] = a - (float64) 0.5 * b;
             r = r + (int64) 1;
         }
+        if (System.env.get("XGB_TIME_TUNE") != null) {
+            FitTiming.timeTuned("generated", bins, cutPtrs, cutValues, y, n, Objective.SQUARED_ERROR,
+                                (int64) 1, reps);
+            return;
+        }
         FitTiming.timeFit("generated", bins, cutPtrs, cutValues, y, n, Objective.SQUARED_ERROR,
                           (int64) 1, reps);
         return;
@@ -117,6 +169,19 @@ public class FitTiming {
         FitTiming.timeFixture("large_multi", Objective.SOFTMAX, (int64) 4, (int64) 3);
         FitTiming.timeGenerated((int64) 200000, (int64) 3);
         FitTiming.timeGenerated((int64) 1000000, (int64) 3);
+        return;
+    }
+
+    /** xgboost-device-followups 2.3.1: tuned against global at 21 interleaved fits a set, with quartiles; runs only with XGB_TIME_TUNE set. */
+    @Test
+    public void tunedAgainstGlobalWithQuartiles() {
+        if (System.env.get("XGB_TIME_TUNE") == null) { return; }
+        int64 reps = (int64) 21;
+        FitTiming.timeFixture("large_reg", Objective.SQUARED_ERROR, (int64) 1, reps);
+        FitTiming.timeFixture("large_binary", Objective.LOGISTIC, (int64) 1, reps);
+        FitTiming.timeFixture("large_multi", Objective.SOFTMAX, (int64) 4, reps);
+        FitTiming.timeGenerated((int64) 200000, reps);
+        FitTiming.timeGenerated((int64) 1000000, reps);
         return;
     }
 
