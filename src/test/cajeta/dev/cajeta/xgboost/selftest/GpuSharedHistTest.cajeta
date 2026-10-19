@@ -56,7 +56,8 @@ public class GpuSharedHistTest {
         GradientQuantiser q #= GradientQuantiser.build(g, h, n);
         GpuTrainState a #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
         String name #= a.tileTuneName();
-        Autotune.invalidate(GpuTrainState.tuneDir, name);
+        String dir #= GpuTrainState.activeTuneDir();
+        Autotune.invalidate(dir, name);
         int64 t0 = GpuHistogram.tunings();
         a.beginTree(q, g, h, (int64) 8);
         a.buildSlot((int64) 0);

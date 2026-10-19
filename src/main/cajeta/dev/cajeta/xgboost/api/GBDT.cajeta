@@ -1,6 +1,7 @@
 package dev.cajeta.xgboost.api;
 
 import cajeta.math.Tensor;
+import cajeta.time.Clock;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.objective.Logistic;
@@ -32,6 +33,11 @@ import dev.cajeta.xgboost.gpu.GpuTrainState;
  * contract holds the moment a non-deterministic reduction lands.
  */
 public final class GBDT {
+
+    static FitPhases phases;
+
+    /** The last fit's phases in this execution, or null before any fit. */
+    public static FitPhases lastPhases() { return GBDT.phases; }
 
     /**
      * Deterministic, bit-exact training (spec §1.7.1). Throws if `p` engages a
@@ -73,9 +79,12 @@ public final class GBDT {
                 "GBDT.fitNonDeterministic: subsample/colsample_bytree < 1 is not yet implemented (RNG parity is a later unit)");
         }
 
+        FitPhases ph = heap FitPhases();
+        int64 t0 = Clock.nanoTime();
         // Raw → cuts (GPU sketch, prune-capable) → bins — bit-exact per U9/U10.
         int64[] cutPtrsA = heap int64[nf + (int64) 1];
         float32[] cuts #= Sketch.cuts(x, n, nf, p.maxBin, cutPtrsA);
+        ph.sketchNs = Clock.nanoTime() - t0;
         int64 total = cutPtrsA[nf];
 
         int64[] cpShape = heap int64[1]; cpShape[0] = nf + (int64) 1;
@@ -89,24 +98,41 @@ public final class GBDT {
 
         if (p.deviceGpu()) {
             // The values go up once and are binned on the device (data-prep spec 4).
+            int64 tb = Clock.nanoTime();
             GpuTrainState st #= GpuTrainState.fromValues(x, cutPtrsT, cuts, n);
+            ph.binNs = Clock.nanoTime() - tb;
+            ph.binner = "device";
+            int64 tt = GpuTrainState.processTuneNanos();
+            int64 tr = Clock.nanoTime();
             Model md #= Booster.train(null, cutPtrsT, cutValuesT, label, n, p.rounds,
                                      p.maxDepth, p.maxLeaves,
                                      p.lambda, p.alpha, p.gamma, p.minChildWeight,
                                      p.eta, p.baseScore, p.objective, p.numClass,
                                      null, true, st);
+            int64 trainNs = Clock.nanoTime() - tr;
+            ph.tuneNs = GpuTrainState.processTuneNanos() - tt;
+            ph.boostNs = trainNs - ph.tuneNs;
+            ph.totalNs = Clock.nanoTime() - t0;
+            GBDT.phases #= ph;
             md.deterministic = deterministic;
             return #md;
         }
 
+        int64 tb = Clock.nanoTime();
         int32[] binsA #= Binner.bin(x, cutPtrsT, cutValuesT, n, nf);
         int64[] bShape = heap int64[2]; bShape[0] = n; bShape[1] = nf;
         Tensor<int32> binsT #= Tensor.of<int32>(binsA, bShape);
+        ph.binNs = Clock.nanoTime() - tb;
+        ph.binner = "host";
+        int64 tr = Clock.nanoTime();
         Model m #= Booster.train(binsT, cutPtrsT, cutValuesT, label, n, p.rounds,
                                 p.maxDepth, p.maxLeaves,
                                 p.lambda, p.alpha, p.gamma, p.minChildWeight,
                                 p.eta, p.baseScore, p.objective, p.numClass,
                                 null, false);
+        ph.boostNs = Clock.nanoTime() - tr;
+        ph.totalNs = Clock.nanoTime() - t0;
+        GBDT.phases #= ph;
         m.deterministic = deterministic;
         return #m;
     }

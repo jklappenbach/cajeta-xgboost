@@ -1,0 +1,174 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.io.file.File;
+import cajeta.io.file.Path;
+import cajeta.math.Tensor;
+import cajeta.xpu.Autotune;
+import dev.cajeta.xgboost.api.FitPhases;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+
+/** xgboost-device-followups Unit 3: a fit's phases, and a tuning that persists between executions. */
+public class FirstFitTest {
+
+    public FirstFitTest() { return; }
+
+    /** Fits tiny_reg_missing on the CPU or the device and returns its phases. */
+    static FitPhases phasesOf(boolean device) {
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_missing");
+        Tensor<float64> x #= f.x();
+        int64 n = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        float64[] label #= ApiTest.labelOf(f, n);
+        Params p #= ApiTest.tinyRegParams();
+        if (device) { p.device = "gpu"; }
+        Model m #= GBDT.fit(x, label, n, nf, p);
+        Assert.isTrue(m.rounds > (int64) 0);
+        return GBDT.lastPhases();
+    }
+
+    /** Asserts the phases are each non-negative and sum to within 5% of the total. */
+    static void assertSums(FitPhases ph) {
+        Assert.isTrue(ph.totalNs > (int64) 0);
+        Assert.isTrue(ph.sketchNs >= (int64) 0);
+        Assert.isTrue(ph.binNs >= (int64) 0);
+        Assert.isTrue(ph.tuneNs >= (int64) 0);
+        Assert.isTrue(ph.boostNs > (int64) 0);
+        int64 sum = ph.sketchNs + ph.binNs + ph.tuneNs + ph.boostNs;
+        Assert.isTrue(sum <= ph.totalNs);
+        Assert.isTrue(sum * (int64) 100 >= ph.totalNs * (int64) 95);
+        return;
+    }
+
+    // 3.1.1, 4.1.1
+    @Test
+    public void aFitReportsItsPhasesAndItsBinner() {
+        FitPhases cpu = FirstFitTest.phasesOf(false);
+        FirstFitTest.assertSums(cpu);
+        Assert.that(cpu.binner).isEqualTo("host");
+        Assert.equals(cpu.tuneNs, (int64) 0);
+        FitPhases dev = FirstFitTest.phasesOf(true);
+        FirstFitTest.assertSums(dev);
+        Assert.that(dev.binner).isEqualTo("device");
+        return;
+    }
+
+    /** A state over `n` generated rows of `nf` features with its quantised round-0 pairs begun. */
+    static #GpuTrainState stateOf(GeneratedSet s, int64 n) {
+        GpuTrainState st #= GpuTrainState.create(s.bins, s.cutPtrs, n);
+        GradientQuantiser q #= GradientQuantiser.build(s.g, s.h, n);
+        st.beginTree(q, s.g, s.h, (int64) 8);
+        return #st;
+    }
+
+    // 3.1.2
+    @Test
+    public void aPersistedTuningIsRecalledWithoutTuning() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        GpuHistogram.forceTileRows((int64) 0);
+        String dir #= GpuTrainState.userTuneDir() + "/persist-test";
+        GpuTrainState.useTuneDir(dir);
+        int64 n = (int64) 70000;
+        GeneratedSet s #= GeneratedSet.of(n, (int64) 6);
+        GpuTrainState a #= FirstFitTest.stateOf(s, n);
+        String name #= a.tileTuneName();
+        Autotune.invalidate(dir, name);
+        String minName #= name + ".min";
+        Autotune.invalidate(dir, minName);
+        String key #= Autotune.deviceKey();
+        String d #= dir + "/" + key;
+        Path dp #= Path.of(d);
+        dp.mkdirs();
+        String build #= GpuTrainState.tuneBuild();
+        int8[] v #= "2048".toBytes();
+        int8[] z #= "0".toBytes();
+        int8[] b #= build.toBytes();
+        File.writeAllBytes(d + "/" + name, v, (int64) v.count());
+        File.writeAllBytes(d + "/" + name + ".for", b, (int64) b.count());
+        File.writeAllBytes(d + "/" + minName, z, (int64) z.count());
+        File.writeAllBytes(d + "/" + minName + ".for", b, (int64) b.count());
+        int64 t0 = GpuHistogram.tunings();
+        a.buildSlot((int64) 0);
+        Assert.equals(GpuHistogram.tunings() - t0, (int64) 0);
+        Assert.equals(a.tileRows(), (int64) 2048);
+        GpuTrainState.useTuneDir(GpuTrainState.userTuneDir());
+        return;
+    }
+
+    // 3.1.2: a tuning for another build is not believed.
+    @Test
+    public void aTuningForAnotherBuildIsTunedAgain() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        GpuHistogram.forceTileRows((int64) 0);
+        String dir #= GpuTrainState.userTuneDir() + "/stale-test";
+        GpuTrainState.useTuneDir(dir);
+        int64 n = (int64) 140000;
+        GeneratedSet s #= GeneratedSet.of(n, (int64) 6);
+        GpuTrainState a #= FirstFitTest.stateOf(s, n);
+        String name #= a.tileTuneName();
+        Autotune.invalidate(dir, name);
+        String key #= Autotune.deviceKey();
+        String d #= dir + "/" + key;
+        Path dp #= Path.of(d);
+        dp.mkdirs();
+        int8[] v #= "2048".toBytes();
+        int8[] b #= "dev.cajeta.xgboost 0.0.0".toBytes();
+        File.writeAllBytes(d + "/" + name, v, (int64) v.count());
+        File.writeAllBytes(d + "/" + name + ".for", b, (int64) b.count());
+        int64 t0 = GpuHistogram.tunings();
+        a.buildSlot((int64) 0);
+        Assert.equals(GpuHistogram.tunings() - t0, (int64) 1);
+        GpuTrainState.useTuneDir(GpuTrainState.userTuneDir());
+        return;
+    }
+
+    // 3.1.3
+    @Test
+    public void theTuningPersistsPerUserByDefault() {
+        String want #= "";
+        String forced = System.env.get("XGB_TUNE_DIR");
+        String local = System.env.get("LOCALAPPDATA");
+        String xdg = System.env.get("XDG_CACHE_HOME");
+        String home = System.env.get("HOME");
+        if (forced != null && forced.byteLength() > 0) { want #= "" + forced; }
+        else if (local != null && local.byteLength() > 0) { want #= local + "/cajeta-xgboost/tune"; }
+        else if (xdg != null && xdg.byteLength() > 0) { want #= xdg + "/cajeta-xgboost/tune"; }
+        else if (home != null && home.byteLength() > 0) { want #= home + "/.cache/cajeta-xgboost/tune"; }
+        String got #= GpuTrainState.userTuneDir();
+        Assert.that(got).isEqualTo(want);
+        String active #= GpuTrainState.activeTuneDir();
+        Assert.that(active).isEqualTo(want);
+        String build #= GpuTrainState.tuneBuild();
+        Assert.isTrue(build.byteLength() > 0);
+        return;
+    }
+
+    // 3.1.3: an unwritable directory keeps the tuning in memory for the execution.
+    @Test
+    public void anUnwritableTuningDirectoryFallsBackToMemory() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        GpuHistogram.forceTileRows((int64) 0);
+        String dir #= "/proc/cajeta-xgboost-no-such-dir/tune";
+        GpuTrainState.useTuneDir(dir);
+        int64 n = (int64) 280000;
+        GeneratedSet s #= GeneratedSet.of(n, (int64) 6);
+        GpuTrainState a #= FirstFitTest.stateOf(s, n);
+        String name #= a.tileTuneName();
+        Autotune.invalidate(dir, name);
+        int64 t0 = GpuHistogram.tunings();
+        a.buildSlot((int64) 0);
+        Assert.equals(GpuHistogram.tunings() - t0, (int64) 1);
+        Assert.isTrue(!Autotune.persists());
+        GpuTrainState b #= FirstFitTest.stateOf(s, n);
+        b.buildSlot((int64) 0);
+        Assert.equals(GpuHistogram.tunings() - t0, (int64) 1);
+        Assert.equals(b.tileRows(), a.tileRows());
+        GpuTrainState.useTuneDir(GpuTrainState.userTuneDir());
+        return;
+    }
+}

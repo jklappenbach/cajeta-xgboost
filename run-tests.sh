@@ -174,6 +174,8 @@ echo ">> building + running the test binary"
 
 # Parity tests load golden fixtures from tools/fixtures via this env var.
 export XGBOOST_FIXTURES="$here/tools/fixtures"
+# Tuned tiles persist under the build, not the user's cache.
+export XGB_TUNE_DIR="${XGB_TUNE_DIR:-$out/tune}"
 # Probed SFU capture tables (RCP for __fdividef gain scoring, EX2 for device
 # expf in Logistic/Softmax). Gitignored (32 MB each); when the local capture
 # is absent, fetch the sha256-pinned copy published as a v0.3.0 release

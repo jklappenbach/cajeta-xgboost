@@ -1,0 +1,42 @@
+package dev.cajeta.xgboost.selftest;
+
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.api.FitPhases;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.booster.Model;
+
+/** xgboost-device-followups 3.2.3: the phases of a process's first and second device fit of large_reg.
+ *  Runs only with XGB_TIME_FIRST set; cold only when it is the one test run (CAJETA_UNIT_FILTER=FirstFitTiming). */
+public class FirstFitTiming {
+
+    public FirstFitTiming() { return; }
+
+    /** One phase report line, in milliseconds. */
+    static void report(String which, FitPhases ph) {
+        int64 ms = (int64) 1000000;
+        System.stdout.println("first-fit " + which + " large_reg: total " + ph.totalNs / ms
+            + " ms, sketch " + ph.sketchNs / ms + ", bin " + ph.binNs / ms + " (" + ph.binner
+            + "), tune " + ph.tuneNs / ms + ", boost " + ph.boostNs / ms);
+        return;
+    }
+
+    @Test
+    public void theFirstAndSecondFitByPhase() {
+        if (System.env.get("XGB_TIME_FIRST") == null) { return; }
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        Tensor<float64> x #= f.x();
+        int64 n = x.shapeAt(0);
+        int64 nf = x.shapeAt(1);
+        float64[] label #= ApiTest.labelOf(f, n);
+        Params p #= ApiTest.tinyRegParams();
+        p.rounds = (int64) 10;
+        p.maxDepth = (int64) 6;
+        p.device = "gpu";
+        Model a #= GBDT.fit(x, label, n, nf, p);
+        FirstFitTiming.report("first", GBDT.lastPhases());
+        Model b #= GBDT.fit(x, label, n, nf, p);
+        FirstFitTiming.report("second", GBDT.lastPhases());
+        return;
+    }
+}

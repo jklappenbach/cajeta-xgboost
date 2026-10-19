@@ -3,6 +3,8 @@ package dev.cajeta.xgboost.gpu;
 import cajeta.lang.Optional;
 import cajeta.lang.String;
 import cajeta.math.Tensor;
+import cajeta.time.Clock;
+import dev.cajeta.xgboost.XGBoost;
 import cajeta.xpu.Autotune;
 import cajeta.xpu.KernelBuffer;
 import cajeta.xpu.KernelStream;
@@ -90,8 +92,60 @@ public final class GpuTrainState {
     int64 group;
     boolean deviceGrads;
 
-    /** Where tuned tiles persist; empty keeps them in memory for this execution. */
-    public static String tuneDir = "";
+    static String tuneDirV;
+    static boolean tuneDirSet;
+    static int64 tuneNs;
+
+    /** Persists tuned tiles under `dir` from now on; empty keeps them in memory for this execution. */
+    public static void useTuneDir(String dir) {
+        GpuTrainState.tuneDirV #= "" + dir;
+        GpuTrainState.tuneDirSet = true;
+        return;
+    }
+
+    /** Where tuned tiles persist: the directory chosen with {@link #useTuneDir}, else {@link #userTuneDir}. */
+    public static #String activeTuneDir() {
+        if (GpuTrainState.tuneDirSet) {
+            String c #= "" + GpuTrainState.tuneDirV;
+            return #c;
+        }
+        return GpuTrainState.userTuneDir();
+    }
+
+    /** Host time spent tuning tiles in this execution, in nanoseconds. */
+    public static int64 processTuneNanos() { return GpuTrainState.tuneNs; }
+
+    /** The per-user cache the tuning persists to by default: `XGB_TUNE_DIR`, else under `%LOCALAPPDATA%`, `$XDG_CACHE_HOME` or `~/.cache`; empty when none is set. */
+    public static #String userTuneDir() {
+        String forced = System.env.get("XGB_TUNE_DIR");
+        if (forced != null && forced.byteLength() > 0) {
+            String c #= "" + forced;
+            return #c;
+        }
+        String local = System.env.get("LOCALAPPDATA");
+        if (local != null && local.byteLength() > 0) {
+            String c #= local + "/cajeta-xgboost/tune";
+            return #c;
+        }
+        String xdg = System.env.get("XDG_CACHE_HOME");
+        if (xdg != null && xdg.byteLength() > 0) {
+            String c #= xdg + "/cajeta-xgboost/tune";
+            return #c;
+        }
+        String home = System.env.get("HOME");
+        if (home != null && home.byteLength() > 0) {
+            String c #= home + "/.cache/cajeta-xgboost/tune";
+            return #c;
+        }
+        String e #= "";
+        return #e;
+    }
+
+    /** The build a persisted tuning must match to be believed. */
+    public static #String tuneBuild() {
+        String b #= "dev.cajeta.xgboost " + XGBoost.version();
+        return #b;
+    }
 
     GpuTrainState(Tensor<int64> cutPtrs, int64 n) {
         this.n = n;
@@ -180,10 +234,12 @@ public final class GpuTrainState {
             return;
         }
         String name #= this.tileTuneName();
-        Optional<int32> hit = Autotune.recall(GpuTrainState.tuneDir, name);
+        String dir #= GpuTrainState.activeTuneDir();
+        String build #= GpuTrainState.tuneBuild();
+        Optional<int32> hit = Autotune.recallFor(dir, name, build);
         if (hit.isPresent() && hit.get() > 0) { this.tileR = (int64) hit.get(); }
         String minName #= name + ".min";
-        Optional<int32> mh = Autotune.recall(GpuTrainState.tuneDir, minName);
+        Optional<int32> mh = Autotune.recallFor(dir, minName, build);
         if (mh.isPresent()) { this.minShared = (int64) mh.get(); }
         this.forceMin();
     }
@@ -197,12 +253,15 @@ public final class GpuTrainState {
     void tuneTile(int64 nid) {
         if (this.tileR > (int64) 0) { return; }
         String name #= this.tileTuneName();
-        Optional<int32> hit = Autotune.recall(GpuTrainState.tuneDir, name);
+        String dir #= GpuTrainState.activeTuneDir();
+        String build #= GpuTrainState.tuneBuild();
+        Optional<int32> hit = Autotune.recallFor(dir, name, build);
         if (GpuHistogram.forcedRows > (int64) 0 || (hit.isPresent() && hit.get() > 0)) {
             this.pickTile();
             return;
         }
         int64 slot = this.slotFor(nid);
+        int64 t0 = Clock.nanoTime();
         int64 best = GpuHistogram.tuneTiles(this.store, slot * this.slotWords, this.bins, this.cutOff,
                                             this.q, this.ridx, this.plan, this.slotTab, this.tileSplit,
                                             this.groupTab, this.ngroups, (int64) 0, this.n, this.nf,
@@ -219,9 +278,10 @@ public final class GpuTrainState {
                                                           this.nbins);
             }
             String minName #= name + ".min";
-            Autotune.remember(GpuTrainState.tuneDir, minName, (int32) this.minShared);
-            Autotune.remember(GpuTrainState.tuneDir, name, (int32) best);
+            Autotune.rememberFor(dir, minName, (int32) this.minShared, build);
+            Autotune.rememberFor(dir, name, (int32) best, build);
         }
+        GpuTrainState.tuneNs = GpuTrainState.tuneNs + (Clock.nanoTime() - t0);
         this.forceMin();
     }
 

@@ -1,0 +1,16 @@
+package dev.cajeta.xgboost.api;
+
+/** Where one `GBDT.fit` spent its time, on the host clock, in nanoseconds. */
+public final class FitPhases {
+    public int64 sketchNs;    // the quantile sketch
+    public int64 binNs;       // binning; on the device this includes the values' upload and the state
+    public int64 tuneNs;      // the tile tuner, inside the boost
+    public int64 boostNs;     // Booster.train less the tuning
+    public int64 totalNs;     // the whole fit
+    public String binner;     // "host" or "device"
+
+    public FitPhases() {
+        this.binner = "";
+        return;
+    }
+}

@@ -66,6 +66,14 @@ XGBoost's default configuration.
   this entry point refuses rather than mislabel.)
 - `GBDT.predict(m, x, n, nf)` — per-row raw margin; under
   `reg:squarederror`'s identity link, that is the prediction.
+- `GBDT.lastPhases()` — the last fit's `FitPhases`: sketch, binning (and
+  which binner ran), tile tuning and boost times, on the host clock.
+
+A GPU fit tunes its histogram tile the first time it meets a data shape on a
+device and keeps the answer under `$XDG_CACHE_HOME/cajeta-xgboost/tune`
+(`~/.cache/...`, or `%LOCALAPPDATA%\cajeta-xgboost\tune` on Windows).
+`XGB_TUNE_DIR` moves it, and `GpuTrainState.useTuneDir("")` keeps tuning in
+memory. A tuning made by another library version is discarded.
 
 ## `Model` — an open data structure
 
@@ -82,6 +90,7 @@ sections 5–6 do):
 | `leftChildren` / `rightChildren` | -1 for leaves |
 | `baseWeights`, `isLeaf` | raw CalcWeight / leaf flags |
 | `deterministic` | the audit bit: was this trained bit-exact? |
+| `sfuCaptured` | did every SFU result come from the NVIDIA captures? |
 
 ## `ModelIO` — serialization
 
