@@ -19,9 +19,10 @@ public class GpuLevelTest {
     public GpuLevelTest() { return; }
 
     /** Node `nid`'s device histogram equals the CPU histogram of its rows in `position`. */
-    static void assertHistogram(GpuTrainState st, FixtureLoader f, GradientQuantiser q,
-                                float64[] g, float64[] h, int64[] position, int64 nid, int64 n) {
-        Histogram cpu #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, nid, n);
+    static void assertHistogramOn(GpuTrainState st, Tensor<int32> bins, Tensor<int64> cutPtrs,
+                                  GradientQuantiser q, float64[] g, float64[] h, int64[] position,
+                                  int64 nid, int64 n) {
+        Histogram cpu #= Histogram.buildPos(bins, cutPtrs, q, g, h, position, nid, n);
         int64[] hg = heap int64[cpu.nbins];
         int64[] hh = heap int64[cpu.nbins];
         int64[] tg = heap int64[nid + (int64) 1];
@@ -43,18 +44,25 @@ public class GpuLevelTest {
      * building each level's splits on the device in one batch, and checks each
      * child's count, segment and histogram against the CPU builder's.
      */
-    static void compareLevels(String fixture, int64 minSplits) {
+    static int64 compareLevels(String fixture, int64 minSplits) {
         FixtureLoader f #= FixtureLoader.open(fixture);
         float64[] g #= f.gradRound((int32) 0);
         float64[] h #= f.hessRound((int32) 0);
+        return GpuLevelTest.compareLevelsOn(f.bins(), f.cutPtrs(), f.cutValues(), g, h, minSplits);
+    }
+
+    /** {@link #compareLevels} over `bins` and gradients `g`, `h`; answers the fit's shared feature groups. */
+    static int64 compareLevelsOn(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
+                                 float64[] g, float64[] h, int64 minSplits) {
         int64 n = (int64) g.count();
-        int64 nf = f.cutPtrs().shapeAt(0) - (int64) 1;
+        int64 nf = cutPtrs.shapeAt(0) - (int64) 1;
         GradientQuantiser q #= GradientQuantiser.build(g, h, n);
         int64 cap = (int64) 32;
-        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        GpuTrainState st #= GpuTrainState.create(bins, cutPtrs, n);
         st.beginTree(q, g, h, cap);
         st.buildSlot((int64) 0);
         int64[] position = heap int64[n];
+        GpuLevelTest.assertHistogramOn(st, bins, cutPtrs, q, g, h, position, (int64) 0, n);
         int64[] level = heap int64[cap];
         int64[] next = heap int64[cap];
         int64[] cpuCounts = heap int64[cap];
@@ -67,15 +75,15 @@ public class GpuLevelTest {
             int64 j = (int64) 0;
             while (j < count) {
                 int64 nid = level[j];
-                Histogram hn #= Histogram.buildPos(f.bins(), f.cutPtrs(), q, g, h, position, nid, n);
-                Split s #= SplitFinder.findBest(hn, f.cutPtrs(), f.cutValues(), q,
+                Histogram hn #= Histogram.buildPos(bins, cutPtrs, q, g, h, position, nid, n);
+                Split s #= SplitFinder.findBest(hn, cutPtrs, cutValues, q,
                                                (float64) 1.0, (float64) 0.0, (float64) 1.0);
                 if (s.valid && s.leftH != (int64) 0 && s.rightH != (int64) 0) {
                     int64 li = nodeCount;
                     int64 ri = nodeCount + (int64) 1;
                     nodeCount = nodeCount + (int64) 2;
-                    st.addSplit(s, f.cutPtrs(), nid, li, ri);
-                    int64[] c #= GpuPartitionTest.cpuPartition(f.bins(), f.cutPtrs(), s, position,
+                    st.addSplit(s, cutPtrs, nid, li, ri);
+                    int64[] c #= GpuPartitionTest.cpuPartition(bins, cutPtrs, s, position,
                                                               nid, li, ri, nf, n);
                     cpuCounts[nc] = c[0];
                     cpuCounts[nc + (int64) 1] = c[1];
@@ -95,7 +103,7 @@ public class GpuLevelTest {
                 while (k < nc) {
                     Assert.equals(cpuCounts[k], got[k]);
                     GpuPartitionTest.assertSegment(st, position, next[k], n);
-                    GpuLevelTest.assertHistogram(st, f, q, g, h, position, next[k], n);
+                    GpuLevelTest.assertHistogramOn(st, bins, cutPtrs, q, g, h, position, next[k], n);
                     k = k + (int64) 1;
                 }
                 if (nc / (int64) 2 > widest) { widest = nc / (int64) 2; }
@@ -106,7 +114,7 @@ public class GpuLevelTest {
             depth = depth + (int64) 1;
         }
         Assert.isTrue(widest >= minSplits);
-        return;
+        return st.sharedGroups();
     }
 
     // 6.1.1: a level's splits partitioned and built at once give each child the CPU rows, ascending, and histogram.

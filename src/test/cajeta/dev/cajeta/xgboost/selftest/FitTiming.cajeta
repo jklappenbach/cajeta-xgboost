@@ -4,25 +4,23 @@ import cajeta.math.Tensor;
 import cajeta.time.Clock;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.gpu.GpuHistogram;
 import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.sketch.Binner;
 import dev.cajeta.xgboost.sketch.Sketch;
 import dev.cajeta.xgboost.tree.TreeBuilder;
 
-/**
- * xgboost-device-training 9.1.1: a whole device `Booster.train` (10 rounds,
- * depth 6, eta 0.3, lambda 1), a level at a time against 0.5.0's node at a
- * time, interleaved, on the large fixtures and generated 200k and 1M x 50
- * sets. Runs only with XGB_TIME_FIT set, and prints medians.
- */
+/** Plan 9.1.1 and 10.3.2: whole device fits by shared tiles, global atomics and 0.5.0's per-node
+ *  path, interleaved, at spec 1.2's shapes; runs only with XGB_TIME_FIT set. */
 public class FitTiming {
 
     public FitTiming() { return; }
 
-    /** One device fit's wall time in nanoseconds, per node when `perNode`. */
+    /** One device fit's wall time in nanoseconds: mode 0 shared tiles, 1 global atomics, 2 0.5.0's per-node path. */
     static int64 fitOnce(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
-                         float64[] label, int64 n, Objective obj, int64 K, boolean perNode) {
-        TreeBuilder.usePerNodePath(perNode);
+                         float64[] label, int64 n, Objective obj, int64 K, int64 mode) {
+        TreeBuilder.usePerNodePath(mode == (int64) 2);
+        GpuHistogram.useSharedTiles(mode == (int64) 0);
         int64 t0 = Clock.nanoTime();
         Model m #= Booster.train(bins, cutPtrs, cutValues, label, n, (int64) 10,
                                 (int64) 6, (int64) 0,
@@ -30,33 +28,38 @@ public class FitTiming {
                                 (float64) 0.3, (float64) 0.5, obj, K, null, true);
         int64 ns = Clock.nanoTime() - t0;
         TreeBuilder.usePerNodePath(false);
+        GpuHistogram.useSharedTiles(true);
         return ns;
     }
 
     static void timeFit(String label, Tensor<int32> bins, Tensor<int64> cutPtrs,
                         Tensor<float64> cutValues, float64[] y, int64 n, Objective obj, int64 K,
                         int64 reps) {
-        int64[] lv = heap int64[reps];
-        int64[] pn = heap int64[reps];
+        int64[] t = heap int64[(int64) 3 * reps];
         int64 r = (int64) -1;
         while (r < reps) {
-            int64 tl = (int64) 0;
-            int64 tp = (int64) 0;
-            if (r % (int64) 2 == (int64) 0) {
-                tl = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, false);
-                tp = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, true);
-            } else {
-                tp = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, true);
-                tl = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, false);
-            }
-            if (r >= (int64) 0) {
-                lv[r] = tl;
-                pn[r] = tp;
+            int64 j = (int64) 0;
+            while (j < (int64) 3) {
+                int64 mode = (j + r + (int64) 3) % (int64) 3;
+                int64 ns = FitTiming.fitOnce(bins, cutPtrs, cutValues, y, n, obj, K, mode);
+                if (r >= (int64) 0) { t[mode * reps + r] = ns; }
+                j = j + (int64) 1;
             }
             r = r + (int64) 1;
         }
-        System.stdout.println("fit " + label + " n " + n + ": levels "
-            + FeatureScanTiming.median(lv, reps) / (int64) 1000000 + " ms, per-node "
+        int64[] sh = heap int64[reps];
+        int64[] gl = heap int64[reps];
+        int64[] pn = heap int64[reps];
+        r = (int64) 0;
+        while (r < reps) {
+            sh[r] = t[r];
+            gl[r] = t[reps + r];
+            pn[r] = t[(int64) 2 * reps + r];
+            r = r + (int64) 1;
+        }
+        System.stdout.println("fit " + label + " n " + n + ": shared "
+            + FeatureScanTiming.median(sh, reps) / (int64) 1000000 + " ms, levels "
+            + FeatureScanTiming.median(gl, reps) / (int64) 1000000 + " ms, per-node "
             + FeatureScanTiming.median(pn, reps) / (int64) 1000000 + " ms, median of " + reps);
         return;
     }

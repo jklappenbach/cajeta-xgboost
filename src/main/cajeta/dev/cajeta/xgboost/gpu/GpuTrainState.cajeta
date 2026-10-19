@@ -1,6 +1,9 @@
 package dev.cajeta.xgboost.gpu;
 
+import cajeta.lang.Optional;
+import cajeta.lang.String;
 import cajeta.math.Tensor;
+import cajeta.xpu.Autotune;
 import cajeta.xpu.KernelBuffer;
 import cajeta.xpu.KernelStream;
 import dev.cajeta.xgboost.objective.Objective;
@@ -45,6 +48,11 @@ public final class GpuTrainState {
     KernelBuffer<int64> slotTab;
     KernelBuffer<int64> plan;
     KernelBuffer<int64> leafTab;
+    KernelBuffer<int32> tileSplit;
+    KernelBuffer<int32> groupTab;
+    int64 ngroups;
+    int64 tileR;
+    int64 lvTiles;
     int64[] leafTabH;
     TransferLog log;
     int32[] tabH;
@@ -78,6 +86,9 @@ public final class GpuTrainState {
     int64 groups;
     int64 group;
     boolean deviceGrads;
+
+    /** Where tuned tiles persist; empty keeps them in memory for this execution. */
+    public static String tuneDir = "";
 
     GpuTrainState(Tensor<int64> cutPtrs, int64 n) {
         this.n = n;
@@ -116,6 +127,67 @@ public final class GpuTrainState {
         this.cutPtr = heap KernelBuffer<int32>(this.nf + (int64) 1);
         this.cutPtr.upload(ptrH);
         this.log.upSmalls((int64) 2);
+        if (GpuHistogram.sharedOn) {
+            int32[] gt #= GpuHistogram.featureGroups(cutPtrs);
+            if (gt != null) {
+                this.ngroups = (int64) gt.count() / (int64) 4;
+                this.groupTab = heap KernelBuffer<int32>((int64) gt.count());
+                this.groupTab.upload(gt);
+                this.log.upSmalls((int64) 1);
+            }
+        }
+        if (this.groupTab == null) { this.groupTab = heap KernelBuffer<int32>((int64) 4); }
+    }
+
+    /** Feature groups of the workgroup-shared histogram build; 0 when this fit uses global atomics. */
+    public int64 sharedGroups() { return this.ngroups; }
+
+    /** Rows per shared tile, once the first root build has chosen them; else 0. */
+    public int64 tileRows() { return this.tileR; }
+
+    /** The tuned tile's name in {@link Autotune}: by feature groups and the rows' power of two. */
+    public #String tileTuneName() {
+        int64 lg = (int64) 0;
+        while (((int64) 1 << (lg + (int64) 1)) <= this.n) { lg = lg + (int64) 1; }
+        return "xgb.hist.tile.g" + this.ngroups + ".n" + lg;
+    }
+
+    /** Picks the tile for this fit: forced, else remembered, else 1024 rows. */
+    void pickTile() {
+        if (this.tileR > (int64) 0) { return; }
+        this.tileR = (int64) 1024;
+        if (GpuHistogram.forcedRows > (int64) 0) {
+            this.tileR = GpuHistogram.forcedRows;
+            return;
+        }
+        String name #= this.tileTuneName();
+        Optional<int32> hit = Autotune.recall(GpuTrainState.tuneDir, name);
+        if (hit.isPresent() && hit.get() > 0) { this.tileR = (int64) hit.get(); }
+    }
+
+    /** Times the tile candidates on root `nid`'s segment unless forced or remembered, and keeps the fastest. */
+    void tuneTile(int64 nid) {
+        if (this.tileR > (int64) 0) { return; }
+        if (GpuHistogram.forcedRows > (int64) 0) {
+            this.tileR = GpuHistogram.forcedRows;
+            return;
+        }
+        String name #= this.tileTuneName();
+        Optional<int32> hit = Autotune.recall(GpuTrainState.tuneDir, name);
+        if (hit.isPresent() && hit.get() > 0) {
+            this.tileR = (int64) hit.get();
+            return;
+        }
+        int64 slot = this.slotFor(nid);
+        int64 best = GpuHistogram.tuneTiles(this.store, slot * this.slotWords, this.bins, this.cutOff,
+                                            this.q, this.ridx, this.plan, this.slotTab, this.tileSplit,
+                                            this.groupTab, this.ngroups, (int64) 0, this.n, this.nf,
+                                            this.nbins);
+        this.tileR = (int64) 1024;
+        if (best > (int64) 0) {
+            this.tileR = best;
+            Autotune.remember(GpuTrainState.tuneDir, name, (int32) best);
+        }
     }
 
     /** A run's device state over `n` rows of `bins`; the bin matrix is uploaded here, once. */
@@ -227,6 +299,7 @@ public final class GpuTrainState {
         this.lvCount = (int64) 0;
         this.lvBlocks = (int64) 0;
         this.lvCells = (int64) 0;
+        this.lvTiles = (int64) 0;
         this.lvPending = false;
         this.lvBuilt = false;
         int64 i = (int64) 0;
@@ -246,12 +319,13 @@ public final class GpuTrainState {
         this.blockSplit = heap KernelBuffer<int32>(blocks + cap);
         this.levelTab = heap KernelBuffer<int32>(cap * GpuPartition.tableWords());
         this.lefts = heap KernelBuffer<int64>(cap);
-        this.slotTab = heap KernelBuffer<int64>(cap * (int64) 3);
+        this.slotTab = heap KernelBuffer<int64>(cap * (int64) 4);
+        this.tileSplit = heap KernelBuffer<int32>(this.n / (int64) 512 + cap + (int64) 1);
         this.plan = heap KernelBuffer<int64>(cap * (int64) 4);
         this.leafTab = heap KernelBuffer<int64>(cap * (int64) 2);
         this.leafTabH = heap int64[cap * (int64) 2];
         this.tabH = heap int32[cap * GpuPartition.tableWords()];
-        this.slotTabH = heap int64[cap * (int64) 3];
+        this.slotTabH = heap int64[cap * (int64) 4];
         this.leftsH = heap int64[cap];
         this.lvParent = heap int64[cap];
         this.lvLeft = heap int64[cap];
@@ -320,6 +394,15 @@ public final class GpuTrainState {
 
     /** Node `nid`'s histogram, built into its slot from its segment. */
     public void buildSlot(int64 nid) {
+        if (this.ngroups > (int64) 0) {
+            if (this.segCount[nid] == this.n) { this.tuneTile(nid); } else { this.pickTile(); }
+            int64 ts = this.slotFor(nid);
+            GpuHistogram.buildSegmentTiles(this.store, ts * this.slotWords, this.bins, this.cutOff, this.q,
+                                           this.ridx, this.plan, this.slotTab, this.tileSplit,
+                                           this.groupTab, this.ngroups, this.segBegin[nid],
+                                           this.segCount[nid], this.tileR, this.nf, this.nbins, this.log);
+            return;
+        }
         int64 slot = this.slotFor(nid);
         GpuHistogram.buildSegment(this.store, slot * this.slotWords, this.bins, this.cutOff, this.q,
                                   this.ridx, this.segBegin[nid], this.segCount[nid], this.nf,
@@ -473,7 +556,12 @@ public final class GpuTrainState {
         this.tabH[t + (int64) 3] = (int32) s.findex;
         this.tabH[t + (int64) 4] = (int32) (s.splitGidx - cutPtrs.flatGet(s.findex));
         this.tabH[t + (int64) 5] = s.defaultLeft ? (int32) 1 : (int32) 0;
-        this.slotTabH[j * (int64) 3 + (int64) 2] = this.lvCells;
+        this.slotTabH[j * (int64) 4 + (int64) 2] = this.lvCells;
+        if (this.ngroups > (int64) 0) {
+            this.pickTile();
+            this.slotTabH[j * (int64) 4 + (int64) 3] = this.lvTiles;
+            this.lvTiles = this.lvTiles + (count / (int64) 2 + this.tileR - (int64) 1) / this.tileR;
+        }
         this.lvBlocks = this.lvBlocks
             + (count + GpuPartition.segmentBlock() - (int64) 1) / GpuPartition.segmentBlock();
         this.lvCells = this.lvCells + (count / (int64) 2) * this.nf;
@@ -508,14 +596,15 @@ public final class GpuTrainState {
             this.lvParentSlot[j] = parentSlot;
             this.lvFresh[j] = fresh;
             this.slotOf[this.lvParent[j]] = (int64) -1;
-            this.slotTabH[j * (int64) 3] = parentSlot * this.slotWords;
-            this.slotTabH[j * (int64) 3 + (int64) 1] = fresh * this.slotWords;
+            this.slotTabH[j * (int64) 4] = parentSlot * this.slotWords;
+            this.slotTabH[j * (int64) 4 + (int64) 1] = fresh * this.slotWords;
             j = j + (int64) 1;
         }
-        this.slotTab.upload(this.slotTabH, this.lvCount * (int64) 3);
+        this.slotTab.upload(this.slotTabH, this.lvCount * (int64) 4);
         this.log.upSmalls((int64) 1);
         GpuHistogram.buildLevel(this.store, this.bins, this.cutOff, this.q, this.ridx, this.levelTab,
                                 this.lefts, this.slotTab, this.plan, this.slotBase,
+                                this.tileSplit, this.groupTab, this.ngroups, this.lvTiles, this.tileR,
                                 this.lvCount, this.lvCells, this.nf, this.nbins);
         this.lvBuilt = true;
     }
@@ -571,6 +660,7 @@ public final class GpuTrainState {
         this.lvCount = (int64) 0;
         this.lvBlocks = (int64) 0;
         this.lvCells = (int64) 0;
+        this.lvTiles = (int64) 0;
         this.lvPending = false;
         this.lvBuilt = false;
     }
