@@ -39,6 +39,8 @@ public final class GpuHistogram {
     static int64 forcedRows = (int64) 0;
     static int64 forcedMin = (int64) -1;
     static int64 tuneCount = (int64) 0;
+    static int64 syncNs = (int64) -1;
+    static int64 lastReps = (int64) 1;
     static boolean sharedOn = true;
 
     /** Bins one feature group holds in workgroup memory: 2048 G/H pairs, 32 KiB. */
@@ -69,6 +71,69 @@ public final class GpuHistogram {
 
     /** Timed tile tunings so far in this execution. */
     public static int64 tunings() { return GpuHistogram.tuneCount; }
+
+    /** Syncs' worth of builds each tuning sample covers. */
+    public static int64 syncMultiple() { return (int64) 16; }
+
+    /** The most builds one tuning sample repeats. */
+    public static int64 maxReps() { return (int64) 32; }
+
+    /** Builds per tuning sample for a build of `buildNs` after a sync of `syncNs`: enough to cover {@link #syncMultiple} syncs, from 1 to {@link #maxReps}. */
+    public static int64 repsFor(int64 buildNs, int64 syncNs) {
+        if (syncNs <= (int64) 0) { return (int64) 1; }
+        int64 cap = GpuHistogram.maxReps();
+        if (buildNs <= (int64) 0) { return cap; }
+        int64 want = GpuHistogram.syncMultiple() * syncNs;
+        int64 r = (want + buildNs - (int64) 1) / buildNs;
+        if (r < (int64) 1) { return (int64) 1; }
+        if (r > cap) { return cap; }
+        return r;
+    }
+
+    /** The last tuning's measured sync, in nanoseconds. */
+    public static int64 lastSyncNanos() {
+        if (GpuHistogram.syncNs < (int64) 0) { return (int64) 0; }
+        return GpuHistogram.syncNs;
+    }
+
+    /** The largest repeat count the last tuning's samples used. */
+    public static int64 lastSampleReps() { return GpuHistogram.lastReps; }
+
+    /** A one-row global build's round trip on `s`, the median of nine: the launch and sync a sample must outweigh. Measured once per process. */
+    static int64 syncNanos(KernelStream s, KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
+                           KernelBuffer<int32> cutOff, KernelBuffer<int64> q, KernelBuffer<int32> ridx,
+                           int64 begin, int64 nf, int64 nbins) {
+        if (GpuHistogram.syncNs < (int64) 0) {
+            int64[] t = heap int64[9];
+            int64 i = (int64) 0;
+            while (i < (int64) 9) {
+                int64 t0 = Clock.nanoTime();
+                GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, (int64) 1, nf, nbins);
+                s.sync();
+                int64 v = Clock.nanoTime() - t0;
+                int64 j = i;
+                while (j > (int64) 0 && t[j - (int64) 1] > v) { t[j] = t[j - (int64) 1]; j = j - (int64) 1; }
+                t[j] = v;
+                i = i + (int64) 1;
+            }
+            GpuHistogram.syncNs = (int64) 1;
+            if (t[4] > (int64) 1) { GpuHistogram.syncNs = t[4]; }
+        }
+        return GpuHistogram.syncNs;
+    }
+
+    /** Builds per sample for one candidate, from a single timed build of it against the measured sync. */
+    static int64 sampleReps(KernelStream s, KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
+                            KernelBuffer<int32> cutOff, KernelBuffer<int64> q, KernelBuffer<int32> ridx,
+                            KernelBuffer<int64> plan, KernelBuffer<int64> slotTab,
+                            KernelBuffer<int32> tileSplit, KernelBuffer<int32> groups, int64 ngroups,
+                            int64 begin, int64 count, int64 rows, int64 nf, int64 nbins, int64 sync) {
+        int64 one = GpuHistogram.timeBuild(s, hist, base, bins, cutOff, q, ridx, plan, slotTab, tileSplit,
+                                           groups, ngroups, begin, count, rows, nf, nbins, (int64) 1);
+        int64 r = GpuHistogram.repsFor(one - sync, sync);
+        if (r > GpuHistogram.lastReps) { GpuHistogram.lastReps = r; }
+        return r;
+    }
 
     /** Feature groups in order, `(first feature, end feature, first bin, bins)` each, within
      *  {@link #groupBins}; null when one feature alone exceeds it. */
@@ -229,21 +294,25 @@ public final class GpuHistogram {
         return;
     }
 
-    /** One build of the segment's first `count` rows, timed on the host clock around a sync: tiles of `rows`, or global. */
+    /** `reps` builds of the segment's first `count` rows and one sync, on the host clock, per build: tiles of `rows`, or global. */
     static int64 timeBuild(KernelStream s, KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
                            KernelBuffer<int32> cutOff, KernelBuffer<int64> q, KernelBuffer<int32> ridx,
                            KernelBuffer<int64> plan, KernelBuffer<int64> slotTab,
                            KernelBuffer<int32> tileSplit, KernelBuffer<int32> groups, int64 ngroups,
-                           int64 begin, int64 count, int64 rows, int64 nf, int64 nbins) {
+                           int64 begin, int64 count, int64 rows, int64 nf, int64 nbins, int64 reps) {
         int64 t0 = Clock.nanoTime();
-        if (rows == GpuHistogram.globalBuild()) {
-            GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, count, nf, nbins);
-        } else {
-            GpuHistogram.launchSegmentTiles(s, hist, base, bins, cutOff, q, ridx, plan, slotTab, tileSplit,
-                                            groups, ngroups, begin, count, rows, nf, nbins);
+        int64 k = (int64) 0;
+        while (k < reps) {
+            if (rows == GpuHistogram.globalBuild()) {
+                GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, count, nf, nbins);
+            } else {
+                GpuHistogram.launchSegmentTiles(s, hist, base, bins, cutOff, q, ridx, plan, slotTab, tileSplit,
+                                                groups, ngroups, begin, count, rows, nf, nbins);
+            }
+            k = k + (int64) 1;
         }
         s.sync();
-        return Clock.nanoTime() - t0;
+        return (Clock.nanoTime() - t0) / reps;
     }
 
     /** The fewest rows at which tiles of `rows` still beat the global build, quartering from `count`
@@ -256,18 +325,23 @@ public final class GpuHistogram {
                              int64 rows, int64 nf, int64 nbins) {
         KernelStream s #= KernelStream.current();
         s.sync();
+        int64 sync = GpuHistogram.syncNanos(s, hist, base, bins, cutOff, q, ridx, begin, nf, nbins);
+        int64 gb = GpuHistogram.globalBuild();
         int64 min = count;
         int64 m = count / (int64) 4;
         while (m >= (int64) 256) {
+            int64 rs = GpuHistogram.sampleReps(s, hist, base, bins, cutOff, q, ridx, plan, slotTab, tileSplit,
+                                               groups, ngroups, begin, m, rows, nf, nbins, sync);
+            int64 rg = GpuHistogram.sampleReps(s, hist, base, bins, cutOff, q, ridx, plan, slotTab, tileSplit,
+                                               groups, ngroups, begin, m, gb, nf, nbins, sync);
             int64 sh = (int64) 0;
             int64 gl = (int64) 0;
             int64 round = (int64) 0;
             while (round < (int64) 3) {
                 sh = sh + GpuHistogram.timeBuild(s, hist, base, bins, cutOff, q, ridx, plan, slotTab,
-                                                 tileSplit, groups, ngroups, begin, m, rows, nf, nbins);
+                                                 tileSplit, groups, ngroups, begin, m, rows, nf, nbins, rs);
                 gl = gl + GpuHistogram.timeBuild(s, hist, base, bins, cutOff, q, ridx, plan, slotTab,
-                                                 tileSplit, groups, ngroups, begin, m,
-                                                 GpuHistogram.globalBuild(), nf, nbins);
+                                                 tileSplit, groups, ngroups, begin, m, gb, nf, nbins, rg);
                 round = round + (int64) 1;
             }
             if (sh > gl) { return min; }
@@ -296,23 +370,24 @@ public final class GpuHistogram {
         boolean[] refused = heap boolean[nc];
         KernelStream s #= KernelStream.current();
         s.sync();
+        GpuHistogram.lastReps = (int64) 1;
+        int64 sync = GpuHistogram.syncNanos(s, hist, base, bins, cutOff, q, ridx, begin, nf, nbins);
+        int64[] reps = heap int64[nc];
+        k = (int64) 0;
+        while (k < nc) {
+            reps[k] = GpuHistogram.sampleReps(s, hist, base, bins, cutOff, q, ridx, plan, slotTab, tileSplit,
+                                              groups, ngroups, begin, count, cands[k], nf, nbins, sync);
+            k = k + (int64) 1;
+        }
         int64 round = (int64) 0;
         while (round < rounds) {
             int64 j = (int64) 0;
             while (j < nc) {
                 int64 i = (j + round) % nc;
                 if (!refused[i]) {
-                    int64 t0 = Clock.nanoTime();
-                    if (cands[i] == GpuHistogram.globalBuild()) {
-                        GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, count,
-                                                   nf, nbins);
-                    } else {
-                        GpuHistogram.launchSegmentTiles(s, hist, base, bins, cutOff, q, ridx, plan,
-                                                        slotTab, tileSplit, groups, ngroups, begin,
-                                                        count, cands[i], nf, nbins);
-                    }
-                    s.sync();
-                    int64 t = Clock.nanoTime() - t0;
+                    int64 t = GpuHistogram.timeBuild(s, hist, base, bins, cutOff, q, ridx, plan, slotTab,
+                                                     tileSplit, groups, ngroups, begin, count, cands[i],
+                                                     nf, nbins, reps[i]);
                     if (t <= (int64) 0) { refused[i] = true; }
                     ns[i * rounds + round] = t;
                 }

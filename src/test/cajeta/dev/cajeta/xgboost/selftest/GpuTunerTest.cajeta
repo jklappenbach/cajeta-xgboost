@@ -1,0 +1,50 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.xpu.Autotune;
+import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+import dev.cajeta.xgboost.tree.GradientQuantiser;
+
+/** xgboost-device-followups Unit 2: each tuning sample covers enough builds that a sync does not decide it. */
+public class GpuTunerTest {
+
+    public GpuTunerTest() { return; }
+
+    // 2.1.1: the repeats cover syncMultiple syncs, from one to maxReps.
+    @Test
+    public void aTuningSampleCoversManySyncs() {
+        int64 cap = GpuHistogram.maxReps();
+        Assert.equals(GpuHistogram.syncMultiple(), (int64) 16);
+        Assert.equals(GpuHistogram.repsFor((int64) 10000000, (int64) 100000), (int64) 1);
+        Assert.equals(GpuHistogram.repsFor((int64) 200000, (int64) 100000), (int64) 8);
+        Assert.equals(GpuHistogram.repsFor((int64) 1000, (int64) 100000), cap);
+        Assert.equals(GpuHistogram.repsFor((int64) 0, (int64) 100000), cap);
+        Assert.equals(GpuHistogram.repsFor((int64) 1000, (int64) 0), (int64) 1);
+        return;
+    }
+
+    // 2.1.1: a tuning measures the sync and sizes its samples within the bounds.
+    @Test
+    public void aTuningMeasuresTheSyncAndSizesItsSamples() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        GpuHistogram.forceTileRows((int64) 0);
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        float64[] g #= f.gradRound((int32) 0);
+        float64[] h #= f.hessRound((int32) 0);
+        int64 n = (int64) g.count();
+        GradientQuantiser q #= GradientQuantiser.build(g, h, n);
+        GpuTrainState a #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        String name #= a.tileTuneName();
+        Autotune.invalidate(GpuTrainState.tuneDir, name);
+        int64 t0 = GpuHistogram.tunings();
+        a.beginTree(q, g, h, (int64) 8);
+        a.buildSlot((int64) 0);
+        Assert.equals((int64) 1, GpuHistogram.tunings() - t0);
+        Assert.isTrue(GpuHistogram.lastSyncNanos() > (int64) 0);
+        int64 r = GpuHistogram.lastSampleReps();
+        Assert.isTrue(r >= (int64) 1);
+        Assert.isTrue(r <= GpuHistogram.maxReps());
+        return;
+    }
+}
