@@ -2,12 +2,14 @@ package dev.cajeta.xgboost.selftest;
 
 import cajeta.math.Tensor;
 import cajeta.time.Clock;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
 import dev.cajeta.xgboost.sketch.Binner;
 import dev.cajeta.xgboost.sketch.Sketch;
 
 /**
  * xgboost-data-prep 1.1.1: `Sketch.cuts` and `Binner.bin` timed on large_reg
- * and on a generated 200k x 50 set, and a probe of `Tensor.flatGet` against a
+ * and on generated 200k and 1M x 50 sets, with the device binner beside the
+ * host's (xgboost-device-followups 4.2.1), and a probe of `Tensor.flatGet` against a
  * plain array read in the binner's loop shape. Runs only with XGB_TIME_PREP
  * set, and prints medians.
  */
@@ -43,6 +45,7 @@ public class PrepTiming {
         int64[] sk = heap int64[reps];
         int64[] bn = heap int64[reps];
         int64[] s1 = heap int64[reps];
+        int64[] dv = heap int64[reps];
         int64 r = (int64) 0;
         while (r < reps) {
             int64[] cutPtrsA = heap int64[nf + (int64) 1];
@@ -66,13 +69,17 @@ public class PrepTiming {
             int64 t1 = Clock.nanoTime();
             int32[] bins #= Binner.bin(x, cutPtrs, cutValues, n, nf);
             bn[r] = Clock.nanoTime() - t1;
+            int64 t2 = Clock.nanoTime();
+            GpuTrainState st #= GpuTrainState.fromValues(x, cutPtrs, cuts, n);
+            dv[r] = Clock.nanoTime() - t2;
             r = r + (int64) 1;
         }
         System.stdout.println("prep " + label + " n " + n + " nf " + nf + ": sketch "
             + FeatureScanTiming.median(sk, reps) / (int64) 1000000 + " ms (one task "
             + FeatureScanTiming.median(s1, reps) / (int64) 1000000 + " ms, "
             + FeatureScanTiming.median(s1, reps) / (nf * (int64) 1000) + " us a column), bin "
-            + FeatureScanTiming.median(bn, reps) / (int64) 1000000 + " ms, median of " + reps);
+            + FeatureScanTiming.median(bn, reps) / (int64) 1000000 + " ms, device bin "
+            + FeatureScanTiming.median(dv, reps) / (int64) 1000000 + " ms, median of " + reps);
         return;
     }
 
@@ -113,6 +120,8 @@ public class PrepTiming {
         PrepTiming.timePrep("large_reg", x, (int64) 5);
         Tensor<float64> g #= PrepTiming.generated((int64) 200000, (int64) 50);
         PrepTiming.timePrep("generated", g, (int64) 3);
+        Tensor<float64> m #= PrepTiming.generated((int64) 1000000, (int64) 50);
+        PrepTiming.timePrep("generated", m, (int64) 3);
         return;
     }
 }
