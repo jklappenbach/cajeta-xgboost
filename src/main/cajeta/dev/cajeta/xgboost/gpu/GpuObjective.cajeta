@@ -149,9 +149,7 @@ final class GpuObjective {
     static KernelBuffer<int32> ex2Table() {
         if (!GpuObjective.dEx2Built) {
             GpuObjective.dEx2Built = true;
-            int32[] host #= SfuTables.bits((int64) 1);
-            KernelBuffer<int32> d = heap KernelBuffer<int32>(SfuTables.entries());
-            d.upload(host);
+            KernelBuffer<int32> d #= SfuTables.ex2();
             GpuObjective.dEx2 #= d;
         }
         return GpuObjective.dEx2;

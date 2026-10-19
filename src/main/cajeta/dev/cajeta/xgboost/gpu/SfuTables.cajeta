@@ -1,28 +1,39 @@
 package dev.cajeta.xgboost.gpu;
 
 import cajeta.concurrent.Carriers;
+import cajeta.math.Tensor;
 import cajeta.math.sfu.SfuMath;
+import cajeta.xpu.KernelBuffer;
 
-/** `SfuMath`'s two 2^23-entry tables as float32 bits for the device, filled across the carriers. */
+/** `SfuMath`'s two 2^23-entry tables as float32 bits on the device. */
 final class SfuTables {
 
     /** Entries in each table. */
     static int64 entries() { return (int64) 8388608; }
 
-    /** Fills `out[i0, i1)` from `SfuMath.rcpMantissa` (`kind` 0) or `ex2Mantissa` (`kind` 1). */
+    /** Fills `out[i0, i1)`: kind 0 the correctly rounded reciprocal `SfuMath.rcpMantissa` falls back to,
+     *  1 `SfuMath.ex2Mantissa`, 2 the correctly rounded exp2 it falls back to. */
     static async int32 fill(int32[] out, int64 i0, int64 i1, int64 kind) {
         int64 i = i0;
         if (kind == (int64) 0) {
-            while (i < i1) { out[i] = Cajeta.f32ToBits(SfuMath.rcpMantissa((int32) i)); i = i + (int64) 1; }
-        } else {
+            while (i < i1) {
+                float32 m = Cajeta.bitsToF32(((int32) 0x3F800000) | (int32) i);
+                out[i] = Cajeta.f32ToBits((float32) ((float64) 1.0 / (float64) m));
+                i = i + (int64) 1;
+            }
+        } else if (kind == (int64) 1) {
             while (i < i1) { out[i] = Cajeta.f32ToBits(SfuMath.ex2Mantissa((int32) i)); i = i + (int64) 1; }
+        } else {
+            while (i < i1) {
+                out[i] = Cajeta.f32ToBits((float32) Math.exp2((float64) i / (float64) 8388608.0));
+                i = i + (int64) 1;
+            }
         }
         return (int32) 0;
     }
 
-    /** The reciprocal (`kind` 0) or exp2 (`kind` 1) table, captured or the fallback, as float32 bits. */
-    static #int32[] bits(int64 kind) {
-        if (kind == (int64) 0) { SfuMath.hasRcpTable(); } else { SfuMath.hasEx2Table(); }
+    /** `kind`'s table as float32 bits, filled across the carriers. */
+    static #int32[] filled(int64 kind) {
         int64 n = SfuTables.entries();
         int32[] out = heap int32[n];
         int64 parts = (int64) Carriers.count() * (int64) 2;
@@ -37,5 +48,30 @@ final class SfuTables {
             }
         }
         return #out;
+    }
+
+    /** The reciprocal table on the device: the capture's own buffer when loaded, else its fallback. */
+    static #KernelBuffer<int32> rcp() {
+        int64 n = SfuTables.entries();
+        KernelBuffer<int32> d = heap KernelBuffer<int32>(n);
+        Tensor<int32> t = SfuMath.rcpTableRef();
+        if (t != null && t.size() == n && t.hostBase() == (int64) 0) {
+            int32[] hb = t.hostBuffer();
+            d.upload(hb, n);
+            return #d;
+        }
+        int32[] host #= SfuTables.filled((int64) 0);
+        d.upload(host);
+        return #d;
+    }
+
+    /** The exp2 table on the device, captured or its fallback. */
+    static #KernelBuffer<int32> ex2() {
+        int64 kind = (int64) 2;
+        if (SfuMath.hasEx2Table()) { kind = (int64) 1; }
+        int32[] host #= SfuTables.filled(kind);
+        KernelBuffer<int32> d = heap KernelBuffer<int32>(SfuTables.entries());
+        d.upload(host);
+        return #d;
     }
 }

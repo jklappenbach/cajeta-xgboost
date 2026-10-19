@@ -47,9 +47,7 @@ public final class GpuSplitFinder {
     static KernelBuffer<int32> rcpTable() {
         if (!GpuSplitFinder.dRcpBuilt) {
             GpuSplitFinder.dRcpBuilt = true;
-            int32[] host #= SfuTables.bits((int64) 0);
-            KernelBuffer<int32> d = heap KernelBuffer<int32>(SfuTables.entries());
-            d.upload(host);
+            KernelBuffer<int32> d #= SfuTables.rcp();
             GpuSplitFinder.dRcp #= d;
         }
         return GpuSplitFinder.dRcp;
