@@ -148,12 +148,18 @@ public class FirstFitTest {
         return;
     }
 
-    // 3.1.3: an unwritable directory keeps the tuning in memory for the execution.
+    // 3.1.3: an unwritable directory, under a plain file on every platform, keeps the tuning in memory.
     @Test
     public void anUnwritableTuningDirectoryFallsBackToMemory() {
         GpuHistogram.forceMinSharedRows((int64) -1);
         GpuHistogram.forceTileRows((int64) 0);
-        String dir #= "/proc/cajeta-xgboost-no-such-dir/tune";
+        String base #= GpuTrainState.userTuneDir();
+        Path bp #= Path.of(base);
+        bp.mkdirs();
+        String file #= base + "/not-a-dir";
+        int8[] x #= "x".toBytes();
+        File.writeAllBytes(file, x, (int64) x.count());
+        String dir #= file + "/tune";
         GpuTrainState.useTuneDir(dir);
         int64 n = (int64) 280000;
         GeneratedSet s #= GeneratedSet.of(n, (int64) 6);
