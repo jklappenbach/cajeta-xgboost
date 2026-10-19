@@ -142,8 +142,13 @@ public final class GpuTrainState {
     /** Feature groups of the workgroup-shared histogram build; 0 when this fit uses global atomics. */
     public int64 sharedGroups() { return this.ngroups; }
 
-    /** Rows per shared tile, once the first root build has chosen them; else 0. */
+    /** Rows per shared tile, or {@link GpuHistogram#globalBuild}, once chosen; else 0. */
     public int64 tileRows() { return this.tileR; }
+
+    /** Whether this fit's histograms are built in workgroup-shared tiles, once chosen. */
+    public boolean buildsShared() {
+        return this.ngroups > (int64) 0 && this.tileR > GpuHistogram.globalBuild();
+    }
 
     /** The tuned tile's name in {@link Autotune}: by feature groups and the rows' power of two. */
     public #String tileTuneName() {
@@ -165,7 +170,7 @@ public final class GpuTrainState {
         if (hit.isPresent() && hit.get() > 0) { this.tileR = (int64) hit.get(); }
     }
 
-    /** Times the tile candidates on root `nid`'s segment unless forced or remembered, and keeps the fastest. */
+    /** Times the tile candidates and the global build on root `nid`'s segment unless forced or remembered, and keeps the fastest. */
     void tuneTile(int64 nid) {
         if (this.tileR > (int64) 0) { return; }
         if (GpuHistogram.forcedRows > (int64) 0) {
@@ -396,6 +401,8 @@ public final class GpuTrainState {
     public void buildSlot(int64 nid) {
         if (this.ngroups > (int64) 0) {
             if (this.segCount[nid] == this.n) { this.tuneTile(nid); } else { this.pickTile(); }
+        }
+        if (this.buildsShared()) {
             int64 ts = this.slotFor(nid);
             GpuHistogram.buildSegmentTiles(this.store, ts * this.slotWords, this.bins, this.cutOff, this.q,
                                            this.ridx, this.plan, this.slotTab, this.tileSplit,
@@ -557,8 +564,8 @@ public final class GpuTrainState {
         this.tabH[t + (int64) 4] = (int32) (s.splitGidx - cutPtrs.flatGet(s.findex));
         this.tabH[t + (int64) 5] = s.defaultLeft ? (int32) 1 : (int32) 0;
         this.slotTabH[j * (int64) 4 + (int64) 2] = this.lvCells;
-        if (this.ngroups > (int64) 0) {
-            this.pickTile();
+        if (this.ngroups > (int64) 0) { this.pickTile(); }
+        if (this.buildsShared()) {
             this.slotTabH[j * (int64) 4 + (int64) 3] = this.lvTiles;
             this.lvTiles = this.lvTiles + (count / (int64) 2 + this.tileR - (int64) 1) / this.tileR;
         }
@@ -604,7 +611,8 @@ public final class GpuTrainState {
         this.log.upSmalls((int64) 1);
         GpuHistogram.buildLevel(this.store, this.bins, this.cutOff, this.q, this.ridx, this.levelTab,
                                 this.lefts, this.slotTab, this.plan, this.slotBase,
-                                this.tileSplit, this.groupTab, this.ngroups, this.lvTiles, this.tileR,
+                                this.tileSplit, this.groupTab, this.buildsShared() ? this.ngroups : (int64) 0,
+                                this.lvTiles, this.tileR,
                                 this.lvCount, this.lvCells, this.nf, this.nbins);
         this.lvBuilt = true;
     }

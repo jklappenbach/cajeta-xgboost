@@ -186,4 +186,5 @@ source "$here/scripts/fetch-captures.sh" "$here"
 # assertions, which need no capture, still run.
 sweep="$here/tools/expf/expf_sweep.npy"
 [ -f "$sweep" ] && export EXPF_SWEEP="$sweep"
-"$out/xgboosttests"
+# XGB_PROF_WRAP: a profiler command line to run the test binary under (nsys, rocprofv3).
+${XGB_PROF_WRAP:-} "$out/xgboosttests"

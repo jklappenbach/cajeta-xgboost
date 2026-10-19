@@ -18,12 +18,13 @@ public class GpuSharedHistTest {
     // 10.1.1: the shared build is the CPU histogram for the root and each level, in one group or several.
     @Test
     public void theSharedBuildIsTheCpuHistogramOnEveryFixture() {
-        GpuHistogram.forceTileRows((int64) 0);
+        GpuHistogram.forceTileRows((int64) 1024);
         Assert.isTrue(GpuLevelTest.compareLevels("tiny_reg", (int64) 2) >= (int64) 1);
         Assert.isTrue(GpuLevelTest.compareLevels("tiny_reg_missing", (int64) 2) >= (int64) 1);
         Assert.isTrue(GpuLevelTest.compareLevels("large_reg", (int64) 8) >= (int64) 1);
         GeneratedSet s #= GeneratedSet.of((int64) 20000, (int64) 50);
         Assert.isTrue(GpuLevelTest.compareLevelsOn(s.bins, s.cutPtrs, s.cutValues, s.g, s.h, (int64) 8) >= (int64) 2);
+        GpuHistogram.forceTileRows((int64) 0);
         return;
     }
 
@@ -128,6 +129,30 @@ public class GpuSharedHistTest {
         cvShape[0] = cpA[2];
         Tensor<float64> cv #= Tensor.of<float64>(cvA, cvShape);
         Assert.equals((int64) 0, GpuLevelTest.compareLevelsOn(bins, cp, cv, g, h, (int64) 2));
+        return;
+    }
+
+    // 11.1.1: a fit that chooses the global build is the CPU histogram, and gives the shared fit's model.
+    @Test
+    public void theGlobalChoiceGivesTheSharedModel() {
+        GpuHistogram.forceTileRows(GpuHistogram.globalBuild());
+        GpuLevelTest.compareLevels("large_reg", (int64) 8);
+        FixtureLoader f #= FixtureLoader.open("large_reg");
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.size();
+        float64[] label #= ApiTest.labelOf(f, n);
+        GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
+        Model global #= Booster.train(null, f.cutPtrs(), f.cutValues(), label,
+                                     n, (int64) 3, (int64) 6, (int64) 0,
+                                     (float64) 1.0, (float64) 0.0, (float64) 0.0,
+                                     (float64) 1.0, (float64) 0.3, (float64) 0.5,
+                                     Objective.SQUARED_ERROR, (int64) 1, null, true, st);
+        Assert.isTrue(!st.buildsShared());
+        Assert.isTrue(st.sharedGroups() >= (int64) 1);
+        GpuHistogram.forceTileRows((int64) 1024);
+        Model shared #= GpuSharedHistTest.fitLargeReg(f, label, n);
+        GpuHistogram.forceTileRows((int64) 0);
+        GrowDeviceTest.assertSameModel(shared, global, (int64) 3, n);
         return;
     }
 }

@@ -54,7 +54,10 @@ public final class GpuHistogram {
         return #c;
     }
 
-    /** Forces every new fit's tile to `rows` rows; 0 restores the tuned tile. */
+    /** The tuner's answer, in place of a tile's rows, when the global-atomic build is fastest. */
+    public static int64 globalBuild() { return (int64) 1; }
+
+    /** Forces every new fit's tile to `rows` rows, or {@link #globalBuild}; 0 restores the tuned choice. */
     public static void forceTileRows(int64 rows) { GpuHistogram.forcedRows = rows; }
 
     /** Turns the workgroup-shared build on or off for new fits; a timing hook. */
@@ -219,16 +222,20 @@ public final class GpuHistogram {
         return;
     }
 
-    /** The fastest median tile candidate's rows over three interleaved rounds of the segment's
-     *  shared build; 0 when none could be timed. */
+    /** The fastest median over three interleaved rounds of the segment's build, each tile candidate's
+     *  rows or {@link #globalBuild}; 0 when none could be timed. */
     static int64 tuneTiles(KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
                            KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
                            KernelBuffer<int32> ridx, KernelBuffer<int64> plan,
                            KernelBuffer<int64> slotTab, KernelBuffer<int32> tileSplit,
                            KernelBuffer<int32> groups, int64 ngroups, int64 begin, int64 count,
                            int64 nf, int64 nbins) {
-        int64[] cands #= GpuHistogram.tileCandidates();
-        int64 nc = (int64) cands.count();
+        int64[] tiles #= GpuHistogram.tileCandidates();
+        int64 nc = (int64) tiles.count() + (int64) 1;
+        int64[] cands = heap int64[nc];
+        int64 k = (int64) 0;
+        while (k < nc - (int64) 1) { cands[k] = tiles[k]; k = k + (int64) 1; }
+        cands[nc - (int64) 1] = GpuHistogram.globalBuild();
         int64 rounds = (int64) 3;
         int64[] ns = heap int64[nc * rounds];
         boolean[] refused = heap boolean[nc];
@@ -241,9 +248,14 @@ public final class GpuHistogram {
                 int64 i = (j + round) % nc;
                 if (!refused[i]) {
                     tm.begin(s);
-                    GpuHistogram.launchSegmentTiles(s, hist, base, bins, cutOff, q, ridx, plan, slotTab,
-                                                    tileSplit, groups, ngroups, begin, count, cands[i],
-                                                    nf, nbins);
+                    if (cands[i] == GpuHistogram.globalBuild()) {
+                        GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, count,
+                                                   nf, nbins);
+                    } else {
+                        GpuHistogram.launchSegmentTiles(s, hist, base, bins, cutOff, q, ridx, plan,
+                                                        slotTab, tileSplit, groups, ngroups, begin,
+                                                        count, cands[i], nf, nbins);
+                    }
                     tm.end(s);
                     int64 t = tm.elapsedNanos();
                     if (t < (int64) 0) { refused[i] = true; }
@@ -517,6 +529,16 @@ public final class GpuHistogram {
                              KernelBuffer<int32> ridx, int64 begin, int64 count,
                              int64 nf, int64 nbins, TransferLog log) {
         KernelStream s #= KernelStream.current();
+        GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, count, nf, nbins);
+        log.sync(s);
+        return;
+    }
+
+    /** Launches the global-atomic build of the segment `[begin, begin + count)` into the slot at `base`, with no sync. */
+    static void launchSegment(KernelStream s, KernelBuffer<int64> hist, int64 base,
+                              KernelBuffer<int32> bins, KernelBuffer<int32> cutOff,
+                              KernelBuffer<int64> q, KernelBuffer<int32> ridx, int64 begin,
+                              int64 count, int64 nf, int64 nbins) {
         uint32 words = (uint32) ((int64) 2 * nbins + (int64) 2);
         zeroRange.launch(s, grid: [(words + 255) / 256], block: [256])(hist, (uint32) base, words);
         uint32 cells = (uint32) (count * nf);
@@ -525,7 +547,6 @@ public final class GpuHistogram {
                 (hist, bins, cutOff, q, ridx, (uint32) base, (uint32) begin, (uint32) count,
                  (uint32) nf, (uint32) nbins);
         }
-        log.sync(s);
         return;
     }
 
