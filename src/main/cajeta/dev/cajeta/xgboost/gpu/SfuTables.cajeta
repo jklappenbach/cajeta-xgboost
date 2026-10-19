@@ -1,0 +1,41 @@
+package dev.cajeta.xgboost.gpu;
+
+import cajeta.concurrent.Carriers;
+import cajeta.math.sfu.SfuMath;
+
+/** `SfuMath`'s two 2^23-entry tables as float32 bits for the device, filled across the carriers. */
+final class SfuTables {
+
+    /** Entries in each table. */
+    static int64 entries() { return (int64) 8388608; }
+
+    /** Fills `out[i0, i1)` from `SfuMath.rcpMantissa` (`kind` 0) or `ex2Mantissa` (`kind` 1). */
+    static async int32 fill(int32[] out, int64 i0, int64 i1, int64 kind) {
+        int64 i = i0;
+        if (kind == (int64) 0) {
+            while (i < i1) { out[i] = Cajeta.f32ToBits(SfuMath.rcpMantissa((int32) i)); i = i + (int64) 1; }
+        } else {
+            while (i < i1) { out[i] = Cajeta.f32ToBits(SfuMath.ex2Mantissa((int32) i)); i = i + (int64) 1; }
+        }
+        return (int32) 0;
+    }
+
+    /** The reciprocal (`kind` 0) or exp2 (`kind` 1) table, captured or the fallback, as float32 bits. */
+    static #int32[] bits(int64 kind) {
+        if (kind == (int64) 0) { SfuMath.hasRcpTable(); } else { SfuMath.hasEx2Table(); }
+        int64 n = SfuTables.entries();
+        int32[] out = heap int32[n];
+        int64 parts = (int64) Carriers.count() * (int64) 2;
+        int64 step = (n + parts - (int64) 1) / parts;
+        scope {
+            int64 i0 = (int64) 0;
+            while (i0 < n) {
+                int64 i1 = i0 + step;
+                if (i1 > n) { i1 = n; }
+                spawn fill(out, i0, i1, kind);
+                i0 = i1;
+            }
+        }
+        return #out;
+    }
+}

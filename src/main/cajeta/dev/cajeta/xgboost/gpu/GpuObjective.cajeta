@@ -149,14 +149,8 @@ final class GpuObjective {
     static KernelBuffer<int32> ex2Table() {
         if (!GpuObjective.dEx2Built) {
             GpuObjective.dEx2Built = true;
-            int64 n = (int64) 8388608;
-            int32[] host = heap int32[n];
-            int64 i = (int64) 0;
-            while (i < n) {
-                host[i] = Cajeta.f32ToBits(SfuMath.ex2Mantissa((int32) i));
-                i = i + (int64) 1;
-            }
-            KernelBuffer<int32> d = heap KernelBuffer<int32>(n);
+            int32[] host #= SfuTables.bits((int64) 1);
+            KernelBuffer<int32> d = heap KernelBuffer<int32>(SfuTables.entries());
             d.upload(host);
             GpuObjective.dEx2 #= d;
         }
