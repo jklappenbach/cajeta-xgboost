@@ -1,11 +1,11 @@
 package dev.cajeta.xgboost.gpu;
 
 import cajeta.math.Tensor;
+import cajeta.time.Clock;
 import cajeta.xpu.Barrier;
 import cajeta.xpu.KernelBuffer;
 import cajeta.xpu.KernelStream;
 import cajeta.xpu.KernelThread;
-import cajeta.xpu.KernelTimer;
 import cajeta.xpu.Shared;
 import cajeta.xpu.Workgroup;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
@@ -37,6 +37,7 @@ import dev.cajeta.xgboost.tree.Histogram;
 public final class GpuHistogram {
 
     static int64 forcedRows = (int64) 0;
+    static int64 forcedMin = (int64) -1;
     static int64 tuneCount = (int64) 0;
     static boolean sharedOn = true;
 
@@ -59,6 +60,9 @@ public final class GpuHistogram {
 
     /** Forces every new fit's tile to `rows` rows, or {@link #globalBuild}; 0 restores the tuned choice. */
     public static void forceTileRows(int64 rows) { GpuHistogram.forcedRows = rows; }
+
+    /** Forces the fewest rows a child needs for the shared build in new fits; -1 restores the tuned threshold. */
+    public static void forceMinSharedRows(int64 rows) { GpuHistogram.forcedMin = rows; }
 
     /** Turns the workgroup-shared build on or off for new fits; a timing hook. */
     public static void useSharedTiles(boolean on) { GpuHistogram.sharedOn = on; }
@@ -174,13 +178,16 @@ public final class GpuHistogram {
         }
     }
 
-    /** Writes split `j` over its tiles of `tileSplit`: its first tile is in `slotTab`, its count in `tab`. */
+    /** Writes split `j` over its tiles of `tileSplit` when its half segment has at least `minRows` rows;
+     *  its first tile is in `slotTab`, its count in `tab`. */
     @Kernel
     public static void levelTiles(KernelBuffer<int32> tileSplit, KernelBuffer<int64> slotTab,
-                                  KernelBuffer<int32> tab, uint32 rows) {
+                                  KernelBuffer<int32> tab, uint32 rows, uint32 minRows) {
         uint32 j = Workgroup.x();
         uint32 first = (uint32) slotTab[j * 4 + 3];
-        uint32 tiles = ((uint32) tab[j * 6 + 1] / 2 + rows - 1) / rows;
+        uint32 half = (uint32) tab[j * 6 + 1] / 2;
+        uint32 tiles = 0;
+        if (half >= minRows) { tiles = (half + rows - 1) / rows; }
         uint32 b = KernelThread.x();
         while (b < tiles) {
             tileSplit[first + b] = (int32) j;
@@ -222,8 +229,56 @@ public final class GpuHistogram {
         return;
     }
 
-    /** The fastest median over three interleaved rounds of the segment's build, each tile candidate's
-     *  rows or {@link #globalBuild}; 0 when none could be timed. */
+    /** One build of the segment's first `count` rows, timed on the host clock around a sync: tiles of `rows`, or global. */
+    static int64 timeBuild(KernelStream s, KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
+                           KernelBuffer<int32> cutOff, KernelBuffer<int64> q, KernelBuffer<int32> ridx,
+                           KernelBuffer<int64> plan, KernelBuffer<int64> slotTab,
+                           KernelBuffer<int32> tileSplit, KernelBuffer<int32> groups, int64 ngroups,
+                           int64 begin, int64 count, int64 rows, int64 nf, int64 nbins) {
+        int64 t0 = Clock.nanoTime();
+        if (rows == GpuHistogram.globalBuild()) {
+            GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, count, nf, nbins);
+        } else {
+            GpuHistogram.launchSegmentTiles(s, hist, base, bins, cutOff, q, ridx, plan, slotTab, tileSplit,
+                                            groups, ngroups, begin, count, rows, nf, nbins);
+        }
+        s.sync();
+        return Clock.nanoTime() - t0;
+    }
+
+    /** The fewest rows at which tiles of `rows` still beat the global build, quartering from `count`
+     *  down to 256, three interleaved rounds each; `count` itself when the first quarter loses. */
+    static int64 tuneMinRows(KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
+                             KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
+                             KernelBuffer<int32> ridx, KernelBuffer<int64> plan,
+                             KernelBuffer<int64> slotTab, KernelBuffer<int32> tileSplit,
+                             KernelBuffer<int32> groups, int64 ngroups, int64 begin, int64 count,
+                             int64 rows, int64 nf, int64 nbins) {
+        KernelStream s #= KernelStream.current();
+        s.sync();
+        int64 min = count;
+        int64 m = count / (int64) 4;
+        while (m >= (int64) 256) {
+            int64 sh = (int64) 0;
+            int64 gl = (int64) 0;
+            int64 round = (int64) 0;
+            while (round < (int64) 3) {
+                sh = sh + GpuHistogram.timeBuild(s, hist, base, bins, cutOff, q, ridx, plan, slotTab,
+                                                 tileSplit, groups, ngroups, begin, m, rows, nf, nbins);
+                gl = gl + GpuHistogram.timeBuild(s, hist, base, bins, cutOff, q, ridx, plan, slotTab,
+                                                 tileSplit, groups, ngroups, begin, m,
+                                                 GpuHistogram.globalBuild(), nf, nbins);
+                round = round + (int64) 1;
+            }
+            if (sh > gl) { return min; }
+            min = m;
+            m = m / (int64) 4;
+        }
+        return min;
+    }
+
+    /** The fastest median, on the host clock around a sync, over three interleaved rounds of the segment's
+     *  build: a tile candidate's rows or {@link #globalBuild}; 0 when none could be timed. */
     static int64 tuneTiles(KernelBuffer<int64> hist, int64 base, KernelBuffer<int32> bins,
                            KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
                            KernelBuffer<int32> ridx, KernelBuffer<int64> plan,
@@ -240,14 +295,14 @@ public final class GpuHistogram {
         int64[] ns = heap int64[nc * rounds];
         boolean[] refused = heap boolean[nc];
         KernelStream s #= KernelStream.current();
-        KernelTimer tm #= KernelTimer.create();
+        s.sync();
         int64 round = (int64) 0;
         while (round < rounds) {
             int64 j = (int64) 0;
             while (j < nc) {
                 int64 i = (j + round) % nc;
                 if (!refused[i]) {
-                    tm.begin(s);
+                    int64 t0 = Clock.nanoTime();
                     if (cands[i] == GpuHistogram.globalBuild()) {
                         GpuHistogram.launchSegment(s, hist, base, bins, cutOff, q, ridx, begin, count,
                                                    nf, nbins);
@@ -256,16 +311,15 @@ public final class GpuHistogram {
                                                         slotTab, tileSplit, groups, ngroups, begin,
                                                         count, cands[i], nf, nbins);
                     }
-                    tm.end(s);
-                    int64 t = tm.elapsedNanos();
-                    if (t < (int64) 0) { refused[i] = true; }
+                    s.sync();
+                    int64 t = Clock.nanoTime() - t0;
+                    if (t <= (int64) 0) { refused[i] = true; }
                     ns[i * rounds + round] = t;
                 }
                 j = j + (int64) 1;
             }
             round = round + (int64) 1;
         }
-        tm.destroy();
         int64 best = (int64) 0;
         int64 bestT = (int64) -1;
         int64 i = (int64) 0;
@@ -466,15 +520,15 @@ public final class GpuHistogram {
         }
     }
 
-    /** Builds the smaller child of each split of a level and derives the larger, with no sync: by
-     *  `tiles` shared tiles when there are feature groups, else by global atomics over `cells`. */
+    /** Builds the smaller child of each split of a level and derives the larger, with no sync: splits of
+     *  at least `minRows` half rows by `tiles` shared tiles, the rest by global atomics over `cells`. */
     static void buildLevel(KernelBuffer<int64> store, KernelBuffer<int32> bins,
                            KernelBuffer<int32> cutOff, KernelBuffer<int64> q,
                            KernelBuffer<int32> ridx, KernelBuffer<int32> tab,
                            KernelBuffer<int64> lefts, KernelBuffer<int64> slotTab,
                            KernelBuffer<int64> plan, KernelBuffer<int64> bases,
                            KernelBuffer<int32> tileSplit, KernelBuffer<int32> groups,
-                           int64 ngroups, int64 tiles, int64 rows,
+                           int64 ngroups, int64 tiles, int64 rows, int64 minRows,
                            int64 splits, int64 cells, int64 nf, int64 nbins) {
         KernelStream s #= KernelStream.current();
         uint32 us = (uint32) splits;
@@ -483,15 +537,15 @@ public final class GpuHistogram {
         uint32 uc = (uint32) cells;
         childSlots.launch(s, grid: [(us + 63) / 64], block: [64])(plan, bases, slotTab, lefts, tab, us);
         zeroLevel.launch(s, grid: [(all + 255) / 256], block: [256])(store, plan, us, words);
-        if (ngroups > (int64) 0) {
-            uint32 ut = (uint32) tiles;
-            if (ut > 0) {
-                levelTiles.launch(s, grid: [us], block: [256])(tileSplit, slotTab, tab, (uint32) rows);
-                histTiles.launch(s, grid: [ut, (uint32) ngroups], block: [256])
-                    (store, bins, cutOff, q, ridx, plan, slotTab, tileSplit, groups, (uint32) 1,
-                     (uint32) 0, (uint32) 0, (uint32) 0, (uint32) rows, (uint32) nf, (uint32) nbins);
-            }
-        } else if (uc > 0) {
+        uint32 ut = (uint32) tiles;
+        if (ngroups > (int64) 0 && ut > 0) {
+            levelTiles.launch(s, grid: [us], block: [256])
+                (tileSplit, slotTab, tab, (uint32) rows, (uint32) minRows);
+            histTiles.launch(s, grid: [ut, (uint32) ngroups], block: [256])
+                (store, bins, cutOff, q, ridx, plan, slotTab, tileSplit, groups, (uint32) 1,
+                 (uint32) 0, (uint32) 0, (uint32) 0, (uint32) rows, (uint32) nf, (uint32) nbins);
+        }
+        if (uc > 0) {
             histLevel.launch(s, grid: [(uc + 63) / 64], block: [64])
                 (store, bins, cutOff, q, ridx, plan, slotTab, us, uc, (uint32) nf, (uint32) nbins);
         }

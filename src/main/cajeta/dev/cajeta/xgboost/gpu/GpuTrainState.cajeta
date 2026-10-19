@@ -52,6 +52,9 @@ public final class GpuTrainState {
     KernelBuffer<int32> groupTab;
     int64 ngroups;
     int64 tileR;
+    int64 minShared;
+    int64 sharedSplitsN;
+    int64 globalSplitsN;
     int64 lvTiles;
     int64[] leafTabH;
     TransferLog log;
@@ -145,6 +148,15 @@ public final class GpuTrainState {
     /** Rows per shared tile, or {@link GpuHistogram#globalBuild}, once chosen; else 0. */
     public int64 tileRows() { return this.tileR; }
 
+    /** The fewest rows a segment or a level's built child needs for the shared build, once chosen. */
+    public int64 minSharedRows() { return this.minShared; }
+
+    /** Level splits built by shared tiles so far in this fit. */
+    public int64 sharedSplits() { return this.sharedSplitsN; }
+
+    /** Level splits built by global atomics so far in this fit. */
+    public int64 globalSplits() { return this.globalSplitsN; }
+
     /** Whether this fit's histograms are built in workgroup-shared tiles, once chosen. */
     public boolean buildsShared() {
         return this.ngroups > (int64) 0 && this.tileR > GpuHistogram.globalBuild();
@@ -161,26 +173,33 @@ public final class GpuTrainState {
     void pickTile() {
         if (this.tileR > (int64) 0) { return; }
         this.tileR = (int64) 1024;
+        this.minShared = (int64) 0;
         if (GpuHistogram.forcedRows > (int64) 0) {
             this.tileR = GpuHistogram.forcedRows;
+            this.forceMin();
             return;
         }
         String name #= this.tileTuneName();
         Optional<int32> hit = Autotune.recall(GpuTrainState.tuneDir, name);
         if (hit.isPresent() && hit.get() > 0) { this.tileR = (int64) hit.get(); }
+        String minName #= name + ".min";
+        Optional<int32> mh = Autotune.recall(GpuTrainState.tuneDir, minName);
+        if (mh.isPresent()) { this.minShared = (int64) mh.get(); }
+        this.forceMin();
+    }
+
+    /** Applies a forced shared threshold over the chosen one. */
+    void forceMin() {
+        if (GpuHistogram.forcedMin >= (int64) 0) { this.minShared = GpuHistogram.forcedMin; }
     }
 
     /** Times the tile candidates and the global build on root `nid`'s segment unless forced or remembered, and keeps the fastest. */
     void tuneTile(int64 nid) {
         if (this.tileR > (int64) 0) { return; }
-        if (GpuHistogram.forcedRows > (int64) 0) {
-            this.tileR = GpuHistogram.forcedRows;
-            return;
-        }
         String name #= this.tileTuneName();
         Optional<int32> hit = Autotune.recall(GpuTrainState.tuneDir, name);
-        if (hit.isPresent() && hit.get() > 0) {
-            this.tileR = (int64) hit.get();
+        if (GpuHistogram.forcedRows > (int64) 0 || (hit.isPresent() && hit.get() > 0)) {
+            this.pickTile();
             return;
         }
         int64 slot = this.slotFor(nid);
@@ -189,25 +208,40 @@ public final class GpuTrainState {
                                             this.groupTab, this.ngroups, (int64) 0, this.n, this.nf,
                                             this.nbins);
         this.tileR = (int64) 1024;
+        this.minShared = (int64) 0;
         if (best > (int64) 0) {
             this.tileR = best;
+            if (best > GpuHistogram.globalBuild()) {
+                this.minShared = GpuHistogram.tuneMinRows(this.store, slot * this.slotWords, this.bins,
+                                                          this.cutOff, this.q, this.ridx, this.plan,
+                                                          this.slotTab, this.tileSplit, this.groupTab,
+                                                          this.ngroups, (int64) 0, this.n, best, this.nf,
+                                                          this.nbins);
+            }
+            String minName #= name + ".min";
+            Autotune.remember(GpuTrainState.tuneDir, minName, (int32) this.minShared);
             Autotune.remember(GpuTrainState.tuneDir, name, (int32) best);
         }
+        this.forceMin();
     }
 
-    /** A run's device state over `n` rows of `bins`; the bin matrix is uploaded here, once. */
+    /** A run's device state over `n` rows of `bins`; the bin matrix is uploaded here, once, from its own buffer at offset 0. */
     public static #GpuTrainState create(Tensor<int32> bins, Tensor<int64> cutPtrs, int64 n) {
         GpuTrainState st = heap GpuTrainState(cutPtrs, n);
         int64 cells = n * st.nf;
-        int32[] binsH = heap int32[cells];
         int32[] hb = bins.hostBuffer();
         int64 ho = bins.hostBase();
-        int64 c = (int64) 0;
-        while (c < cells) {
-            binsH[c] = hb[ho + c];
-            c = c + (int64) 1;
+        if (ho == (int64) 0) {
+            st.bins.upload(hb, cells);
+        } else {
+            int32[] binsH = heap int32[cells];
+            int64 c = (int64) 0;
+            while (c < cells) {
+                binsH[c] = hb[ho + c];
+                c = c + (int64) 1;
+            }
+            st.bins.upload(binsH);
         }
-        st.bins.upload(binsH);
         st.log.upCell();
         return #st;
     }
@@ -402,7 +436,7 @@ public final class GpuTrainState {
         if (this.ngroups > (int64) 0) {
             if (this.segCount[nid] == this.n) { this.tuneTile(nid); } else { this.pickTile(); }
         }
-        if (this.buildsShared()) {
+        if (this.buildsShared() && this.segCount[nid] >= this.minShared) {
             int64 ts = this.slotFor(nid);
             GpuHistogram.buildSegmentTiles(this.store, ts * this.slotWords, this.bins, this.cutOff, this.q,
                                            this.ridx, this.plan, this.slotTab, this.tileSplit,
@@ -563,15 +597,19 @@ public final class GpuTrainState {
         this.tabH[t + (int64) 3] = (int32) s.findex;
         this.tabH[t + (int64) 4] = (int32) (s.splitGidx - cutPtrs.flatGet(s.findex));
         this.tabH[t + (int64) 5] = s.defaultLeft ? (int32) 1 : (int32) 0;
+        int64 half = count / (int64) 2;
         this.slotTabH[j * (int64) 4 + (int64) 2] = this.lvCells;
+        this.slotTabH[j * (int64) 4 + (int64) 3] = this.lvTiles;
         if (this.ngroups > (int64) 0) { this.pickTile(); }
-        if (this.buildsShared()) {
-            this.slotTabH[j * (int64) 4 + (int64) 3] = this.lvTiles;
-            this.lvTiles = this.lvTiles + (count / (int64) 2 + this.tileR - (int64) 1) / this.tileR;
+        if (this.buildsShared() && half >= this.levelMin()) {
+            this.lvTiles = this.lvTiles + (half + this.tileR - (int64) 1) / this.tileR;
+            this.sharedSplitsN = this.sharedSplitsN + (int64) 1;
+        } else {
+            this.lvCells = this.lvCells + half * this.nf;
+            this.globalSplitsN = this.globalSplitsN + (int64) 1;
         }
         this.lvBlocks = this.lvBlocks
             + (count + GpuPartition.segmentBlock() - (int64) 1) / GpuPartition.segmentBlock();
-        this.lvCells = this.lvCells + (count / (int64) 2) * this.nf;
         this.lvParent[j] = nid;
         this.lvLeft[j] = li;
         this.lvRight[j] = ri;
@@ -612,7 +650,7 @@ public final class GpuTrainState {
         GpuHistogram.buildLevel(this.store, this.bins, this.cutOff, this.q, this.ridx, this.levelTab,
                                 this.lefts, this.slotTab, this.plan, this.slotBase,
                                 this.tileSplit, this.groupTab, this.buildsShared() ? this.ngroups : (int64) 0,
-                                this.lvTiles, this.tileR,
+                                this.lvTiles, this.tileR, this.levelMin(),
                                 this.lvCount, this.lvCells, this.nf, this.nbins);
         this.lvBuilt = true;
     }
@@ -848,4 +886,10 @@ public final class GpuTrainState {
     public static int64 processCellUploads() { return TransferLog.processUpCells; }
     /** Row uploads by every state since the process started. */
     public static int64 processRowUploads() { return TransferLog.processUpRows; }
+
+    /** The level threshold the device applies to each split's half segment: at least one row. */
+    int64 levelMin() {
+        if (this.minShared < (int64) 1) { return (int64) 1; }
+        return this.minShared;
+    }
 }

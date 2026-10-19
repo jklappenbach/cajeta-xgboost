@@ -18,6 +18,7 @@ public class GpuSharedHistTest {
     // 10.1.1: the shared build is the CPU histogram for the root and each level, in one group or several.
     @Test
     public void theSharedBuildIsTheCpuHistogramOnEveryFixture() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
         GpuHistogram.forceTileRows((int64) 1024);
         Assert.isTrue(GpuLevelTest.compareLevels("tiny_reg", (int64) 2) >= (int64) 1);
         Assert.isTrue(GpuLevelTest.compareLevels("tiny_reg_missing", (int64) 2) >= (int64) 1);
@@ -31,6 +32,7 @@ public class GpuSharedHistTest {
     // 10.1.2: every tile candidate gives the CPU histogram.
     @Test
     public void everyTileCandidateGivesTheSameHistogram() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
         int64[] cands #= GpuHistogram.tileCandidates();
         int64 i = (int64) 0;
         while (i < (int64) cands.count()) {
@@ -45,6 +47,7 @@ public class GpuSharedHistTest {
     // 10.1.2: the tuned tile is remembered, so a second fit's state does not time again.
     @Test
     public void theTunedTileIsRemembered() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
         GpuHistogram.forceTileRows((int64) 0);
         FixtureLoader f #= FixtureLoader.open("large_reg");
         float64[] g #= f.gradRound((int32) 0);
@@ -80,6 +83,7 @@ public class GpuSharedHistTest {
     // 10.1.2: a forced tile gives the tuned tile's model.
     @Test
     public void aForcedTileGivesTheTunedModel() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
         GpuHistogram.forceTileRows((int64) 0);
         FixtureLoader f #= FixtureLoader.open("large_reg");
         Tensor<float64> yT #= f.y();
@@ -97,6 +101,7 @@ public class GpuSharedHistTest {
     // 10.1.3: a feature with more bins than a group holds falls back to the global build, and matches.
     @Test
     public void anOversizedFeatureFallsBackToTheGlobalBuild() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
         int64 n = (int64) 20000;
         int64 nf = (int64) 2;
         int64 wide = GpuHistogram.groupBins() + (int64) 100;
@@ -135,6 +140,7 @@ public class GpuSharedHistTest {
     // 11.1.1: a fit that chooses the global build is the CPU histogram, and gives the shared fit's model.
     @Test
     public void theGlobalChoiceGivesTheSharedModel() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
         GpuHistogram.forceTileRows(GpuHistogram.globalBuild());
         GpuLevelTest.compareLevels("large_reg", (int64) 8);
         FixtureLoader f #= FixtureLoader.open("large_reg");

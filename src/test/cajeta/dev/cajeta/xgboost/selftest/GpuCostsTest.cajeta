@@ -1,0 +1,58 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.gpu.GpuHistogram;
+import dev.cajeta.xgboost.gpu.GpuTrainState;
+
+/** xgboost-device-training Unit 13: the fit's costs outside the kernels. */
+public class GpuCostsTest {
+
+    public GpuCostsTest() { return; }
+
+    /** The device bins of a fit over the first `n` rows of `bins` equal the tensor's. */
+    static void assertDeviceBins(Tensor<int32> bins, Tensor<int64> cutPtrs, int64 n) {
+        GpuTrainState st #= GpuTrainState.create(bins, cutPtrs, n);
+        int32[] got #= st.deviceBins();
+        int64 nf = bins.shapeAt(1);
+        int64 c = (int64) 0;
+        while (c < n * nf) {
+            Assert.equals((int64) bins.flatGet(c), (int64) got[c]);
+            c = c + (int64) 1;
+        }
+        return;
+    }
+
+    // 13.1.1: the bin matrix reaches the device whole, from a tensor at offset 0 and from a row slice.
+    @Test
+    public void theDeviceBinsAreTheTensorsWithOrWithoutAnOffset() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        FixtureLoader f #= FixtureLoader.open("tiny_reg_missing");
+        int64 n = f.bins().shapeAt(0);
+        GpuCostsTest.assertDeviceBins(f.bins(), f.cutPtrs(), n);
+        Tensor<int32> tail #= f.bins().slice((int32) 0, (int64) 7, n);
+        Assert.isTrue(tail.hostBase() > (int64) 0);
+        GpuCostsTest.assertDeviceBins(tail, f.cutPtrs(), n - (int64) 7);
+        return;
+    }
+
+    // 13.1.2: a level's small children take the global build and its large ones the shared, and both match.
+    @Test
+    public void aLevelSplitsItsChildrenBetweenTheTwoBuilds() {
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        GpuHistogram.forceTileRows((int64) 1024);
+        GpuHistogram.forceMinSharedRows((int64) 1500);
+        GpuLevelTest.compareLevels("large_reg", (int64) 8);
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        GpuHistogram.forceTileRows((int64) 0);
+        Assert.isTrue(GpuLevelTest.lastShared > (int64) 0);
+        Assert.isTrue(GpuLevelTest.lastGlobal > (int64) 0);
+        GpuHistogram.forceTileRows((int64) 1024);
+        GpuHistogram.forceMinSharedRows((int64) 0);
+        GpuLevelTest.compareLevels("large_reg", (int64) 8);
+        GpuHistogram.forceMinSharedRows((int64) -1);
+        GpuHistogram.forceTileRows((int64) 0);
+        Assert.equals((int64) 0, GpuLevelTest.lastGlobal);
+        return;
+    }
+}
