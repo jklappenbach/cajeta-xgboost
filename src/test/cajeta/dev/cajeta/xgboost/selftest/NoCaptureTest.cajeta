@@ -1,0 +1,94 @@
+package dev.cajeta.xgboost.selftest;
+
+import dev.cajeta.unit.Assert;
+import cajeta.math.Tensor;
+import cajeta.math.sfu.SfuMath;
+import dev.cajeta.xgboost.booster.Booster;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.booster.ModelIO;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * xgboost-device-followups Unit 1: a device fit without the SFU captures is the
+ * CPU's no-capture model. The equality tests run under `XGB_NO_CAPTURES=1`.
+ */
+public class NoCaptureTest {
+
+    public NoCaptureTest() { return; }
+
+    /** Trains `fixture` at depth 6 on the CPU and on the device and asserts the same model and margins. */
+    static void compareFit(String fixture, Objective obj, int64 K, int64 rounds) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.shapeAt(0);
+        float64[] label #= ApiTest.labelOf(f, n);
+        float32[] mhCpu = heap float32[rounds * n * K];
+        float32[] mhGpu = heap float32[rounds * n * K];
+        Model cpu #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                  (int64) 6, (int64) 0,
+                                  (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                  (float64) 0.3, (float64) 0.5, obj, K, mhCpu, false);
+        Model gpu #= Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, rounds,
+                                  (int64) 6, (int64) 0,
+                                  (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                                  (float64) 0.3, (float64) 0.5, obj, K, mhGpu, true);
+        GrowDeviceTest.assertSameModel(cpu, gpu, rounds, n);
+        int64 i = (int64) 0;
+        while (i < rounds * n * K) {
+            Assert.equals((int64) Cajeta.f32ToBits(mhGpu[i]), (int64) Cajeta.f32ToBits(mhCpu[i]));
+            i = i + (int64) 1;
+        }
+        return;
+    }
+
+    // 1.1.1
+    @Test
+    public void aDeviceFitWithoutTheCapturesIsTheCpuModel() {
+        if (SfuMath.hasRcpTable() || SfuMath.hasEx2Table()) { return; }
+        NoCaptureTest.compareFit("tiny_reg_missing", Objective.SQUARED_ERROR, (int64) 1, (int64) 3);
+        NoCaptureTest.compareFit("large_reg", Objective.SQUARED_ERROR, (int64) 1, (int64) 3);
+        NoCaptureTest.compareFit("large_binary", Objective.LOGISTIC, (int64) 1, (int64) 3);
+        NoCaptureTest.compareFit("tiny_multi", Objective.SOFTMAX, (int64) 4, (int64) 3);
+        NoCaptureTest.compareFit("large_multi", Objective.SOFTMAX, (int64) 4, (int64) 2);
+        return;
+    }
+
+    /** A one-round depth-4 CPU fit of `fixture`. */
+    static #Model fitOnce(String fixture, Objective obj, int64 K) {
+        FixtureLoader f #= FixtureLoader.open(fixture);
+        Tensor<float64> yT #= f.y();
+        int64 n = yT.shapeAt(0);
+        float64[] label #= ApiTest.labelOf(f, n);
+        float32[] mh = heap float32[n * K];
+        return Booster.train(f.bins(), f.cutPtrs(), f.cutValues(), label, n, (int64) 1,
+                             (int64) 4, (int64) 0,
+                             (float64) 1.0, (float64) 0.0, (float64) 0.0, (float64) 1.0,
+                             (float64) 0.3, (float64) 0.5, obj, K, mh, false);
+    }
+
+    // 1.1.3
+    @Test
+    public void aModelRecordsWhetherItsMathWasCaptured() {
+        Model reg #= NoCaptureTest.fitOnce("tiny_reg", Objective.SQUARED_ERROR, (int64) 1);
+        Model bin #= NoCaptureTest.fitOnce("tiny_binary", Objective.LOGISTIC, (int64) 1);
+        Assert.equals(reg.sfuCaptured, SfuMath.hasRcpTable());
+        Assert.equals(bin.sfuCaptured, SfuMath.hasRcpTable() && SfuMath.hasEx2Table());
+
+        int8[] buf #= ModelIO.serialize(bin);
+        Model back #= ModelIO.deserialize(buf);
+        Assert.equals(back.sfuCaptured, bin.sfuCaptured);
+        bin.sfuCaptured = !bin.sfuCaptured;
+        int8[] flipped #= ModelIO.serialize(bin);
+        Model back2 #= ModelIO.deserialize(flipped);
+        Assert.equals(back2.sfuCaptured, bin.sfuCaptured);
+
+        int64 old = (int64) buf.count() - (int64) 8;
+        int8[] pre = heap int8[old];
+        int64 i = (int64) 0;
+        while (i < old) { pre[i] = buf[i]; i = i + (int64) 1; }
+        Model legacy #= ModelIO.deserialize(pre);
+        Assert.isTrue(legacy.sfuCaptured);
+        Assert.equals(legacy.nodeCount[0], bin.nodeCount[0]);
+        return;
+    }
+}

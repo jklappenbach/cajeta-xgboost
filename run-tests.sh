@@ -180,7 +180,9 @@ export XGBOOST_FIXTURES="$here/tools/fixtures"
 # asset — so CI asserts the capture-dependent parity tests instead of
 # self-skipping. If the fetch fails (offline), SfuMath's correctly-rounded
 # fallback keeps the rest of the suite meaningful.
-source "$here/scripts/fetch-captures.sh" "$here"
+# XGB_NO_CAPTURES=1 runs without the tables, on SfuMath's correctly rounded fallback.
+if [[ -n "${XGB_NO_CAPTURES:-}" ]]; then unset RCP_TABLE EX2_TABLE
+else source "$here/scripts/fetch-captures.sh" "$here"; fi
 # Device expf sweep over [-90, 90] — the ground truth SfuMathExpfTest compares
 # against bit-for-bit. Absent → that comparison self-skips; the plumbing
 # assertions, which need no capture, still run.

@@ -2,7 +2,6 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
-import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.gpu.GpuPartition;
@@ -216,7 +215,6 @@ public class GpuLevelTest {
     // 6.1.2: a depth-6 tree on large_reg syncs at most perLevel * 6 + perTree times.
     @Test
     public void aDepthSixTreeSyncsAFewTimesPerLevel() {
-        if (!SfuMath.hasRcpTable()) { return; }
         FixtureLoader f #= FixtureLoader.open("large_reg");
         Tensor<float64> yT #= f.y();
         int64 n = yT.size();

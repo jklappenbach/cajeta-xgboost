@@ -6,6 +6,7 @@ import dev.cajeta.xgboost.objective.Logistic;
 import dev.cajeta.xgboost.objective.Softmax;
 import dev.cajeta.xgboost.objective.Objective;
 import dev.cajeta.xgboost.tree.TreeBuilder;
+import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.gpu.GpuTrainState;
 
 /**
@@ -223,6 +224,8 @@ public final class Booster {
                              #fSI, #fSC, #fDL, #fLC, #fRC, #fBW, #fLF,
                              #fLCH, #fSH);
         m.numClass = K;
+        m.sfuCaptured = SfuMath.hasRcpTable()
+                     && (objective == Objective.SQUARED_ERROR || SfuMath.hasEx2Table());
         return #m;
     }
 }

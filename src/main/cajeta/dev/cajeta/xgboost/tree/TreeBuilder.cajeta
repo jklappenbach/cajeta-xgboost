@@ -2,7 +2,6 @@ package dev.cajeta.xgboost.tree;
 
 import cajeta.math.Tensor;
 import cajeta.math.npio.Npy;
-import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.gpu.GpuSplitFinder;
 import dev.cajeta.xgboost.gpu.GpuTrainState;
 
@@ -101,9 +100,8 @@ public final class TreeBuilder {
 
     /**
      * The device form over a run's {@link GpuTrainState}, or the CPU form when
-     * `st` is null. With the SFU capture the tree grows a level at a time
-     * ({@link #growLevels}); without it, or under {@link #usePerNodePath},
-     * node by node on the state's row segments.
+     * `st` is null. The device form grows a level at a time ({@link #growLevels}),
+     * or node by node on the state's row segments under {@link #usePerNodePath}.
      */
     public static int64 grow(Tensor<int32> bins, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
                              float64[] grad, float64[] hess, int64 n,
@@ -114,7 +112,7 @@ public final class TreeBuilder {
                              int64[] lc, int64[] rc, float32[] bw, boolean[] leaf,
                              float32[] lossChg, float64[] sumHess,
                              int64[] leafOf, GpuTrainState st) {
-        if (st != null && SfuMath.hasRcpTable() && !TreeBuilder.perNode) {
+        if (st != null && !TreeBuilder.perNode) {
             return TreeBuilder.growLevels(st, bins, cutPtrs, cutValues, grad, hess, n, maxDepth,
                                           maxLeaves, lambda, alpha, gamma, minChildWeight, eta,
                                           si, sc, dl, lc, rc, bw, leaf, lossChg, sumHess, leafOf);
@@ -180,7 +178,7 @@ public final class TreeBuilder {
             int64 totG = hist.totalG;
             int64 totH = hist.totalH;
             Split s;
-            if (st != null && SfuMath.hasRcpTable()) {
+            if (st != null) {
                 s #= GpuSplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);
             } else {
                 s #= SplitFinder.findBest(hist, cutPtrs, cutValues, q, lambda, alpha, minChildWeight);

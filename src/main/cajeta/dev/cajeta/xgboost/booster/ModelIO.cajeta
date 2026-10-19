@@ -3,7 +3,8 @@ package dev.cajeta.xgboost.booster;
 /**
  * Model (de)serialization (spec §5.2). A {@link Model} is a header (`rounds`,
  * `cap`, `baseMargin`, `deterministic`) plus `nodeCount[rounds]` and nine flat
- * `[rounds*cap]` node arrays; this writes them as a self-describing little-endian
+ * `[rounds*cap]` node arrays, then a trailer word, `sfuCaptured` (a buffer without
+ * it predates the field and reads as captured); this writes them as a little-endian
  * buffer (one 8-byte word per scalar — float32 fields via their bit pattern) and
  * reads them back into an identical Model. Round-trip is bit-exact by construction
  * — including the `deterministic` training-mode flag (§1.7.3) — so a loaded model
@@ -19,7 +20,7 @@ public final class ModelIO {
         int64 R = m.rounds;
         int64 C = m.cap;
         int64 A = R * C;
-        int8[] buf = heap int8[ModelIO.words(R, C) * (int64) 8];
+        int8[] buf = heap int8[(ModelIO.words(R, C) + (int64) 1) * (int64) 8];
         Cajeta.storeU64(buf, (int64) 0, R);
         Cajeta.storeU64(buf, (int64) 8, C);
         Cajeta.storeU64(buf, (int64) 16, (int64) Cajeta.f32ToBits(m.baseMargin));
@@ -46,6 +47,7 @@ public final class ModelIO {
         while (i < A) { Cajeta.storeU64(buf, off, (int64) Cajeta.f32ToBits(m.lossChanges[i])); off = off + (int64) 8; i = i + (int64) 1; }
         i = (int64) 0;
         while (i < A) { Cajeta.storeU64(buf, off, Cajeta.f64ToBits(m.sumHessian[i])); off = off + (int64) 8; i = i + (int64) 1; }
+        Cajeta.storeU64(buf, off, m.sfuCaptured ? (int64) 1 : (int64) 0);
         return #buf;
     }
 
@@ -90,6 +92,9 @@ public final class ModelIO {
         Model m = heap Model(R, C, base, #nodeCount, #si, #sc, #dl, #lc, #rc, #bw, #leaf, #lch, #sh);
         m.deterministic = deterministic;
         m.numClass = numClass;
+        if ((int64) buf.count() >= (ModelIO.words(R, C) + (int64) 1) * (int64) 8) {
+            m.sfuCaptured = Cajeta.loadU64(buf, off) == (int64) 1;
+        }
         return #m;
     }
 }

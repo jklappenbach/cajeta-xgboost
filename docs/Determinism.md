@@ -51,6 +51,9 @@ objectives cannot observe.)
   reproducibility by accident.
 - `Model.deterministic` records the mode — reproducibility is auditable
   after the fact.
+- `Model.sfuCaptured` records whether every SFU result came from the
+  captures; false means the correctly rounded fallback stood in, on the CPU
+  and the device alike.
 - `ModelIO` round-trips are bit-exact.
 
 ## Current parity status (suite: 50 passed / 0 failed)

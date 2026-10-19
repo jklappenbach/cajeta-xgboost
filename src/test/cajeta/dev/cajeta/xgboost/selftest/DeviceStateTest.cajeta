@@ -2,7 +2,6 @@ package dev.cajeta.xgboost.selftest;
 
 import dev.cajeta.unit.Assert;
 import cajeta.math.Tensor;
-import cajeta.math.sfu.SfuMath;
 import dev.cajeta.xgboost.booster.Booster;
 import dev.cajeta.xgboost.booster.Model;
 import dev.cajeta.xgboost.gpu.GpuTrainState;
@@ -12,23 +11,6 @@ import dev.cajeta.xgboost.objective.Objective;
 public class DeviceStateTest {
 
     public DeviceStateTest() { return; }
-
-    /** The splits across every tree of `m`. */
-    static int64 splitsOf(Model m) {
-        int64 s = (int64) 0;
-        int64 t = (int64) 0;
-        while (t < (int64) m.nodeCount.count()) {
-            s = s + (m.nodeCount[t] - (int64) 1) / (int64) 2;
-            t = t + (int64) 1;
-        }
-        return s;
-    }
-
-    /** The row transfers per split each way: none a level at a time, one per split without the SFU capture. */
-    static int64 perSplitRows(Model m) {
-        if (SfuMath.hasRcpTable()) { return (int64) 0; }
-        return DeviceStateTest.splitsOf(m);
-    }
 
     /** A device fit over the lent state `st`, depth 4, eta 0.3. */
     static #Model fitOn(GpuTrainState st, FixtureLoader f, Objective obj, int64 K, int64 rounds) {
@@ -50,14 +32,13 @@ public class DeviceStateTest {
         GpuTrainState st #= GpuTrainState.create(f.bins(), f.cutPtrs(), n);
         Model m #= DeviceStateTest.fitOn(st, f, obj, K, rounds);
         int64 trees = rounds * K;
-        int64 splits = DeviceStateTest.perSplitRows(m);
         Assert.equals(st.trees(), trees);
         Assert.equals(st.cellUploads(), (int64) 1);
         Assert.equals(st.cellDownloads(), (int64) 0);
         // Labels and base margins once.
-        Assert.equals(st.rowUploads(), (int64) 2 + splits);
+        Assert.equals(st.rowUploads(), (int64) 2);
         // The margin history once per round.
-        Assert.equals(st.rowDownloads(), rounds + splits);
+        Assert.equals(st.rowDownloads(), rounds);
         Assert.isTrue(st.smallUploads() >= (int64) 1);
         Assert.isTrue(st.syncs() >= trees);
         Assert.isTrue(st.maxTreeSyncs() >= (int64) 1);

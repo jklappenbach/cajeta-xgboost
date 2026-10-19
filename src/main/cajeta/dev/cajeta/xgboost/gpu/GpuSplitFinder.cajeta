@@ -30,16 +30,36 @@ import dev.cajeta.xgboost.tree.Split;
  * **In-kernel `__fdividef`.** Gain scoring replicates {@link
  * SfuMath#fdividef} inside the kernel — the probed SFU reciprocal table
  * rides along as a device buffer (`rcpTab`), so every backend computes the
- * same `a * rcp(b)` the CUDA silicon does. The table is REQUIRED here: the
- * host wrapper throws without it (callers gate on `SfuMath.hasRcpTable()`
- * and use the CPU finder), because a per-backend native division would
- * un-pin exactly the knife-edge splits the table exists to pin.
+ * same `a * rcp(b)` the CUDA silicon does. Without the capture the device
+ * table holds the correctly rounded reciprocals `SfuMath.rcpMantissa` falls
+ * back to, so the device still computes the CPU's bits.
  *
  * The int64 prefix scans are exact integer arithmetic; the float64
  * dequantize multiplies and float32 narrowings are IEEE-identical on every
  * backend (verified by the U12 op-inventory probe).
  */
 public final class GpuSplitFinder {
+
+    private static KernelBuffer<int32> dRcp;
+    private static boolean dRcpBuilt;
+
+    /** `SfuMath`'s reciprocal table on the device, captured or its fallback, built once per process. */
+    static KernelBuffer<int32> rcpTable() {
+        if (!GpuSplitFinder.dRcpBuilt) {
+            GpuSplitFinder.dRcpBuilt = true;
+            int64 n = (int64) 8388608;
+            int32[] host = heap int32[n];
+            int64 i = (int64) 0;
+            while (i < n) {
+                host[i] = Cajeta.f32ToBits(SfuMath.rcpMantissa((int32) i));
+                i = i + (int64) 1;
+            }
+            KernelBuffer<int32> d = heap KernelBuffer<int32>(n);
+            d.upload(host);
+            GpuSplitFinder.dRcp #= d;
+        }
+        return GpuSplitFinder.dRcp;
+    }
 
     /** One lane's split gain at a boundary whose left child holds (lG, lH). */
     @Device
@@ -401,7 +421,7 @@ public final class GpuSplitFinder {
                               KernelBuffer<int32> cutPtr, GradientQuantiser q,
                               float64 lambda, float64 alpha, float64 minChildWeight,
                               int64 nf, int64 nodes, int64 nbins, TransferLog log) {
-        KernelBuffer<int32> rcpTab = SfuMath.deviceRcpTable();
+        KernelBuffer<int32> rcpTab = GpuSplitFinder.rcpTable();
         KernelStream s #= KernelStream.current();
         uint32 un = (uint32) nodes;
         levelScan.launch(s, grid: [(uint32) (nodes * nf)], block: [32])
@@ -451,9 +471,6 @@ public final class GpuSplitFinder {
      * Stage B — the cross-feature Update (strict `>` and the
      * min_child_weight gate; ties → lowest feature) — replays the CPU code
      * over the per-feature records here on the host.
-     *
-     * Requires the probed SFU table (`SfuMath.hasRcpTable()`); throws
-     * without it — dispatch to the CPU finder instead.
      */
     public static #Split findBest(Histogram hist, Tensor<int64> cutPtrs,
                                   Tensor<float64> cutValues,
@@ -468,12 +485,7 @@ public final class GpuSplitFinder {
     static #Split findBest(Histogram hist, Tensor<int64> cutPtrs, Tensor<float64> cutValues,
                            GradientQuantiser q, float64 lambda, float64 alpha,
                            float64 minChildWeight, TransferLog log) {
-        KernelBuffer<int32> rcpTab = SfuMath.deviceRcpTable();
-        if (rcpTab == null) {
-            throw heap RecoverableException("GpuSplitFinder.findBest: the SFU "
-                + "reciprocal capture (RCP_TABLE) is required for bit-exact "
-                + "gain scoring — use SplitFinder.findBest without it");
-        }
+        KernelBuffer<int32> rcpTab = GpuSplitFinder.rcpTable();
         int64 nf = hist.nf;
         int64 nbins = hist.nbins;
 

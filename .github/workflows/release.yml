@@ -97,6 +97,13 @@ jobs:
         timeout-minutes: 30
         run: ./run-tests.sh
 
+      - name: Run the test suite without the SFU captures
+        # The correctly rounded fallback an installed library runs on.
+        timeout-minutes: 30
+        env:
+          XGB_NO_CAPTURES: "1"
+        run: ./run-tests.sh
+
       - name: Run the tour (self-checking) + the tour coverage gate
         # The tour asserts every claim it prints and exits non-zero when one
         # stops being true; the gate requires every public type to be
