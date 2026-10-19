@@ -127,7 +127,6 @@ public final class Booster {
         float32 base = Booster.baseMarginOf(objective, baseScore);
         // The device side of the run: the bin matrix goes up once, here.
         GpuTrainState st = null;
-        boolean onDevice = device || prepared != null;
         if (prepared != null) { st #= prepared; }
         else if (device) { st #= GpuTrainState.create(bins, cutPtrs, n); }
         if (st != null) { st.beginFit(label, base, K); }
@@ -178,7 +177,7 @@ public final class Booster {
                 int64 nc = TreeBuilder.grow(bins, cutPtrs, cutValues, gradK, hessK, n,
                                             maxDepth, maxLeaves, lambda, alpha, gamma, minChildWeight,
                                             eta, si, sc, dl, lc, rc, bw, lf, lch, shs, leafOf,
-                                            onDevice, st);
+                                            st);
                 // Tree index is round-major: r*K + g, so class g's trees are
                 // every K-th tree — XGBoost's own layout.
                 int64 t = r * K + g;
