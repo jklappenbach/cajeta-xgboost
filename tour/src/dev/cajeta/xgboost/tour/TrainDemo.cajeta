@@ -1,6 +1,7 @@
 package dev.cajeta.xgboost.tour;
 
 import cajeta.math.Tensor;
+import dev.cajeta.xgboost.api.FitPhases;
 import dev.cajeta.xgboost.api.GBDT;
 import dev.cajeta.xgboost.api.Params;
 import dev.cajeta.xgboost.booster.Model;
@@ -9,8 +10,8 @@ import dev.cajeta.xgboost.booster.Model;
 //
 // `GBDT.fit` runs the whole pipeline PrepDemo walked by hand — sketch →
 // cuts → bins — and then the boosting loop over an int64 fixed-point
-// histogram. There is no hidden state, no RNG, and no clock anywhere in
-// it, which buys the property this demo actually checks: two fits of the
+// histogram. There is no hidden state, no RNG, and no clock in anything
+// the model depends on, which buys the property this demo actually checks: two fits of the
 // same data produce BIT-IDENTICAL predictions, not merely close ones.
 //
 // The Model is transparent: flat arrays with a per-tree stride, walkable
@@ -46,6 +47,14 @@ public class TrainDemo extends DemoClass {
         Model m2 #= TrainDemo.fitted(x, y);
         this.check(m1.rounds == (int64) 8, "one tree per boosting round");
         this.check(m1.deterministic, "the model records the mode it was trained in");
+
+        // Where the last fit spent its time, on the host clock.
+        FitPhases ph = GBDT.lastPhases();
+        System.stdout.println("   last fit: " + ph.totalNs / (int64) 1000 + " us (sketch "
+            + ph.sketchNs / (int64) 1000 + ", bin " + ph.binNs / (int64) 1000 + " on the "
+            + ph.binner + ", boost " + ph.boostNs / (int64) 1000 + ")");
+        this.check(ph.binner.equals("host") && ph.totalNs >= ph.sketchNs + ph.binNs + ph.boostNs,
+            "GBDT.lastPhases() splits the fit into its sketch, binning and boost");
 
         float32[] p1 #= GBDT.predict(m1, x, n, nf);
         float32[] p2 #= GBDT.predict(m2, x, n, nf);
