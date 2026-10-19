@@ -2,6 +2,7 @@ package dev.cajeta.xgboost.selftest;
 
 import cajeta.math.Tensor;
 import cajeta.time.Clock;
+import dev.cajeta.xgboost.gpu.GpuBinner;
 import dev.cajeta.xgboost.gpu.GpuTrainState;
 import dev.cajeta.xgboost.sketch.Binner;
 import dev.cajeta.xgboost.sketch.Sketch;
@@ -46,6 +47,7 @@ public class PrepTiming {
         int64[] bn = heap int64[reps];
         int64[] s1 = heap int64[reps];
         int64[] dv = heap int64[reps];
+        int64[] nw = heap int64[reps];
         int64 r = (int64) 0;
         while (r < reps) {
             int64[] cutPtrsA = heap int64[nf + (int64) 1];
@@ -69,6 +71,9 @@ public class PrepTiming {
             int64 t1 = Clock.nanoTime();
             int32[] bins #= Binner.bin(x, cutPtrs, cutValues, n, nf);
             bn[r] = Clock.nanoTime() - t1;
+            int64 t3 = Clock.nanoTime();
+            int32[] narrowed #= GpuBinner.valueBits(x, n, nf);
+            nw[r] = Clock.nanoTime() - t3;
             int64 t2 = Clock.nanoTime();
             GpuTrainState st #= GpuTrainState.fromValues(x, cutPtrs, cuts, n);
             dv[r] = Clock.nanoTime() - t2;
@@ -79,7 +84,8 @@ public class PrepTiming {
             + FeatureScanTiming.median(s1, reps) / (int64) 1000000 + " ms, "
             + FeatureScanTiming.median(s1, reps) / (nf * (int64) 1000) + " us a column), bin "
             + FeatureScanTiming.median(bn, reps) / (int64) 1000000 + " ms, device bin "
-            + FeatureScanTiming.median(dv, reps) / (int64) 1000000 + " ms, median of " + reps);
+            + FeatureScanTiming.median(dv, reps) / (int64) 1000000 + " ms (narrowing "
+            + FeatureScanTiming.median(nw, reps) / (int64) 1000000 + " ms of it), median of " + reps);
         return;
     }
 
