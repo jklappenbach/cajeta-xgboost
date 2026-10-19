@@ -60,7 +60,9 @@ cajeta_artifact_path() {
 UNIT_REPO="${UNIT_REPO:-$here/../cajeta-unit}"
 
 out="$(mktemp -d)"
-trap 'rm -rf "$out"' EXIT
+# A fresh per-run tune dir on the checkout's drive; v0.43.1 cannot mkdirs on another Windows drive.
+tune_dir="$here/build/tune-$(basename "$out")"
+trap 'rm -rf "$out" "$tune_dir"' EXIT
 
 # cajeta-unit resolution (the cajeta-logging pattern), in order:
 #   1. $UNIT_CJA        — explicit archive path, used verbatim
@@ -175,7 +177,7 @@ echo ">> building + running the test binary"
 # Parity tests load golden fixtures from tools/fixtures via this env var.
 export XGBOOST_FIXTURES="$here/tools/fixtures"
 # Tuned tiles persist under the build, not the user's cache.
-export XGB_TUNE_DIR="${XGB_TUNE_DIR:-$(classpath "$out/tune")}"
+export XGB_TUNE_DIR="${XGB_TUNE_DIR:-$(classpath "$tune_dir")}"
 # Probed SFU capture tables (RCP for __fdividef gain scoring, EX2 for device
 # expf in Logistic/Softmax). Gitignored (32 MB each); when the local capture
 # is absent, fetch the sha256-pinned copy published as a v0.3.0 release
