@@ -48,6 +48,28 @@ public class GpuBinnerTest {
         return;
     }
 
+    // xgboost-device-followups 4.1.2: a 1M-row generated set bins the same on the device as on the host.
+    @Test
+    public void aMillionRowSetBinsTheSameOnTheDevice() {
+        int64 n = (int64) 1000000;
+        int64 nf = (int64) 8;
+        Tensor<float64> x #= PrepTiming.generated(n, nf);
+        int64[] cutPtrsA = heap int64[nf + (int64) 1];
+        float32[] cuts #= Sketch.cuts(x, n, nf, (int64) 256, cutPtrsA);
+        int64 total = cutPtrsA[nf];
+        float64[] cv = heap float64[total];
+        int64 c = (int64) 0;
+        while (c < total) { cv[c] = (float64) cuts[c]; c = c + (int64) 1; }
+        int64[] cvShape = heap int64[1];
+        cvShape[0] = total;
+        Tensor<float64> cutValues #= Tensor.of<float64>(cv, cvShape);
+        int64[] cpShape = heap int64[1];
+        cpShape[0] = nf + (int64) 1;
+        Tensor<int64> cutPtrs #= Tensor.of<int64>(cutPtrsA, cpShape);
+        GpuBinnerTest.assertDeviceBins("generated 1M", x, cutPtrs, cutValues);
+        return;
+    }
+
     @Test
     public void deviceBinsEqualTheHostBinnerOnTheFixtures() {
         GpuBinnerTest.checkFixture("tiny_reg");
