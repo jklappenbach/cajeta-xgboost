@@ -34,7 +34,6 @@ STAGES = [
     ('GpuSplitFinder.cajeta', 'Split finding'),
 ]
 ROLES = os.path.join(HERE, 'roles.tsv')   # the role of a kernel that carries no doc comment
-ROLE_MAX = 220          # a first sentence longer than this is cut to it
 
 
 def clean_doc(lines):
@@ -75,8 +74,8 @@ def doc_before(lines, i):
 
 def first_sentence(text):
     m = re.match(r'(.*?[.!?])(?=\s|$)', text)
-    s = m.group(1) if m else text
-    return s[:ROLE_MAX]
+    # whole, however long: the role has a full-width row of its own
+    return m.group(1) if m else text
 
 
 def read_roles(path):

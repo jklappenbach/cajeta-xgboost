@@ -94,5 +94,12 @@ class CatalogTest(unittest.TestCase):
                 self.assertRegex(href, r'^https://github\.com/[^/]+/cajeta-xgboost/blob/main/src/main/cajeta/dev/cajeta/xgboost/gpu/\w+\.cajeta#L\d+$')
 
 
+class DocTest(unittest.TestCase):
+    def test_first_sentence_is_whole_however_long(self):
+        self.assertEqual(gen.first_sentence('One. Two.'), 'One.')
+        long = 'x' * 400 + '.'
+        self.assertEqual(gen.first_sentence(long + ' More.'), long)
+
+
 if __name__ == '__main__':
     unittest.main()
