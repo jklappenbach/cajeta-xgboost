@@ -31,7 +31,8 @@ config, the upstream model and the reference results once, from seed
 (`--competitors`: `competitors/python/xgb_bench.py` → `python.csv`) and
 **merge** (`results.csv`, one schema-v2 header; competitor versions, load
 average, GPU state and the data seed appended to `env.csv`), into
-`results/<machine>/<run-id>/`.
+`results/<machine>/<run-id>/` (gitignored; the publish step copies non-smoke
+runs into the compiler repo, spec §9.4).
 
 It exports the SFU captures the library's `run-tests.sh` exports
 (`RCP_TABLE=../tools/fdividef/rcp_mantissa.npy`,
@@ -84,8 +85,8 @@ two predictors on one forest, not two trainers.
 
 ## Measured (Phoenix, 2026-10-25, smoke)
 
-`results/phoenix/20261025T1915Z-0.46.3/` is the smoke run (rows tagged
-`smoke`, never published): `test/bench_smoke.sh` PASS in 46 s — data 6 s,
+The smoke run (run id `20261025T1915Z-0.46.3`; `results/` is gitignored here,
+because a smoke run is never committed, spec §1.5.1 and §9.3): `test/bench_smoke.sh` PASS in 46 s — data 6 s,
 Cajeta rows 17 s, upstream rows 20 s — at load average ~20 from other
 sessions, so not numbers to quote. Checks: Cajeta's training logloss 0.272769
 against upstream `hist`'s 0.273769 (0.37% apart, tolerance 1%); predict

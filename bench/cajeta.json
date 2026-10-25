@@ -30,7 +30,7 @@
         // it brings dev.cajeta.ml. A version resolves; a `{ "path": ".." }`
         // dependency parses but resolves nothing today.
         "dependencies": {
-            "dev.cajeta.bench":   "0.1.0",
+            "dev.cajeta.bench": "0.1.1",
             "dev.cajeta.xgboost": "0.7.0"
         },
 

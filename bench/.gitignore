@@ -3,3 +3,4 @@ data/
 .cajeta/
 competitors/python/__pycache__/
 deps/
+results/

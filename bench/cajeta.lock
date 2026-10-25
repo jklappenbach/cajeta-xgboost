@@ -4,7 +4,7 @@
     "version": "0.46.3"
   },
   "lockfile-version": 1,
-  "manifest-checksum": "sha256:e334380af75e45adb1880b4d026e9dab6a5fe88f9400a0d513c442795645b538",
+  "manifest-checksum": "sha256:cdf6ec66faa1e41e39e41fae478914f9a27c7b4d62e91f7bfc9fc608eac89b4c",
   "melts": [],
   "overrides": [],
   "packages": [
@@ -12,15 +12,15 @@
       "checksum": "sha256:7a85cde5557b261cfb0937d69fd48c7610e95c495bac9e75296feab53d7fe672",
       "name": "dev.cajeta.xgboost",
       "provided-by": "explicit",
-      "resolved-from": "central",
+      "resolved-from": "olla",
       "version": "0.7.0"
     },
     {
-      "checksum": "sha256:de70003b1f6788c861456f262e307ad94d4e9b480395bb03d5859c9f0c5ee006",
+      "checksum": "sha256:e862a77301d490e2a34332cbd209c9891618a291b184ebd1ac860a3c38692226",
       "name": "dev.cajeta.bench",
       "provided-by": "explicit",
       "resolved-from": "olla",
-      "version": "0.1.0"
+      "version": "0.1.1"
     },
     {
       "checksum": "sha256:7b6d5e91a871bb82b5e50a6198d40dabce8c52387bfa823604f83a8866abebba",
@@ -42,5 +42,5 @@
     "target": "",
     "workspace.root": ""
   },
-  "resolved-at": "2026-10-25T19:09:10Z"
+  "resolved-at": "2026-10-25T19:22:30Z"
 }
