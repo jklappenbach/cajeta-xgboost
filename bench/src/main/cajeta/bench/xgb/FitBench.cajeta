@@ -42,8 +42,12 @@ public class FitBench extends XgbBenchmark {
         return this.gpu ? "xgb-gpu-fit" : "xgb-hist-fit";
     }
 
-    public String backend() {
-        if (!this.gpu) {
+    public String unit() {
+        return "rows/s";
+    }
+
+    public String backendFor(String v) {
+        if (!v.equals("device")) {
             return "cpu";
         }
         String be = System.env.get("CAJETA_XPU_BACKEND");
@@ -72,6 +76,7 @@ public class FitBench extends XgbBenchmark {
     }
 
     public void prepare(String v) {
+        this.begin(v);
         this.x #= Data.f64("xgb/X.npy");
         Tensor<float64> y #= Data.f64("xgb/y.npy");
         this.n = this.x.shapeAt(0);

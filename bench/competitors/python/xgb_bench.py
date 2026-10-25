@@ -69,7 +69,7 @@ def run(name, d):
         note = (f"QuantileDMatrix + train, {'gpu_hist' if device == 'cuda' else 'hist'} on "
                 f"{device}; train logloss {got:.8g} vs upstream hist {ref:.8g}, relative |d| "
                 f"{rel:.3g} <= {TOL['logloss']:g}; nthread default ({os.cpu_count()} cpus)")
-        return bc.measured_row(samples, w, input_size=x.shape[0], check_ok=rel <= TOL["logloss"],
+        return bc.measured_row(samples, w, input_size=x.shape[0], unit="rows/s", check_ok=rel <= TOL["logloss"],
                                note=note, backend="cuda" if device == "cuda" else "cpu",
                                platform=f"xgboost {xgb.__version__} "
                                         f"{'gpu_hist' if device == 'cuda' else 'hist'}",

@@ -51,6 +51,7 @@ public class PredictBench extends XgbBenchmark {
     }
 
     public void prepare(String v) {
+        this.begin(v);
         this.x #= Data.f64("xgb/X.npy");
         this.n = this.x.shapeAt(0);
         this.nf = this.x.shapeAt(1);

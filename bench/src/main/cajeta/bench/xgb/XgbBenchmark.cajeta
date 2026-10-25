@@ -4,21 +4,20 @@ import dev.cajeta.bench.Benchmark;
 
 /**
  * What every dev.cajeta.xgboost row shares: area `ml` (the pages live under
- * bench/ml/, spec §12.8, so the ids are ml/xgb-*), the platform, and the
- * per-variant state the harness reads back after measuring.
+ * bench/ml/, spec §12.8, so the ids are ml/xgb-*), the library and platform,
+ * and the per-variant state a measured variant leaves for the harness to
+ * read back. Whether a variant runs, and why not, are functions of the
+ * variant (supportsVariant, skipReasonFor); nothing is stashed between
+ * harness calls. Every subclass's prepare(v) starts with begin(v).
  */
 public class XgbBenchmark extends Benchmark {
 
-    public String cur;
-    public String why;
     public String note;
     public String ds;
     public String mdl;
     public int64 nIn;
 
     public XgbBenchmark() {
-        this.cur = "";
-        this.why = "variant not supported by this benchmark";
         this.note = "";
         this.ds = "";
         this.mdl = "";
@@ -27,6 +26,14 @@ public class XgbBenchmark extends Benchmark {
 
     public String area() {
         return "ml";
+    }
+
+    public String library() {
+        return "dev.cajeta.xgboost";
+    }
+
+    public String libraryVersion() {
+        return "0.7.0";
     }
 
     public String platform() {
@@ -49,23 +56,37 @@ public class XgbBenchmark extends Benchmark {
         return this.nIn;
     }
 
-    public String skipReason() {
-        return this.why;
+    // The start of a measured variant: the per-variant state back to empty.
+    public void begin(String v) {
+        this.note = "";
+        this.ds = "";
+        this.mdl = "";
+        this.nIn = -1;
     }
 
-    public boolean supportsVariant(String v) {
-        this.cur = "" + v;
-        this.note = "";
+    // Why `v` cannot run here, or "" when it can.
+    public #String whyNot(String v) {
         if (v.equals("device")) {
             if (Data.noGpu()) {
-                this.why = "GPU held by another session (CAJETA_BENCH_NO_GPU=1)";
-                return false;
+                return "GPU held by another session (CAJETA_BENCH_NO_GPU=1)";
             }
         }
         if (!Data.has("xgb/X.npy")) {
-            this.why = "dataset xgb/X.npy not generated (run bench.sh, which runs gen_data.py)";
-            return false;
+            return "dataset xgb/X.npy not generated (run bench.sh, which runs gen_data.py)";
         }
-        return true;
+        return "";
+    }
+
+    public boolean supportsVariant(String v) {
+        String why #= this.whyNot(v);
+        return why.isEmpty();
+    }
+
+    // The skipped row is made right after this call: it carries no state of
+    // the variant measured before it.
+    public String skipReasonFor(String v) {
+        this.begin(v);
+        String why #= this.whyNot(v);
+        return "" + why;
     }
 }

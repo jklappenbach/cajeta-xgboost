@@ -138,9 +138,11 @@ def row(**kw):
 
 def measured_row(samples, warmup, input_size=-1, unit="", check_ok=True, note="", **kw):
     mn, md, me, p95 = stats(samples)
+    # Harness.fillThroughput: input_size / median seconds, three decimals,
+    # whenever an input size is declared; unit() only labels it.
     thr = ""
-    if unit and input_size > 0 and md > 0:
-        thr = f"{input_size / (md / 1e9):.6g}"
+    if input_size >= 0 and md > 0:
+        thr = f"{input_size * 1e9 / md:.3f}"
     return row(warmup=warmup, trials=len(samples), min_ns=mn, median_ns=md, mean_ns=me,
                p95_ns=p95, input_size=input_size, throughput=thr, throughput_unit=unit,
                peak_rss_kb=peak_rss_kb(), status="ok" if check_ok else "invalid",
