@@ -100,12 +100,21 @@ the `deterministic` audit bit survives.
 
 ## Objectives
 
-`reg:squarederror` is the public `fit` surface today. The
-`binary:logistic` and `multi:softmax` objective kernels
-(`objective/Logistic`, `objective/Softmax`) implement the reference
-arithmetic — including the device-transcendental model for `expf` (see
-[Determinism.md](Determinism.md)) — and are exercised by the parity suite;
-their public `fit` wiring follows the remaining parity units.
+`Params.objective` selects `Objective.SQUARED_ERROR`, `Objective.LOGISTIC`
+or `Objective.SOFTMAX` (with `numClass`); `GBDT.fit` dispatches to the
+matching objective on the CPU builder and to the matching gradient kernel on
+the device. The device gradients reproduce upstream's bits through the
+device-transcendental model for `expf` (see [Determinism.md](Determinism.md)).
+
+## Kernels
+
+The 33 device kernels, the training stage each serves, how the work is cut
+across lanes and workgroups, why the results are the same bits on every
+backend, and the one adaptation the library measures (the histogram tile,
+remembered per device and build): the website's
+[Gradient boosting on the device](https://cajeta.dev/kernels/xgboost/) and
+the complete [catalog](https://cajeta.dev/kernels/catalog-xgboost/). The
+sources are `src/main/cajeta/dev/cajeta/xgboost/gpu`.
 
 ## `XGBRegressor` — the ecosystem estimator protocol
 
