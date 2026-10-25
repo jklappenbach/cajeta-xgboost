@@ -1,0 +1,21 @@
+package bench.xgb;
+
+import cajeta.collection.ArrayList;
+import dev.cajeta.bench.Benchmark;
+import dev.cajeta.bench.BenchMain;
+
+/**
+ * The dev.cajeta.xgboost benchmark entry: one Benchmark per id on the
+ * compiler repo's bench/ml/XGBoost.md. Formerly ~/code/ml/xgbbench
+ * (Bench.cajeta's GBDT.fit timing is xgb-hist-fit / xgb-gpu-fit; predict is
+ * new). `--list`, `--run`, `--area`, `--bench`, `--out` are dev.cajeta.bench's.
+ */
+public final class XgbBench {
+    public static int32 main(String[] args) {
+        ArrayList<Benchmark> b = heap ArrayList<Benchmark>();
+        b.add(heap FitBench(false));
+        b.add(heap FitBench(true));
+        b.add(heap PredictBench());
+        return BenchMain.run(args, b);
+    }
+}

@@ -1,0 +1,71 @@
+package bench.xgb;
+
+import dev.cajeta.bench.Benchmark;
+
+/**
+ * What every dev.cajeta.xgboost row shares: area `ml` (the pages live under
+ * bench/ml/, spec §12.8, so the ids are ml/xgb-*), the platform, and the
+ * per-variant state the harness reads back after measuring.
+ */
+public class XgbBenchmark extends Benchmark {
+
+    public String cur;
+    public String why;
+    public String note;
+    public String ds;
+    public String mdl;
+    public int64 nIn;
+
+    public XgbBenchmark() {
+        this.cur = "";
+        this.why = "variant not supported by this benchmark";
+        this.note = "";
+        this.ds = "";
+        this.mdl = "";
+        this.nIn = -1;
+    }
+
+    public String area() {
+        return "ml";
+    }
+
+    public String platform() {
+        return "dev.cajeta.xgboost 0.7.0";
+    }
+
+    public String competitorNote() {
+        return this.note;
+    }
+
+    public String datasetInfo() {
+        return this.ds;
+    }
+
+    public String model() {
+        return this.mdl;
+    }
+
+    public int64 inputSize() {
+        return this.nIn;
+    }
+
+    public String skipReason() {
+        return this.why;
+    }
+
+    public boolean supportsVariant(String v) {
+        this.cur = "" + v;
+        this.note = "";
+        if (v.equals("device")) {
+            if (Data.noGpu()) {
+                this.why = "GPU held by another session (CAJETA_BENCH_NO_GPU=1)";
+                return false;
+            }
+        }
+        if (!Data.has("xgb/X.npy")) {
+            this.why = "dataset xgb/X.npy not generated (run bench.sh, which runs gen_data.py)";
+            return false;
+        }
+        return true;
+    }
+}

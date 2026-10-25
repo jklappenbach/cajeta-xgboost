@@ -1,0 +1,135 @@
+package bench.xgb;
+
+import cajeta.collection.ArrayList;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.api.Params;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.objective.Objective;
+
+/**
+ * ml/xgb-hist-fit (device "cpu") and ml/xgb-gpu-fit (device "gpu"):
+ * GBDT.fit from the raw matrix — sketch, bin, boost — binary:logistic,
+ * xgb/config.npy's rounds, max_depth and max_bin, every other knob at
+ * XGBoost's default (eta 0.3, lambda 1, min_child_weight 1, base_score 0.5).
+ * The xgbbench Bench.cajeta case, as a row. The check: the fitted model's
+ * training logloss within Tol.LOGLOSS of upstream `hist`'s on the same data.
+ */
+public class FitBench extends XgbBenchmark {
+
+    boolean gpu;
+    Tensor<float64> x;
+    float64[] label;
+    int64 n;
+    int64 nf;
+    int64 rounds;
+    int64 depth;
+    int64 maxBin;
+    Model m;
+    float64 refv;
+
+    public FitBench(boolean gpu) {
+        this.gpu = gpu;
+        this.n = 0;
+        this.nf = 0;
+        this.rounds = 0;
+        this.depth = 0;
+        this.maxBin = 0;
+        this.refv = 0.0;
+    }
+
+    public String name() {
+        return this.gpu ? "xgb-gpu-fit" : "xgb-hist-fit";
+    }
+
+    public String backend() {
+        if (!this.gpu) {
+            return "cpu";
+        }
+        String be = System.env.get("CAJETA_XPU_BACKEND");
+        if (be != null && !Data.noGpu()) {
+            return "" + be;
+        }
+        return "gpu";
+    }
+
+    public int32 warmupIters() {
+        return 1;
+    }
+
+    public int32 measuredIters() {
+        return 3;
+    }
+
+    public #ArrayList<String> variants() {
+        ArrayList<String> v = heap ArrayList<String>();
+        if (this.gpu) {
+            v.add("device");
+        } else {
+            v.add("cpu");
+        }
+        return v;
+    }
+
+    public void prepare(String v) {
+        this.x #= Data.f64("xgb/X.npy");
+        Tensor<float64> y #= Data.f64("xgb/y.npy");
+        this.n = this.x.shapeAt(0);
+        this.nf = this.x.shapeAt(1);
+        this.label = heap float64[this.n];
+        int64 i = 0;
+        while (i < this.n) {
+            this.label[i] = y.flatGet(i);
+            i = i + 1;
+        }
+        this.rounds = Data.intAt("xgb/config.npy", (int64) 0);
+        this.depth = Data.intAt("xgb/config.npy", (int64) 1);
+        this.maxBin = Data.intAt("xgb/config.npy", (int64) 2);
+        this.refv = Data.f64("ref/hist-logloss.npy").flatGet(0);
+        this.nIn = this.n;
+        this.ds = "xgb binary " + this.n + "x" + this.nf + " 5% NaN seed " + Data.SEED;
+        this.mdl = "gbdt binary:logistic " + this.rounds + " rounds depth " + this.depth
+            + " max_bin " + this.maxBin;
+    }
+
+    public void runVariant(String variant, int32 iterations) {
+        Params p #= heap Params();
+        p.objective = Objective.LOGISTIC;
+        p.rounds = this.rounds;
+        p.maxDepth = this.depth;
+        p.maxBin = this.maxBin;
+        p.device = this.gpu ? "gpu" : "cpu";
+        this.m #= GBDT.fit(this.x, this.label, this.n, this.nf, p);
+    }
+
+    public boolean checkResult() {
+        float32[] pr #= GBDT.predictProba(this.m, this.x, this.n, this.nf);
+        float64 acc = 0.0;
+        int64 i = 0;
+        while (i < this.n) {
+            float64 q = (float64) pr[i];
+            if (q < 0.000000000000001) {
+                q = 0.000000000000001;
+            }
+            if (q > 0.999999999999999) {
+                q = 0.999999999999999;
+            }
+            if (this.label[i] > 0.5) {
+                acc = acc - Math.log(q);
+            } else {
+                acc = acc - Math.log(1.0 - q);
+            }
+            i = i + 1;
+        }
+        float64 got = acc / (float64) this.n;
+        float64 rel = Data.abs(got / this.refv - 1.0);
+        String sfu = "fallback";
+        if (this.m.sfuCaptured) {
+            sfu = "captured";
+        }
+        this.note = "GBDT.fit raw to model, device " + (this.gpu ? "gpu" : "cpu")
+            + "; train logloss " + got + " vs upstream hist " + this.refv + ", relative |d| "
+            + rel + " <= " + Tol.LOGLOSS + "; SFU tables " + sfu;
+        return rel <= Tol.LOGLOSS;
+    }
+}

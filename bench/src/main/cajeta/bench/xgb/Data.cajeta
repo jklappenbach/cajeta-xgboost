@@ -1,0 +1,80 @@
+package bench.xgb;
+
+import cajeta.io.file.Path;
+import cajeta.math.Tensor;
+import cajeta.math.npio.Npy;
+
+/**
+ * Where the benchmarks' inputs live: files competitors/python/gen_data.py
+ * wrote once from one recorded seed; the upstream runner reads the same ones.
+ *
+ *   CAJETA_XGB_BENCH_DATA  the data directory (bench.sh sets it)
+ *   default                data/smoke under CAJETA_BENCH_SMOKE=1, else data/full
+ *   CAJETA_BENCH_NO_GPU=1  the GPU is another session's: xgb-gpu-fit skips
+ */
+public final class Data {
+
+    public static uint64 SEED = 20261025;
+
+    public static boolean truthy(String v) {
+        if (v == null) {
+            return false;
+        }
+        return v.equals("1") || v.equals("true") || v.equals("yes");
+    }
+
+    public static boolean smoke() {
+        return Data.truthy(System.env.get("CAJETA_BENCH_SMOKE"));
+    }
+
+    public static boolean noGpu() {
+        return Data.truthy(System.env.get("CAJETA_BENCH_NO_GPU"));
+    }
+
+    public static #String dir() {
+        String d = System.env.get("CAJETA_XGB_BENCH_DATA");
+        if (d != null) {
+            if (!d.isEmpty()) {
+                return "" + d;
+            }
+        }
+        if (Data.smoke()) {
+            return "data/smoke";
+        }
+        return "data/full";
+    }
+
+    public static #String path(String rel) {
+        String d #= Data.dir();
+        return d + "/" + rel;
+    }
+
+    public static boolean has(String rel) {
+        String p #= Data.path(rel);
+        Path f #= Path.of(p);
+        return f.exists();
+    }
+
+    public static #Tensor<float64> f64(String rel) {
+        String p #= Data.path(rel);
+        return Npy.loadF64(p);
+    }
+
+    public static #Tensor<float32> f32(String rel) {
+        String p #= Data.path(rel);
+        return Npy.loadF32(p);
+    }
+
+    public static int64 intAt(String rel, int64 i) {
+        String p #= Data.path(rel);
+        Tensor<int64> t #= Npy.loadI64(p);
+        return t.flatGet(i);
+    }
+
+    public static float64 abs(float64 x) {
+        if (x < 0.0) {
+            return 0.0 - x;
+        }
+        return x;
+    }
+}

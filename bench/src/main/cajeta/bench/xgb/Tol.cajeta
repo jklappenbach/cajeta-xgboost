@@ -1,0 +1,13 @@
+package bench.xgb;
+
+/** The recorded tolerances, identical to TOL in competitors/python/xgb_bench.py. */
+public final class Tol {
+    // |logloss / upstream hist logloss - 1|. dev.cajeta.xgboost reproduces
+    // NVIDIA gpu_hist bit for bit (its CPU path included), and upstream's CPU
+    // `hist` sketches its quantile cuts differently, so the two forests differ
+    // slightly; their training logloss agrees to well under 1%.
+    public static float64 LOGLOSS = 0.01;
+    // max |margin - upstream margin| for the same trees: both walk the forest
+    // in tree order and accumulate float32 leaf values onto the base margin.
+    public static float64 MARGIN = 1.0e-5;
+}

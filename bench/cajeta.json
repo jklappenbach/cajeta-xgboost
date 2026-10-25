@@ -1,0 +1,84 @@
+{
+    // cajeta-xgboost/bench — the dev.cajeta.xgboost benchmarks on the shared
+    // harness dev.cajeta.bench (cajeta specs/benchmark-reference-spec.md §3,
+    // §7.2). The page that defines the ids is the compiler repo's
+    // bench/ml/XGBoost.md (xgboost pages live under bench/ml/, spec §12.8).
+    // This is ~/code/ml/xgbbench moved in: its Bench.cajeta GBDT.fit timing is
+    // ml/xgb-hist-fit and ml/xgb-gpu-fit, its bench.py is the upstream side.
+    //
+    //   src/main/cajeta/bench/xgb/  one Benchmark per page id; XgbBench registers them
+    //   competitors/python/         gen_data.py (the shared, seeded inputs and the
+    //                               upstream model) and xgb_bench.py (upstream rows)
+    //   bench.sh                    data → Cajeta rows → upstream rows → results/
+    //   test/bench_smoke.sh         the smoke gate
+
+    "details": {
+        "name":                "xgb-bench",
+        "version":             "0.1.0",
+        "description":         "dev.cajeta.xgboost benchmarks against upstream XGBoost",
+        "license":             "Apache-2.0",
+        "authors":             ["Julian Klappenbach"],
+        "cajeta-lang-version": "1.0"
+    },
+
+    "settings": {
+        // dev.cajeta.bench's four (clock, filesystem, env, process); filesystem
+        // also reads the .npy inputs, the model file and the SFU tables.
+        "capabilities": ["filesystem", "clock", "env", "process"],
+
+        // dev.cajeta.xgboost at the version this checkout is (../cajeta.json);
+        // it brings dev.cajeta.ml. A version resolves; a `{ "path": ".." }`
+        // dependency parses but resolves nothing today.
+        "dependencies": {
+            "dev.cajeta.bench":   "0.1.0",
+            "dev.cajeta.xgboost": "0.7.0"
+        },
+
+        "repositories": [
+            { "name": "central", "url": "https://olla.cajeta.dev", "priority": 0 }
+        ],
+
+        "build": {
+            "source-root":  "src/main/cajeta",
+            "target":       "host",
+            "entry-method": "bench.xgb.XgbBench::main"
+        }
+    },
+
+    "tasks": {
+
+        // The library's gpu-release backends: the runtime picks CUDA → HIP →
+        // Vulkan → CPU at first device touch, and the CPU fit needs the cpu
+        // backend registered too. NVPTX needs ptxas (CUDA_PATH).
+        "release": {
+            "description": "Release build of the benchmark binary (build/xgb-bench)",
+            "actions": [
+                { "action": "build",
+                  "flavor": { "base": "release", "opt": "O3", "cpu": "native",
+                              "xpu-backend": "nvptx,amdgpu,vulkan,cpu" },
+                  "output-path": "build/xgb-bench", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "bench": {
+            "description": "Build and measure every benchmark into build/results.csv (data from ./bench.sh)",
+            "actions": [
+                { "action": "build",
+                  "flavor": { "base": "release", "opt": "O3", "cpu": "native",
+                              "xpu-backend": "nvptx,amdgpu,vulkan,cpu" },
+                  "output-path": "build/xgb-bench", "id": "art" },
+                // exec does not split its command string: arguments go in args.
+                { "action": "exec", "command": "${art.path}",
+                  "args": ["--run", "--out", "build/results.csv"] }
+            ]
+        },
+
+        "clean": {
+            "description": "Remove build outputs",
+            "actions": [
+                { "action": "exec", "command": "rm", "args": ["-rf", "build"] }
+            ]
+        }
+    }
+}

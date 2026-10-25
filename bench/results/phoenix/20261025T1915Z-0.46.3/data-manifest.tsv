@@ -1,0 +1,10 @@
+# dev.cajeta.xgboost bench data, seed 20261025, scale smoke
+# n 10000 nf 20 rounds 10 depth 6 max_bin 256 binary:logistic, 5% NaN; xgboost 3.4.1
+file	sha256
+ref/hist-logloss.npy	70e2e81031040f41613d77f3387233f4aabb7874f5a7998d8f090674723e87d6
+ref/predict-margin.npy	2de29bd55b08cde7f92b70cdc167558c68ee306114ba3303ea2476239d4b356a
+xgb/X.npy	435decc16e88c93aaa25de182f7fe8c33bf32c3cb68dcd68c67f8a1ecbee1dd0
+xgb/config.npy	249f98deb31a632663fde3515536d8cd0cfcb2d19f8c98c98cd24ac4f6d90162
+xgb/model.cajeta	18e7615b3fd46666509bbb1134a1891b31c1da36c2219173df625333e993fc44
+xgb/model.json	ff045e787153464c57170ae04ba056cbba7a327f2c5f3a29626aa663dc1d4c63
+xgb/y.npy	333729939cfd5a6a8d573c3ea2768d7e7fbc0bb3a841a80ddb1c503b8e2b54c8

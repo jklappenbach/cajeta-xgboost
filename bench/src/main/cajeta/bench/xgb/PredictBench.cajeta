@@ -1,0 +1,84 @@
+package bench.xgb;
+
+import cajeta.collection.ArrayList;
+import cajeta.io.file.File;
+import cajeta.math.Tensor;
+import dev.cajeta.xgboost.api.GBDT;
+import dev.cajeta.xgboost.booster.Model;
+import dev.cajeta.xgboost.booster.ModelIO;
+
+/**
+ * ml/xgb-predict: GBDT.predict (the raw margin, TreeWalker) over every row of
+ * xgb/X.npy, with the forest upstream XGBoost trained (gen_data.py converts
+ * its JSON trees to ModelIO's layout, xgb/model.cajeta), so both sides walk
+ * the same trees. The check: every margin within Tol.MARGIN of upstream's
+ * inplace_predict(predict_type="margin").
+ */
+public class PredictBench extends XgbBenchmark {
+
+    Tensor<float64> x;
+    Tensor<float32> refm;
+    Model m;
+    float32[] out;
+    int64 n;
+    int64 nf;
+
+    public PredictBench() {
+        this.n = 0;
+        this.nf = 0;
+    }
+
+    public String name() {
+        return "xgb-predict";
+    }
+
+    public String unit() {
+        return "rows/s";
+    }
+
+    public int32 warmupIters() {
+        return 2;
+    }
+
+    public int32 measuredIters() {
+        return 10;
+    }
+
+    public #ArrayList<String> variants() {
+        ArrayList<String> v = heap ArrayList<String>();
+        v.add("cpu");
+        return v;
+    }
+
+    public void prepare(String v) {
+        this.x #= Data.f64("xgb/X.npy");
+        this.n = this.x.shapeAt(0);
+        this.nf = this.x.shapeAt(1);
+        String mp #= Data.path("xgb/model.cajeta");
+        int8[] buf #= File.readAllBytes(mp);
+        this.m #= ModelIO.deserialize(buf);
+        this.refm #= Data.f32("ref/predict-margin.npy");
+        this.nIn = this.n;
+        this.ds = "xgb binary " + this.n + "x" + this.nf + " 5% NaN seed " + Data.SEED;
+        this.mdl = "upstream gbdt binary:logistic " + this.m.rounds + " trees (xgb/model.json)";
+    }
+
+    public void runVariant(String variant, int32 iterations) {
+        this.out #= GBDT.predict(this.m, this.x, this.n, this.nf);
+    }
+
+    public boolean checkResult() {
+        float64 worst = 0.0;
+        int64 i = 0;
+        while (i < this.n) {
+            float64 d = Data.abs((float64) this.out[i] - (float64) this.refm.flatGet(i));
+            if (d > worst) {
+                worst = d;
+            }
+            i = i + 1;
+        }
+        this.note = "GBDT.predict margins of upstream's trees; max |margin - upstream| " + worst
+            + " <= " + Tol.MARGIN;
+        return worst <= Tol.MARGIN;
+    }
+}

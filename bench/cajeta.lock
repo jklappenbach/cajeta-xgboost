@@ -1,0 +1,46 @@
+{
+  "generator": {
+    "tool": "cajeta",
+    "version": "0.46.3"
+  },
+  "lockfile-version": 1,
+  "manifest-checksum": "sha256:e334380af75e45adb1880b4d026e9dab6a5fe88f9400a0d513c442795645b538",
+  "melts": [],
+  "overrides": [],
+  "packages": [
+    {
+      "checksum": "sha256:7a85cde5557b261cfb0937d69fd48c7610e95c495bac9e75296feab53d7fe672",
+      "name": "dev.cajeta.xgboost",
+      "provided-by": "explicit",
+      "resolved-from": "central",
+      "version": "0.7.0"
+    },
+    {
+      "checksum": "sha256:de70003b1f6788c861456f262e307ad94d4e9b480395bb03d5859c9f0c5ee006",
+      "name": "dev.cajeta.bench",
+      "provided-by": "explicit",
+      "resolved-from": "olla",
+      "version": "0.1.0"
+    },
+    {
+      "checksum": "sha256:7b6d5e91a871bb82b5e50a6198d40dabce8c52387bfa823604f83a8866abebba",
+      "name": "dev.cajeta.ml",
+      "provided-by": "explicit",
+      "resolved-from": "olla",
+      "version": "0.10.6"
+    }
+  ],
+  "plugins": [],
+  "properties": {
+    "cajeta.version": "0.46.3",
+    "details.group": "",
+    "details.library": "xgb-bench",
+    "details.name": "xgb-bench",
+    "details.version": "0.1.0",
+    "flavor": "",
+    "profile": "",
+    "target": "",
+    "workspace.root": ""
+  },
+  "resolved-at": "2026-10-25T19:09:10Z"
+}
