@@ -1,0 +1,7 @@
+kernel	role
+binCells	One thread per (row, feature) cell binary-searches the quantile cuts on integer order keys, so the bin does not depend on the device's float compare.
+histScatter	The legacy whole-dataset histogram: one thread per cell, int64 global atomics, a position filter selecting the node's rows.
+squaredError	One thread per row: gradient and hessian of the squared-error objective at the current margin.
+logistic	One thread per row: logistic gradient and hessian, the exponential through the captured exp2 table and the software fused multiply-add model.
+softmax	One thread per (row, class); each thread re-scans its row's classes for the maximum and the sum.
+partitionScatter	The legacy partition: one thread per row, int64 atomic adds for the left and right counts.

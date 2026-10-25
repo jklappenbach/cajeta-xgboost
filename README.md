@@ -73,6 +73,21 @@ Gated on cajeta v0.43.1 (see `settings.toolchain` in `cajeta.json`) and a
 [cajeta-unit](https://github.com/jklappenbach/cajeta-unit) checkout alongside,
 though the runner falls back to a sha256-verified Olla fetch without one.
 
+## Kernel catalog
+
+The website's [catalog](https://cajeta.dev/kernels/catalog-xgboost/) lists
+every `@Kernel` in the `gpu` package with its stage, its `@Wave(32)` and its
+role. It is generated from the sources; after adding or documenting a kernel,
+regenerate it into the cajeta checkout and commit the page there:
+
+```
+python3 tools/catalog/gen-catalog.py ../../cpp/cajeta/docs/kernels/catalog-xgboost.md
+python3 -m unittest discover -s tools/catalog   # the page matches the sources
+```
+
+A kernel's role is the first sentence of its doc comment;
+`tools/catalog/roles.tsv` holds the role of a kernel that has none.
+
 ## License
 
 See the repository.
