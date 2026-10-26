@@ -5,7 +5,7 @@
 The row test regenerates the page from this checkout's sources and compares
 every entry (kernel, stage, source line, @Wave(32), role) with the committed
 page in the cajeta repository (CATALOG_PAGE, default
-../../cpp/cajeta/docs/kernels/catalog-xgboost.md). It reads both the old
+../../cpp/cajeta/docs/xpu/catalog-xgboost.md). It reads both the old
 markdown-table page and the HTML-table page the generator writes now.
 """
 import html
@@ -18,7 +18,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 PAGE = os.environ.get('CATALOG_PAGE', os.path.normpath(
-    os.path.join(REPO, '..', '..', 'cpp', 'cajeta', 'docs', 'kernels', 'catalog-xgboost.md')))
+    os.path.join(REPO, '..', '..', 'cpp', 'cajeta', 'docs', 'xpu', 'catalog-xgboost.md')))
 
 spec = importlib.util.spec_from_file_location('gen_catalog', os.path.join(HERE, 'gen-catalog.py'))
 gen = importlib.util.module_from_spec(spec)
@@ -69,6 +69,19 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual([e['kernel'] for e in want], [e['kernel'] for e in got])
         for w, g in zip(want, got):
             self.assertEqual(w, g, w['kernel'])
+
+    def test_committed_page_is_at_the_xpu_path(self):
+        if not os.path.isdir(os.path.join(REPO, '..', '..', 'cpp', 'cajeta', 'docs')):
+            self.skipTest('no sibling cajeta checkout')
+        self.assertTrue(os.path.exists(PAGE), 'no committed page at ' + PAGE)
+
+    def test_default_output_is_the_xpu_page(self):
+        self.assertEqual(os.path.normpath(gen.DEFAULT_OUTPUT), os.path.normpath(
+            os.path.join(REPO, '..', '..', 'cpp', 'cajeta', 'docs', 'xpu', 'catalog-xgboost.md')))
+
+    def test_preamble_links_the_xpu_page(self):
+        self.assertIn('[Gradient boosting on the device](kernels-xgboost.md)', self.page)
+        self.assertNotIn('](xgboost.md)', self.page)
 
     def test_no_markdown_table(self):
         self.assertEqual([l for l in self.page.split('\n') if re.match(r'\s*\|.*\|\s*$', l)], [])

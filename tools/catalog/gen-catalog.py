@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Generate the cajeta.dev kernel catalog page for dev.cajeta.xgboost.
 
-    python3 tools/catalog/gen-catalog.py ../../cpp/cajeta/docs/kernels/catalog-xgboost.md
+    python3 tools/catalog/gen-catalog.py [../../cpp/cajeta/docs/xpu/catalog-xgboost.md]
+
+The output defaults to the page in the cajeta checkout (DEFAULT_OUTPUT).
 
 Every @Kernel in src/main/cajeta/dev/cajeta/xgboost/gpu, in source order by
 file: the training stage its file serves, whether it declares a 32-lane wave,
@@ -22,6 +24,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 GPU = 'src/main/cajeta/dev/cajeta/xgboost/gpu'
+# the page on cajeta.dev/xpu/catalog-xgboost/, in the cajeta checkout
+DEFAULT_OUTPUT = os.path.normpath(os.path.join(REPO, '..', '..', 'cpp', 'cajeta', 'docs', 'xpu', 'catalog-xgboost.md'))
 
 # The training stage each kernel file serves, in the page's order.
 STAGES = [
@@ -149,7 +153,7 @@ def render(rows, base, ver, date):
            'every `@Kernel` in the `gpu` package, its name linked to its source line, the training stage it '
            'serves, whether it declares a 32-lane wave, and under it its role from the kernel\'s own '
            'documentation. The stages, decompositions and the one measured adaptation are described in '
-           '[Gradient boosting on the device](xgboost.md).' % (ver, date), '',
+           '[Gradient boosting on the device](kernels-xgboost.md).' % (ver, date), '',
            '%d kernels. Every one is integer-exact across backends except the gradient and leaf kernels, '
            'whose float32 results are per row and need no reduction.' % len(rows), '',
            '<table class="kernel-catalog">',
@@ -168,7 +172,8 @@ def render(rows, base, ver, date):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('output', help='the page to write, e.g. ../../cpp/cajeta/docs/kernels/catalog-xgboost.md')
+    ap.add_argument('output', nargs='?', default=DEFAULT_OUTPUT,
+                    help='the page to write (default: %(default)s)')
     ap.add_argument('--repo', default=REPO, help='the cajeta-xgboost checkout (default: this one)')
     ap.add_argument('--date', default=datetime.date.today().isoformat())
     a = ap.parse_args(argv)

@@ -112,8 +112,8 @@ The 33 device kernels, the training stage each serves, how the work is cut
 across lanes and workgroups, why the results are the same bits on every
 backend, and the one adaptation the library measures (the histogram tile,
 remembered per device and build): the website's
-[Gradient boosting on the device](https://cajeta.dev/kernels/xgboost/) and
-the complete [catalog](https://cajeta.dev/kernels/catalog-xgboost/). The
+[Gradient boosting on the device](https://cajeta.dev/xpu/kernels-xgboost/) and
+the complete [catalog](https://cajeta.dev/xpu/catalog-xgboost/). The
 sources are `src/main/cajeta/dev/cajeta/xgboost/gpu`.
 
 ## `XGBRegressor` — the ecosystem estimator protocol
