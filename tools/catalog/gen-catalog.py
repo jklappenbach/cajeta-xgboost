@@ -149,12 +149,13 @@ def esc(s):
 
 def render(rows, base, ver, date):
     out = ['# Catalog: every cajeta-xgboost kernel', '',
-           'Generated from the sources of `dev.cajeta.xgboost` %s on %s by `tools/catalog/gen-catalog.py`: '
-           'every `@Kernel` in the `gpu` package, its name linked to its source line, the training stage it '
-           'serves, whether it declares a 32-lane wave, and under it its role from the kernel\'s own '
-           'documentation. The stages, decompositions and the one measured adaptation are described in '
+           'This catalog was generated from the sources of `dev.cajeta.xgboost` %s on %s by '
+           '`tools/catalog/gen-catalog.py`. It lists every `@Kernel` in the `gpu` package, with its name '
+           'linked to its source line, the training stage it serves, whether it declares a 32-lane wave, '
+           'and under it its role from the kernel\'s own documentation. The stages, decompositions and the '
+           'one measured adaptation are described in '
            '[Gradient boosting on the device](kernels-xgboost.md).' % (ver, date), '',
-           '%d kernels. Every one is integer-exact across backends except the gradient and leaf kernels, '
+           'There are %d kernels. Every one is integer-exact across backends except the gradient and leaf kernels, '
            'whose float32 results are per row and need no reduction.' % len(rows), '',
            '<table class="kernel-catalog">',
            '<thead><tr><th>kernel</th><th>stage</th><th class="census"><code>@Wave(32)</code></th></tr></thead>',
