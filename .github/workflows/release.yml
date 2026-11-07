@@ -70,7 +70,7 @@ env:
   # v0.43.1 carries the int64 wave verbs featureScan runs on; ml 0.10.6 and unit 0.3.6 still build under it.
   #
   # Keep this in step with settings.toolchain.version in cajeta.json.
-  CAJETA_VERSION: v0.51.0
+  CAJETA_VERSION: v0.53.0
 
 jobs:
   build-test:
