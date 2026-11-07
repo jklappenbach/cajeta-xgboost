@@ -76,7 +76,8 @@
         // CAJETA_ERROR_CAPTURED_BORROW_PARAM naming `x`, a symbol this library
         // does not contain. 0.10.2 stores it with `#=`.
         "dependencies": {
-            "dev.cajeta.ml": "0.10.6"
+            "dev.cajeta.ml": "0.11.0",
+            "dev.cajeta.ml.kernels": "0.2.0"
         },
 
         // The suite is driven by cajeta-unit's reflective @Test discovery;

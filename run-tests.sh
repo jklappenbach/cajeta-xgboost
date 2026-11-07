@@ -145,6 +145,42 @@ fi
 [[ -f "$ml_cja" ]] || { echo "could not resolve a dev.cajeta.ml archive" >&2; exit 1; }
 echo ">> cajeta-ml: $ml_cja"
 
+# dev.cajeta.ml.kernels resolution — the same ladder. cajeta-ml 0.11.0 depends on
+# it (its GPU column), and xgboost launches its generic kernels directly, so it
+# rides both classpaths too:
+#   1. $KERNELS_CJA   — explicit archive path, used verbatim
+#   2. $ML_REPO/kernels — the sibling checkout's kernel package: build and use it
+#   3. $OLLA_HOME     — installed dev.cajeta.ml.kernels at the cajeta.json pin
+#   4. Olla registry  — sha256-verified fetch, cached under build/.kernels-cache
+kernels_cja="${KERNELS_CJA:-}"
+if [[ -z "$kernels_cja" && -d "$ML_REPO/kernels" ]]; then
+    echo ">> building the kernel package from checkout ($ML_REPO/kernels)"
+    ( cd "$ML_REPO/kernels" && "$CAJETA" build >/dev/null )
+    kernels_cja="$(cajeta_artifact_path "$ML_REPO/kernels" dev.cajeta.ml.kernels 2>/dev/null)"
+fi
+if [[ -z "$kernels_cja" ]]; then
+    K_VER="$(sed -n 's/.*"dev\.cajeta\.ml\.kernels"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$here/cajeta.json" | head -1)"
+    [[ -n "$K_VER" ]] || { echo "no dev.cajeta.ml.kernels pin in cajeta.json" >&2; exit 1; }
+    store_k="$OLLA_HOME/dev.cajeta.ml.kernels/$K_VER/dev.cajeta.ml.kernels-$K_VER.cja"
+    cache_k="$here/build/.kernels-cache/dev.cajeta.ml.kernels-$K_VER.cja"
+    if [[ -f "$store_k" ]]; then kernels_cja="$store_k"
+    elif [[ -f "$cache_k" ]]; then kernels_cja="$cache_k"
+    else
+        echo ">> fetching dev.cajeta.ml.kernels $K_VER from $OLLA_URL"
+        meta="$(curl -fsS "$OLLA_URL/v2/resolve?name=dev.cajeta.ml.kernels&version=$K_VER")"
+        sha="$(printf '%s' "$meta" | sed -n 's/.*"sha256":"sha256:\([0-9a-f]*\)".*/\1/p')"
+        [[ -n "$sha" ]] || { echo "/v2/resolve gave no sha256" >&2; exit 1; }
+        mkdir -p "$(dirname "$cache_k")"
+        curl -fsS -o "$cache_k" "$OLLA_URL/v2/blob/$sha"
+        got="$(sha256_of "$cache_k")"
+        [[ "$got" == "$sha" ]] || { rm -f "$cache_k"; echo "sha256 mismatch fetching kernels" >&2; exit 1; }
+        kernels_cja="$cache_k"
+    fi
+fi
+[[ -f "$kernels_cja" ]] || { echo "could not resolve a dev.cajeta.ml.kernels archive" >&2; exit 1; }
+echo ">> kernels: $kernels_cja"
+
 # A comma-separated --classpath for the compiler. Git Bash converts a lone
 # POSIX path argument for a native Windows exe but not a comma list, so on
 # MSYS each entry is converted with cygpath; elsewhere they pass unchanged.
@@ -160,7 +196,7 @@ classpath() {
 echo ">> building xgboost library .cja"
 XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
 "$CAJETA" --emit=cja --xpu-backend="$XPU_BACKENDS" -o "$out/xgboost.cja" \
-    --classpath="$(classpath "$ml_cja")" \
+    --classpath="$(classpath "$ml_cja" "$kernels_cja")" \
     dev.cajeta.xgboost.XGBoost.run "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the test binary"
@@ -170,7 +206,7 @@ echo ">> building + running the test binary"
 # phoenix-wsl (nvptx), the Strix Halo dev box (amdgpu/vulkan), and hosted
 # CI (cpu emulation) alike.
 "$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKENDS" \
-    --classpath="$(classpath "$out/xgboost.cja" "$unit_cja" "$ml_cja")" \
+    --classpath="$(classpath "$out/xgboost.cja" "$unit_cja" "$ml_cja" "$kernels_cja")" \
     -o "$out/xgboosttests" \
     dev.cajeta.xgboost.selftest.TestMain.run "$here/src/test/cajeta" "$out" >/dev/null
 
