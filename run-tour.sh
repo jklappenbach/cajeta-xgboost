@@ -91,6 +91,61 @@ if [[ -z "$ml_cja" ]]; then
 fi
 [[ -f "$ml_cja" ]] || { echo "could not resolve a dev.cajeta.ml archive" >&2; exit 1; }
 
+# The tour is an executable, and the compiler re-checks an archive's sources when it
+# emits one: dev.cajeta.ml's dependency (the kernel package) and the package's own
+# (dev.cajeta.unit) must be on the classpath too. Same ladders as run-tests.sh.
+kernels_cja="${KERNELS_CJA:-}"
+if [[ -z "$kernels_cja" && -d "$ML_REPO/kernels" ]]; then
+    if ( cd "$ML_REPO/kernels" && "$CAJETA" build >/dev/null 2>&1 ); then
+        kernels_cja="$(cajeta_artifact_path "$ML_REPO/kernels" dev.cajeta.ml.kernels 2>/dev/null)"
+    fi
+fi
+if [[ -z "$kernels_cja" ]]; then
+    K_VER="$(sed -n 's/.*"dev\.cajeta\.ml\.kernels"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/cajeta.json" | head -1)"
+    [[ -n "$K_VER" ]] || { echo "no dev.cajeta.ml.kernels pin in cajeta.json" >&2; exit 1; }
+    store_k="$OLLA_HOME/dev.cajeta.ml.kernels/$K_VER/dev.cajeta.ml.kernels-$K_VER.cja"
+    cache_k="$here/build/.kernels-cache/dev.cajeta.ml.kernels-$K_VER.cja"
+    if [[ -f "$store_k" ]]; then kernels_cja="$store_k"
+    elif [[ -f "$cache_k" ]]; then kernels_cja="$cache_k"
+    else
+        meta="$(curl -fsS "$OLLA_URL/v2/resolve?name=dev.cajeta.ml.kernels&version=$K_VER")"
+        sha="$(printf '%s' "$meta" | sed -n 's/.*"sha256":"sha256:\([0-9a-f]*\)".*/\1/p')"
+        [[ -n "$sha" ]] || { echo "/v2/resolve gave no sha256" >&2; exit 1; }
+        mkdir -p "$(dirname "$cache_k")"
+        curl -fsS -o "$cache_k" "$OLLA_URL/v2/blob/$sha"
+        got="$(sha256sum "$cache_k" | cut -d' ' -f1)"
+        [[ "$got" == "$sha" ]] || { rm -f "$cache_k"; echo "sha256 mismatch fetching kernels" >&2; exit 1; }
+        kernels_cja="$cache_k"
+    fi
+fi
+[[ -f "$kernels_cja" ]] || { echo "could not resolve a dev.cajeta.ml.kernels archive" >&2; exit 1; }
+UNIT_REPO="${UNIT_REPO:-$here/../cajeta-unit}"
+unit_cja="${UNIT_CJA:-}"
+if [[ -z "$unit_cja" && -d "$UNIT_REPO" ]]; then
+    if ( cd "$UNIT_REPO" && "$CAJETA" build >/dev/null 2>&1 ); then
+        unit_cja="$(cajeta_artifact_path "$UNIT_REPO" dev.cajeta.unit 2>/dev/null)"
+    fi
+fi
+if [[ -z "$unit_cja" ]]; then
+    UNIT_VER="$(sed -n 's/.*"dev\.cajeta\.unit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/cajeta.json" | head -1)"
+    [[ -n "$UNIT_VER" ]] || { echo "no dev.cajeta.unit pin in cajeta.json" >&2; exit 1; }
+    store_u="$OLLA_HOME/dev.cajeta.unit/$UNIT_VER/dev.cajeta.unit-$UNIT_VER.cja"
+    cache_u="$here/build/.unit-cache/dev.cajeta.unit-$UNIT_VER.cja"
+    if [[ -f "$store_u" ]]; then unit_cja="$store_u"
+    elif [[ -f "$cache_u" ]]; then unit_cja="$cache_u"
+    else
+        meta="$(curl -fsS "$OLLA_URL/v2/resolve?name=dev.cajeta.unit&version=$UNIT_VER")"
+        sha="$(printf '%s' "$meta" | sed -n 's/.*"sha256":"sha256:\([0-9a-f]*\)".*/\1/p')"
+        [[ -n "$sha" ]] || { echo "/v2/resolve gave no sha256" >&2; exit 1; }
+        mkdir -p "$(dirname "$cache_u")"
+        curl -fsS -o "$cache_u" "$OLLA_URL/v2/blob/$sha"
+        got="$(sha256sum "$cache_u" | cut -d' ' -f1)"
+        [[ "$got" == "$sha" ]] || { rm -f "$cache_u"; echo "sha256 mismatch fetching unit" >&2; exit 1; }
+        unit_cja="$cache_u"
+    fi
+fi
+[[ -f "$unit_cja" ]] || { echo "could not resolve a dev.cajeta.unit archive" >&2; exit 1; }
+
 # A comma-separated --classpath for the compiler. Git Bash converts a lone
 # POSIX path argument for a native Windows exe but not a comma list, so on
 # MSYS each entry is converted with cygpath; elsewhere they pass unchanged.
@@ -108,7 +163,7 @@ mkdir -p build/tour
 # Device codegen happens at EXE emission (the library's @Kernels lower here),
 # so the tour binary bundles the same backends as the test suite.
 XPU_BACKENDS="${XPU_BACKENDS:-nvptx,amdgpu,vulkan,cpu}"
-"$CAJETA" --emit=exe --xpu-backend="$XPU_BACKENDS" --classpath="$(classpath "$art" "$ml_cja")" \
+"$CAJETA" --emit=exe --xpu-backend="$XPU_BACKENDS" --classpath="$(classpath "$art" "$ml_cja" "$kernels_cja" "$unit_cja")" \
     -o build/tour/xgboost-tour \
     dev.cajeta.xgboost.tour.Tour.main "$here/tour/src" build/tour >/dev/null
 
