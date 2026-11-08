@@ -6,6 +6,8 @@ import cajeta.xpu.KernelBuffer;
 import cajeta.xpu.KernelStream;
 import cajeta.xpu.KernelThread;
 import cajeta.xpu.Workgroup;
+import dev.cajeta.ml.kernels.Copy;
+import dev.cajeta.ml.kernels.Iota;
 import dev.cajeta.xgboost.tree.Split;
 
 /**
@@ -218,20 +220,7 @@ public final class GpuPartition {
         return;
     }
 
-    /** Copies the segment `[begin, begin + count)` of `src` into `dst`. */
-    @Kernel
-    public static void copySegment(KernelBuffer<int32> dst, KernelBuffer<int32> src,
-                                   uint32 begin, uint32 count) {
-        uint32 i = KernelThread.globalIdX();
-        if (i < count) { dst[begin + i] = src[begin + i]; }
-    }
 
-    /** `ridx[r] = r` for every row: the root's segment. */
-    @Kernel
-    public static void identity(KernelBuffer<int32> ridx, uint32 n) {
-        uint32 i = KernelThread.globalIdX();
-        if (i < n) { ridx[i] = (int32) i; }
-    }
 
     /** The workgroup size of the segment partition. */
     public static int64 segmentBlock() { return (int64) 256; }
@@ -239,8 +228,7 @@ public final class GpuPartition {
     /** Sets `ridx` to the identity over `n` rows and waits. */
     static void resetSegments(KernelBuffer<int32> ridx, int64 n, TransferLog log) {
         KernelStream s #= KernelStream.current();
-        uint32 un = (uint32) n;
-        identity.launch(s, grid: [(un + 255) / 256], block: [256])(ridx, un);
+        Iota.on<int32>(s, ridx, n);
         log.sync(s);
         return;
     }
@@ -282,7 +270,7 @@ public final class GpuPartition {
         segmentPlace.launch(st, grid: [(uint32) blocks], block: [256])
             (scratch, blockCounts, bins, ridx, ub, uc, (uint32) left, (uint32) nf,
              (int32) s.findex, localSplit, defLeft);
-        copySegment.launch(st, grid: [(uc + 255) / 256], block: [256])(ridx, scratch, ub, uc);
+        Copy.rangeOn<int32>(st, ridx, scratch, (int64) ub, (int64) uc);
         log.sync(st);
         return left;
     }

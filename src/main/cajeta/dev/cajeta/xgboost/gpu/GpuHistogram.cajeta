@@ -8,6 +8,8 @@ import cajeta.xpu.KernelStream;
 import cajeta.xpu.KernelThread;
 import cajeta.xpu.Shared;
 import cajeta.xpu.Workgroup;
+import dev.cajeta.ml.kernels.Copy;
+import dev.cajeta.ml.kernels.Fill;
 import dev.cajeta.xgboost.tree.GradientQuantiser;
 import dev.cajeta.xgboost.tree.Histogram;
 
@@ -269,7 +271,7 @@ public final class GpuHistogram {
                                    int64 ngroups, int64 begin, int64 count, int64 rows,
                                    int64 nf, int64 nbins) {
         uint32 words = (uint32) ((int64) 2 * nbins + (int64) 2);
-        zeroRange.launch(s, grid: [(words + 255) / 256], block: [256])(hist, (uint32) base, words);
+        Fill.rangeOn<int64>(s, hist, base, (int64) words, (int64) 0);
         uint32 tiles = (uint32) ((count + rows - (int64) 1) / rows);
         if (tiles > 0) {
             histTiles.launch(s, grid: [tiles, (uint32) ngroups], block: [256])
@@ -470,12 +472,6 @@ public final class GpuHistogram {
         }
     }
 
-    /** Zeroes words `[base, base + n)` of `buf`. */
-    @Kernel
-    public static void zeroRange(KernelBuffer<int64> buf, uint32 base, uint32 n) {
-        uint32 i = KernelThread.globalIdX();
-        if (i < n) { buf[base + i] = (int64) 0; }
-    }
 
     /** Sibling subtraction over one slot: `store[out + i] = store[parent + i] - store[built + i]`. */
     @Kernel
@@ -485,19 +481,7 @@ public final class GpuHistogram {
         if (i < words) { store[out + i] = store[parent + i] - store[built + i]; }
     }
 
-    /** Copies the first `n` words of `src` into `dst`. */
-    @Kernel
-    public static void copyWords(KernelBuffer<int64> dst, KernelBuffer<int64> src, uint32 n) {
-        uint32 i = KernelThread.globalIdX();
-        if (i < n) { dst[i] = src[i]; }
-    }
 
-    /** Zeroes the first `n` words of `buf`. */
-    @Kernel
-    public static void zeroWords(KernelBuffer<int64> buf, uint32 n) {
-        uint32 i = KernelThread.globalIdX();
-        if (i < n) { buf[i] = (int64) 0; }
-    }
 
     /**
      * Per split `j` of a level: the smaller child is built in the new slot of
@@ -642,8 +626,7 @@ public final class GpuHistogram {
     /** Copies the first `n` words of `src` into `dst`, and waits. */
     static void copyInto(KernelBuffer<int64> dst, KernelBuffer<int64> src, int64 n, TransferLog log) {
         KernelStream s #= KernelStream.current();
-        uint32 un = (uint32) n;
-        copyWords.launch(s, grid: [(un + 255) / 256], block: [256])(dst, src, un);
+        Copy.on<int64>(s, dst, src, n);
         log.sync(s);
         return;
     }
@@ -669,7 +652,7 @@ public final class GpuHistogram {
                               KernelBuffer<int64> q, KernelBuffer<int32> ridx, int64 begin,
                               int64 count, int64 nf, int64 nbins) {
         uint32 words = (uint32) ((int64) 2 * nbins + (int64) 2);
-        zeroRange.launch(s, grid: [(words + 255) / 256], block: [256])(hist, (uint32) base, words);
+        Fill.rangeOn<int64>(s, hist, base, (int64) words, (int64) 0);
         uint32 cells = (uint32) (count * nf);
         if (cells > 0) {
             histSegment.launch(s, grid: [(cells + 63) / 64], block: [64])
